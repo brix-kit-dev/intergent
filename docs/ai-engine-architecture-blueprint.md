@@ -250,6 +250,7 @@ engine/            Maven 多模块
   adapters/        适配器（L0）：model-anthropic、model-google、model-openai-compat、
                    store-postgres、store-kingbase、blob-s3、host-http 等
   app/             极薄启动入口，api、worker、migrate、admin 四个角色
+  guard/           架构守卫：用 ArchUnit 检查红线，只在构建时运行
 sdk/
   java/            Java SDK（L5），Brix 也用它
   typescript/      TypeScript SDK（L5），由契约生成
