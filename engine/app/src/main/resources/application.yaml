@@ -1,0 +1,10 @@
+# Blueprint 12.6: bind to localhost only and stay off the ports Brix holds.
+server:
+  address: 127.0.0.1
+  port: 18080
+spring:
+  main:
+    banner-mode: "off"
+  threads:
+    virtual:
+      enabled: true

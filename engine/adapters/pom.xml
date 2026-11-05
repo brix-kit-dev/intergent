@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>aie</groupId>
+        <artifactId>engine-parent</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>engine-adapters</artifactId>
+    <packaging>pom</packaging>
+    <name>Adapters (L0)</name>
+
+    <!-- Each adapter is a child module of this one and inherits this dependency. -->
+    <dependencies>
+        <dependency>
+            <groupId>aie</groupId>
+            <artifactId>engine-ports</artifactId>
+        </dependency>
+    </dependencies>
+</project>
