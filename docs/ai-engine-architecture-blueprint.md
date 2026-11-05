@@ -772,11 +772,16 @@ models:
     max_data_class: sensitive
     capabilities: [text, vision, tools, structured_output, prompt_cache]
     price: { input: 4, output: 20 }
+  - { id: bedrock-jp/claude-sonnet-5-5, adapter: anthropic, family: claude, max_data_class: personal }
+  - { id: vertex-tokyo/gemini-3-5-flash, adapter: google, family: gemini, max_data_class: personal }
+  - { id: vertex-tokyo/gemini-3-5-flash-lite, adapter: google, family: gemini, max_data_class: personal }
   - id: fake
     adapter: fake
     family: fake
     max_data_class: sensitive  # 本地模拟，数据不出进程
 ```
+
+`id` 的写法是“部署/模型”。同一个模型经不同渠道，处理地区和保留策略可能不同，所以合同属性跟着部署走。
 
 ### 8.4 路由表
 
@@ -785,19 +790,20 @@ models:
 ```yaml
 routes:
   customer_chat:
-    primary: claude-sonnet-5-5
-    fallback: [gemini-3-5-flash-lite]
+    models: [bedrock-jp/claude-sonnet-5-5, vertex-tokyo/gemini-3-5-flash-lite]
     prompts:
       claude: customer_chat/claude/v3
       gemini: customer_chat/gemini/v2
     checks: sentence
   document_translate:
-    allowed: [bedrock-jp/claude-opus-5-5, vertex-tokyo/gemini-3-5-flash]
+    models: [bedrock-jp/claude-opus-5-5, vertex-tokyo/gemini-3-5-flash]
     prompts:
       claude: document_translate/claude/v1
       gemini: document_translate/gemini/v1
     checks: full
 ```
+
+`models` 引用注册表里完整的 `id`，顺序就是优先级，第一个是首选，后面是备用。
 
 ### 8.5 适配器
 
@@ -1005,6 +1011,7 @@ egress_allowlist:
 | 部署时确定 | 租户配置不能覆盖区域包 |
 | 出站白名单 | 网络层兜底，配错了也连不出去 |
 | 能力开关 | 大陆的内容审核、标识是开关，不是分支代码 |
+| 启动校验 | 路由引用的模型和提示词都要存在，每个候选模型的系列都有模板，每个任务都有检查方式。校验不过就拒绝启动，CI 里也跑 |
 
 ### 12.3 部署形态
 
@@ -1268,6 +1275,7 @@ S-8 来自两类教训。一是 LiteLLM：2026 年 3 月攻击者经 CI 里被�
 | **R-1** | 单元无运行时连接 | 跨单元调用数据库或服务 | 配置检查加出站白名单 | 阻止发布 |
 | **R-2** | 区域包不可覆盖 | 租户配置改变模型范围 | 单元测试 | CI 阻断 |
 | **R-3** | 只用通用能力 | 使用未在所有目标数据库上验证的特性 | 双库测试 | 阻止发布 |
+| **R-4** | 区域包能过校验 | 路由引用不存在的模型或提示词；候选模型的系列没有模板；任务没有检查方式 | 区域包校验 | CI 阻断 |
 
 ---
 
