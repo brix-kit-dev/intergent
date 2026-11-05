@@ -172,7 +172,7 @@ flowchart LR
 flowchart TD
     L6["产品层<br/>AI 客服 / 知识库 / 翻译 / 医疗"]
     L5["接入层<br/>SDK / 聊天组件 / 连接器 / MCP"]
-    L4["接口层<br/>REST / SSE / Webhook / 鉴权 / 限流"]
+    L4["接口层<br/>REST / SSE / 鉴权 / 限流"]
     L3["能力模块<br/>conversation / knowledge / document / action"]
     L2["平台核心<br/>AI 网关 / 信任层 / 作业 / 事件 / 租户 / 计量"]
     L1["能力契约（端口）<br/>ModelPort / VectorStorePort / BlobPort 等"]
@@ -244,7 +244,7 @@ engine/            Maven 多模块
   modules/         能力模块（L3）：conversation、knowledge、document、action
   http/            接口层（L4）：REST、SSE、鉴权、限流、版本转换
   adapters/        适配器（L0）：model-anthropic、model-google、model-openai-compat、
-                   store-postgres、store-kingbase、blob-s3 等
+                   store-postgres、store-kingbase、blob-s3、host-http 等
   app/             极薄启动入口，api、worker、migrate、admin 四个角色
 sdk/
   java/            Java SDK（L5），Brix 也用它
@@ -286,7 +286,8 @@ Java 包名和 Maven 命名空间跟随注册到的域名，第一次发布 SDK 
 | `CachePort` | 缓存和限流计数 | Redis 协议，本地用内存 | 无 |
 | `ModerationPort` | 输入输出内容审核 | 基础规则 | 大陆内容安全服务 |
 | `RedactionPort` | 个人信息遮盖和还原 | 规则匹配 | 专用服务 |
-| `ActionTransportPort` | 回调宿主 | HTTP | MCP |
+| `ActionTransportPort` | 调用宿主动作 | HTTP | MCP |
+| `WebhookPort` | 投递事件到宿主 | HTTP | 无 |
 | `NotifyPort` | 验证码、人工回复 | 邮件 | 短信、LINE、企业微信 |
 | `SecretPort` | 取得密钥 | 环境变量 | KMS、Vault |
 | `TelemetryPort` | 追踪、指标、模型调用记录 | OpenTelemetry | 无 |
@@ -513,7 +514,7 @@ sequenceDiagram
 | 业务标识 | 订单号这类标识有两种来源。宿主在 `POST /v1/sessions` 时绑定到上下文的，模型改不了；用户在对话里说出来的，由模型放进 `arguments`，一律不可信。上下文随令牌下发到浏览器，不放机密 |
 | 回调签名 | 和 Webhook 相同（6.7），签名覆盖 `identity`、上下文和 `arguments`，带时间戳防重放 |
 | 宿主终审 | 宿主用 `identity` 再校验一次权限，比如这个订单是不是这个用户的。引擎的校验不能替代它 |
-| 防 SSRF | 地址只能是声明时校验过的白名单域名，禁止内网地址 |
+| 防 SSRF | 地址必须是 https 域名，不接受 IP。声明时校验，每次连接时再校验解析出的 IP，禁止内网、回环、云元数据地址，不跟随重定向。只在声明时校验挡不住 DNS 重绑定 |
 | 结果限制 | 限时、限大小，结果视为不可信 |
 
 ### 6.7 Webhook
@@ -521,6 +522,16 @@ sequenceDiagram
 遵循 [Standard Webhooks](https://www.standardwebhooks.com/)：HMAC 签名、时间戳防重放、支持轮换密钥。它的兼容实现列表包含 OpenAI、Anthropic、Google Gemini、Twilio。
 
 投递语义是至少一次。事件带唯一号，宿主按它去重。失败按退避重试，耗尽后可手动重放。
+
+| 规则 | 说明 |
+| --- | --- |
+| 走 `WebhookPort` | `events` 只决定投什么，发送由适配器做。它和 `ActionTransportPort` 共用 `host-http` 适配器，防 SSRF、签名、超时都只实现一次 |
+| 地址校验 | 和动作相同（6.6）。Webhook 由 `worker` 发出，注册内网地址就能让它替人访问云元数据 |
+| 领取、投递、标记分三步 | 短事务领取，事务外投递，短事务标记。发完崩溃会重投，事件号不变 |
+| 领取租约 | 要覆盖这批投递的最长耗时，否则租约过期后别的 `worker` 又领走，正常投递也会重复 |
+| 按租户分开投递 | 一个宿主挂起，只影响它自己。串行投递时，别的租户要等它逐个超时 |
+| 不保证顺序 | 重试和并发都会打乱顺序。宿主按事件里的时间判断 |
+| 轮换签名密钥 | 轮换期间同时带新旧两个签名，宿主用哪个都能验过 |
 
 ### 6.8 与 Brix 的对接
 
@@ -1213,6 +1224,7 @@ Java 也不是全部绿灯，应用中间件的问题见 12.7。
 | **A-14** | 事务内无外部调用 | 事务内调用模型、宿主、文件存储 | 运行时断言、集成测试 | CI 阻断 |
 | **A-15** | 信任检查绕不过去 | 网关跳过输入或输出检查调用模型；任务没有配置检查方式；`trust` 依赖 `gateway` | 集成测试、区域包校验、ArchUnit | CI 阻断 |
 | **A-16** | 流式可靠 | 消息没有结束事件；续传重复或丢事件；同一个键重复生成；SDK 遇到未知事件报错 | 契约测试 | CI 阻断 |
+| **A-17** | 出站 HTTP 只在适配器 | 适配器之外直接发 HTTP | ArchUnit | CI 阻断 |
 
 ### 16.2 安全红线（S-x）
 
@@ -1224,7 +1236,7 @@ Java 也不是全部绿灯，应用中间件的问题见 12.7。
 | **S-4** | 模型不直接触发不可逆动作 | `money` 动作绕过确认 | 集成测试 | CI 阻断 |
 | **S-5** | 浏览器没有长期密钥 | 组件持有服务端密钥 | 代码检查 | CI 阻断 |
 | **S-6** | 日志先脱敏 | `sensitive` 内容进日志或追踪 | 测试加抽检 | 阻止发布 |
-| **S-7** | 回调地址受控 | 宿主动作指向内网或未校验的地址 | 单元测试 | CI 阻断 |
+| **S-7** | 回调地址受控 | 宿主动作或 Webhook 的地址是 IP、内网或未校验的地址；连接时不校验解析出的 IP；跟随重定向 | 单元测试、集成测试 | CI 阻断 |
 | **S-8** | 依赖可追溯 | 依赖未固定版本；CI 工具未固定版本；引入发布未满 7 天的版本；未经批准运行依赖的构建脚本 | Maven 版本检查、锁文件和 pnpm 配置检查 | CI 阻断 |
 | **S-9** | 依赖许可受控 | 引擎镜像含 GPL、AGPL 类依赖 | 许可扫描 | CI 阻断 |
 | **S-10** | 接口按调用方授权 | 接口没有声明调用方；浏览器令牌能调服务端接口 | 契约测试 | CI 阻断 |
