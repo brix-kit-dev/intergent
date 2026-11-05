@@ -715,19 +715,19 @@ Brix 的金仓支持目前只有 `DatabaseDialect` 枚举和驱动类名映射�
 
 | 角色 | 谁用 | 权限 |
 | --- | --- | --- |
-| `engine_owner` | `migrate` | 拥有表。运行时不用 |
+| `engine_owner` | `migrate` | 拥有表。运行时不用。它是 `engine_system` 的成员，用来移交函数，但必须设 `NOINHERIT`，否则继承读取策略，无上下文也能读租户表和密钥表 |
 | `engine_app` | `api`、`worker`、`admin` | 不是表所有者。业务表受行级安全限制，只能调用名单里的系统函数 |
 | `engine_system` | 系统函数的所有者，不能登录 | 靠表上的专用策略和列权限，只读系统函数要用的列 |
 
 | 规则 | 说明 |
 | --- | --- |
-| 角色在开通单元时创建 | 由数据库管理员创建，所以 `migrate` 不需要超级用户权限 |
+| 角色在开通单元时创建 | 由数据库管理员创建，所以 `migrate` 不需要超级用户权限。`engine_owner` 设了 `NOINHERIT`，建表权限要显式授予 |
 | 不用 `BYPASSRLS` | 运行时角色都没有。`engine_system` 也受行级安全限制，能读什么由策略和列权限逐项放开 |
 | 系统事务没有租户 | `DatabasePort` 的系统事务不写租户上下文，所以业务表照样读不到，只能调系统函数、读系统表 |
 | 入口受限 | 只有 `tenancy`、`events` 能开系统事务 |
-| 系统函数有名单 | `SECURITY DEFINER`，固定 `search_path`，不对 PUBLIC 开放。不固定 `search_path` 时，调用方用同名临时表就能骗过函数 |
+| 系统函数有名单 | `SECURITY DEFINER`，固定 `search_path`，不对 PUBLIC 开放。不固定 `search_path` 时，调用方用同名临时表就能骗过函数。先撤销 PUBLIC 权限再移交所有者：移交之后 `engine_owner` 再撤销不报错，但不起作用 |
 | 系统表有名单 | 系统表不放业务内容。作业调度表只放租户号和作业号，内容放业务表。Flyway 的历史表也算系统表 |
-| 启动自检 | `api`、`worker`、`admin` 启动时确认当前数据库角色不是超级用户、没有 `BYPASSRLS`、不拥有表，否则拒绝启动。用超级用户连接时行级安全完全失效 |
+| 启动自检 | `api`、`worker`、`admin` 启动时确认当前数据库角色不是超级用户、没有 `BYPASSRLS`、不拥有表、不是 `engine_system` 的成员，否则拒绝启动。用超级用户连接时行级安全完全失效 |
 | 数据迁移 | 表所有者也受 `FORCE` 限制，不解除就静默更新 0 行。`migrate` 连接设 `row_security = off`，忘了解除时直接报错 |
 
 ### 7.7 数据分类与备份
@@ -1303,7 +1303,7 @@ S-8 来自两类教训。一是 LiteLLM：2026 年 3 月攻击者经 CI 里被�
 | **T-2** | 隔离默认拒绝 | 没有租户上下文时能读到数据 | 跨租户测试 | CI 阻断 |
 | **T-3** | 不跨租户用数据 | 用一个租户的数据优化另一个租户 | 代码检查 | 阻止发布 |
 | **T-4** | 资源有上限 | 没有预算和并发限制的调用路径 | 集成测试 | CI 阻断 |
-| **T-5** | 系统路径受控 | 系统函数不在名单里、没有固定 `search_path` 或对 PUBLIC 开放；运行时数据库角色是超级用户、有 `BYPASSRLS` 或拥有表；`tenancy`、`events` 之外开系统事务 | 迁移检查、启动自检、ArchUnit | CI 阻断 |
+| **T-5** | 系统路径受控 | 系统函数不在名单里、没有固定 `search_path` 或对 PUBLIC 开放；运行时数据库角色是超级用户、有 `BYPASSRLS`、拥有表或是 `engine_system` 的成员；`engine_owner` 没设 `NOINHERIT`；`engine_system` 能登录；`tenancy`、`events` 之外开系统事务 | 迁移检查、启动自检、ArchUnit | CI 阻断 |
 | **T-6** | 备份能恢复 | 恢复后行数对不上、隔离失效，或已删除的用户回来了 | 恢复演练 | 阻止发布 |
 
 ### 16.4 区域红线（R-x）
