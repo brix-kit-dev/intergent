@@ -49,6 +49,7 @@
                 <artifactId>spring-boot-maven-plugin</artifactId>
                 <configuration>
                     <mainClass>aie.app.EngineApplication</mainClass>
+                    <includeTools>false</includeTools>
                 </configuration>
                 <executions>
                     <execution>

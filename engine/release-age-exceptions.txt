@@ -1,0 +1,2 @@
+# S-8: versions allowed in before they are 7 days old. Only for emergency security patches a person approved.
+# One line each: group:artifact:version  approval-date  approver  reason
