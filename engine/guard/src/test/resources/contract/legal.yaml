@@ -1,0 +1,270 @@
+openapi: 3.1.0
+info:
+  title: Sample
+  version: "2026-11-05"
+security:
+  - apiKey: []
+paths:
+  /v1/sessions:
+    parameters:
+      - $ref: "#/components/parameters/EngineVersion"
+      - $ref: "#/components/parameters/Traceparent"
+    post:
+      operationId: createSession
+      x-callers: [server]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSessionRequest"
+      responses:
+        "201":
+          description: Created.
+          headers:
+            Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/anonymous-sessions:
+    parameters:
+      - $ref: "#/components/parameters/EngineVersion"
+      - $ref: "#/components/parameters/Traceparent"
+    post:
+      operationId: createAnonymousSession
+      x-callers: [browser]
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "201":
+          description: Created.
+          headers:
+            Request-Id:
+              $ref: "#/components/headers/RequestId"
+  /v1/conversations/{conversation_id}/messages:
+    parameters:
+      - $ref: "#/components/parameters/EngineVersion"
+      - $ref: "#/components/parameters/Traceparent"
+      - name: conversation_id
+        in: path
+        required: true
+        schema:
+          $ref: "#/components/schemas/ConversationId"
+    get:
+      operationId: listMessages
+      x-callers: [server, browser]
+      security:
+        - apiKey: []
+        - sessionToken: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            maximum: 100
+        - name: cursor
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: A page.
+          headers:
+            Request-Id:
+              $ref: "#/components/headers/RequestId"
+            X-Page-Count:
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageList"
+  /v1/api-keys/{key_id}:
+    parameters:
+      - $ref: "#/components/parameters/EngineVersion"
+      - $ref: "#/components/parameters/Traceparent"
+    delete:
+      operationId: deleteApiKey
+      x-callers: [server]
+      responses:
+        "204":
+          description: Gone.
+          headers:
+            Request-Id:
+              $ref: "#/components/headers/RequestId"
+x-stream-events:
+  message.started:
+    $ref: "#/components/schemas/Message"
+  message.delta:
+    $ref: "#/components/schemas/DeltaEvent"
+  message.citation:
+    $ref: "#/components/schemas/Message"
+  tool.started:
+    $ref: "#/components/schemas/Message"
+  tool.finished:
+    $ref: "#/components/schemas/Message"
+  handoff.requested:
+    $ref: "#/components/schemas/Message"
+  message.completed:
+    $ref: "#/components/schemas/Message"
+  message.blocked:
+    $ref: "#/components/schemas/Message"
+  message.cancelled:
+    $ref: "#/components/schemas/Message"
+  error:
+    $ref: "#/components/schemas/Problem"
+components:
+  parameters:
+    EngineVersion:
+      name: Engine-Version
+      in: header
+      schema:
+        type: string
+    Traceparent:
+      name: traceparent
+      in: header
+      schema:
+        type: string
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      schema:
+        type: string
+  headers:
+    RequestId:
+      required: true
+      schema:
+        type: string
+    RetryAfter:
+      required: true
+      schema:
+        type: integer
+  responses:
+    BadRequest:
+      description: Bad.
+      headers:
+        Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    RateLimited:
+      description: Limited.
+      headers:
+        Request-Id:
+          $ref: "#/components/headers/RequestId"
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+  schemas:
+    ConversationId:
+      type: string
+      pattern: "^conv_[0-9A-Za-z]+$"
+    ExternalUserId:
+      type: string
+      maxLength: 255
+    ErrorCode:
+      type: string
+      x-extensible-enum:
+        - invalid_request
+        - unauthorized
+        - budget_exceeded
+        - forbidden
+        - not_found
+        - idempotency_key_in_use
+        - stream_expired
+        - idempotency_key_reused
+        - input_blocked
+        - no_eligible_model
+        - action_schema_invalid
+        - rate_limited
+        - model_unavailable
+        - output_blocked
+        - model_failed
+        - stream_interrupted
+    Problem:
+      type: object
+      required: [type, title, status, code]
+      properties:
+        type:
+          type: string
+        title:
+          type: string
+        status:
+          type: integer
+        code:
+          $ref: "#/components/schemas/ErrorCode"
+    CreateSessionRequest:
+      type: object
+      required: [external_user_id]
+      properties:
+        external_user_id:
+          allOf:
+            - $ref: "#/components/schemas/ExternalUserId"
+          description: Whose session.
+        tier:
+          type: string
+          enum: [free, paid]
+        labels:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+        notes:
+          type: object
+          additionalProperties:
+            type: string
+            maxLength: 100
+    Session:
+      type: object
+      required: [token, expires_at]
+      properties:
+        token:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+        level:
+          type: string
+          x-extensible-enum: [anonymous, verified]
+    Message:
+      type: object
+      required: [id, parent]
+      properties:
+        id:
+          type: string
+        parent:
+          type: [string, "null"]
+        replies:
+          type: array
+          items:
+            $ref: "#/components/schemas/Message"
+    DeltaEvent:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+    MessageList:
+      type: object
+      required: [data, next_cursor]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Message"
+        next_cursor:
+          type: [string, "null"]

@@ -1,6 +1,7 @@
 # S-9: license names, as POMs write them, that a jar inside engine.jar may carry.
 # A jar passes when at least one of its licenses is listed. A name not listed here fails.
 # Never list GPL, AGPL or LGPL: the engine is closed source and is delivered to customers.
+allow Apache License 2.0
 allow Apache License, Version 2.0
 allow Apache-2.0
 allow EPL 2.0

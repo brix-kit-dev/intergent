@@ -55,13 +55,14 @@ curl http://127.0.0.1:18080/healthz
 
 | 目录 | 层 | 可依赖 |
 | --- | --- | --- |
+| `contracts` | 公开 API 的契约 | 无 |
 | `engine/ports` | 能力契约（L1） | 无 |
 | `engine/core` | 平台核心（L2） | `ports` |
 | `engine/modules` | 能力模块（L3） | `core`、`ports` |
 | `engine/http` | 接口层（L4） | `modules`、`core` |
 | `engine/adapters` | 适配器（L0），每个适配器是它的子模块，目前还没有 | `ports` |
 | `engine/app` | 启动入口 | 引擎内所有层 |
-| `engine/guard` | 架构守卫和依赖检查，只在构建时运行 | 不进运行时 |
+| `engine/guard` | 架构守卫、依赖检查和契约检查，只在构建时运行 | 不进运行时 |
 
 内部包名以 `aie` 开头，和目录对应，如 `aie.core`、`aie.http`。
 
@@ -91,6 +92,36 @@ curl http://127.0.0.1:18080/healthz
 - **第三方类的替身：** `src/test/java` 下 `aie` 和 `sample` 以外的目录都是空壳，只为让样例能编译。
 - **跳过的测试：** `DatabasePort` 建好前，构建里有 1 个跳过的测试。它确认 `A-4-tx`、`T-5` 依赖的名字真实存在。
 - **SDK 和产品：** 它们还没有代码，`A-18-outside`、`A-18-sdk` 目前只在样例上运行。
+
+## 对外契约
+
+[contracts/openapi.yaml](contracts/openapi.yaml) 是公开 API 的唯一源头，用 OpenAPI 3.1 写。现在有公共约定、身份和对话，其他资源做到时再加。接口还没有实现，`/v1` 下的路径目前都返回 404。
+
+改接口时先改这个文件。`engine/http` 构建时从它生成 Java 接口和数据类型，包名是 `aie.http.api`。实现类写成生成接口的实现，契约一变，对不上的代码就编译不过。
+
+`mvn verify` 检查下面这些规则：
+
+| 规则 | 禁止什么 |
+| --- | --- |
+| `S-10` | 接口没写 `x-callers`；`x-callers` 和凭证对不上，比如浏览器令牌能调服务端接口；接口不要凭证，匿名会话除外 |
+| `A-7` | 和基线相比有破坏性差异 |
+| `A-8` | POST 不接受 `Idempotency-Key` |
+| `A-11` | 路径像模型直通，如 `/v1/chat/completions`；请求里有 `model`、`temperature` 这类模型设置 |
+| 蓝图 6.2 | 路径不在 `/v1` 下；缺 `Engine-Version` 或 `traceparent`；响应没有 `Request-Id`；错误不是 `application/problem+json`；列表用页码；ID 没有类型前缀；字段不是蛇形命名；时间不是 `date-time`；响应里用了封闭枚举 |
+| 蓝图 6.4、6.10 | 事件或错误码和蓝图的表不一致 |
+| `Q-3` | 契约里出现产品名 |
+
+这些规则写在 `engine/guard/src/main/java/aie/guard/contract`，测试样例是 `engine/guard/src/test/resources/contract/legal.yaml`。
+
+**破坏性差异：** 基线是 `contracts/baseline.yaml`。按蓝图 6.2，新增字段、可选参数、事件类型和枚举值都不算破坏性，删除、改名算。收紧请求的限制也算。含义变了从文件上看不出来，要靠评审。
+
+**更新基线：** 基线只有两种情况才改。发布新的日期版本时，把 `openapi.yaml` 复制过去，让新增的内容也受保护。确实要做破坏性变更时，先得到批准，再更新基线。
+
+**枚举：** 响应里写 `x-extensible-enum`，不写 `enum`，这样新增值不会让客户端出错。请求里可以用 `enum`。
+
+**流式事件：** 写在 `x-stream-events`。事件名就是 SSE 的 `event`，它的内容是 `data` 里的 JSON。
+
+**流式接口：** 生成的方法只覆盖 JSON。`text/event-stream` 那一路要手写，第 7 点做。
 
 ## CI 和依赖规则
 
