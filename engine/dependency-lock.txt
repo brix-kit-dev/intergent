@@ -168,6 +168,8 @@ a4dbfc51c90005ad6ac9967672a7efb43aa6928287a57238b28e60e0a75c5c6f  com/tngtech/ar
 9cb67cd704b6cb3be76ffa7fe2a028f3b676fa9cb489de61aa91d324f3af6933  com/tngtech/archunit/archunit/1.5.1/archunit-1.5.1.pom
 dfb7bae2f404cfe0b72b4d23944698cb716b7665171812a0a4d0f5926c0fac79  com/vaadin/external/google/android-json/0.0.20131108.vaadin1/android-json-0.0.20131108.vaadin1.jar
 2ff6c17d9c060b89cd7ef18fa480ae2446eba86855a633f3892837fc3b848fef  com/vaadin/external/google/android-json/0.0.20131108.vaadin1/android-json-0.0.20131108.vaadin1.pom
+f1e612fa27345be3107a85431e8a8aeb205c15364ab2f2d411e40a9d7bb08095  com/zaxxer/HikariCP/7.0.2/HikariCP-7.0.2.jar
+662a87f80487be89bd77296213e91108ff9f01ed0d9a90f9a4e21263cc49e73e  com/zaxxer/HikariCP/7.0.2/HikariCP-7.0.2.pom
 1b273d92160b9fa69c3e65389a5c4decd2f38a697e458e6f75080ae09e886404  commons-cli/commons-cli/1.10.0/commons-cli-1.10.0.jar
 de31b1b1af9858292557e8e30dc6319d0c55568beba76bdc86ec05a97e0cff69  commons-cli/commons-cli/1.10.0/commons-cli-1.10.0.pom
 e599d5318e97aa48f42136a2927e6dfa4e8881dff0e6c8e3109ddbbff51d7b7d  commons-codec/commons-codec/1.11/commons-codec-1.11.jar
@@ -758,8 +760,12 @@ ff218b827a25c9e8929b0cd56dfb56916cea9d5b669ed97dc7cb262508ff548b  org/springfram
 d0ac675cf4da02b56a5cb3140f533ba7dd7d95b9f1c6d69ad49492b17c83584e  org/springframework/spring-expression/7.0.9/spring-expression-7.0.9.pom
 f6d481093e75767cba1ac7e1db38f8f692cbe3e38744693371a75aeb21c6148b  org/springframework/spring-framework-bom/5.3.39/spring-framework-bom-5.3.39.pom
 4565ecf946e47282687067ff5b4d97b66e23cbd9912d7e38241c2149cffc83c0  org/springframework/spring-framework-bom/7.0.9/spring-framework-bom-7.0.9.pom
+ca0d9af1c5721eef8cac1f94c8b9d27a753248bc33c86e3472bd3d1dbd78f450  org/springframework/spring-jdbc/7.0.9/spring-jdbc-7.0.9.jar
+f29554e6fb1a353aaf83efab35b84f49405eb499f89bab03af1ff8e17381b5f0  org/springframework/spring-jdbc/7.0.9/spring-jdbc-7.0.9.pom
 6ce8fc116f5d309b9ac50a6738bd1b15ea4012a4a5563c0ee89b795bfc9af0dc  org/springframework/spring-test/7.0.9/spring-test-7.0.9.jar
 cb24a320511fed8bfdc113c6230cfcbcef3f4c241c77a1e150b2f3b1849ee799  org/springframework/spring-test/7.0.9/spring-test-7.0.9.pom
+bfb15da6e096e2c0752e9db9987d2415bf0da1d744efc988535c10c6b6c2eedd  org/springframework/spring-tx/7.0.9/spring-tx-7.0.9.jar
+c5a36e0f99c40608fa3a6d308b983d04f4a8a5802d005c0c42f8ad1650b83fe3  org/springframework/spring-tx/7.0.9/spring-tx-7.0.9.pom
 941ced476427bde2533872f293da535fd0258de3f3a650a7f1bfe01ed2927302  org/springframework/spring-web/7.0.9/spring-web-7.0.9.jar
 d4dcffdbbf8714ace6304c6d12bfe0e2ccd365809e98ba6288763dd933bb0962  org/springframework/spring-web/7.0.9/spring-web-7.0.9.pom
 8f114c1461692c5e534e82b27de23b7fb23370db8dee7ce0c92d5106906c9555  org/springframework/spring-webmvc/7.0.9/spring-webmvc-7.0.9.jar

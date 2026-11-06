@@ -41,6 +41,13 @@ docker compose -f deploy/dev/compose.yaml down -v
 
 数据库测试不用这个容器。Testcontainers 每次起一个临时数据库，用同一个镜像和同一个脚本，端口只绑定 `127.0.0.1`。
 
+模块写自己的 SQL，通过 `aie.ports.DatabasePort` 执行。适配器 `store-postgres` 按蓝图 5.5 保证：
+
+- 开启事务必须给出租户，租户号只在这个事务里有效。系统路径用 `inSystemTx`，它不带租户，业务表读出来是空的。
+- 事务不能嵌套。
+- 事务结束后，或者换一个线程，`Tx` 就不能再用，否则语句会跑在事务外面。
+- 事务有超时。
+
 ## 启动
 
 一个程序包，多种角色，用 `--role` 选择：
@@ -80,7 +87,7 @@ curl http://127.0.0.1:18080/healthz
 | `engine/core` | 平台核心（L2） | `ports` |
 | `engine/modules` | 能力模块（L3） | `core`、`ports` |
 | `engine/http` | 接口层（L4） | `modules`、`core` |
-| `engine/adapters` | 适配器（L0），每个适配器是它的子模块。`store-postgres` 目前只有测试 | `ports` |
+| `engine/adapters` | 适配器（L0），每个适配器是它的子模块。现有 `store-postgres` | `ports` |
 | `engine/app` | 启动入口 | 引擎内所有层 |
 | `engine/guard` | 架构守卫、依赖检查和契约检查，只在构建时运行 | 不进运行时 |
 
@@ -110,7 +117,7 @@ curl http://127.0.0.1:18080/healthz
 - **检查范围：** 从磁盘读取 `engine` 下每个模块编译出的类。有源文件却没有编译结果时构建失败，所以新模块漏不掉。
 - **规则本身的测试：** `engine/guard/src/test/java/sample` 是一份模拟的引擎代码。不带标记的类必须全部通过，带 `@Violates` 的类必须正好违反它声明的规则。没有违规样例的规则会让测试失败。
 - **第三方类的替身：** `src/test/java` 下 `aie` 和 `sample` 以外的目录都是空壳，只为让样例能编译。
-- **跳过的测试：** `DatabasePort` 建好前，构建里有 1 个跳过的测试。它确认 `A-4-tx`、`T-5` 依赖的名字真实存在。
+- **规则依赖的名字：** `A-4-tx`、`T-5` 按名字匹配 `aie.ports.Tx` 和 `inSystemTx`，改名时有测试失败。
 - **SDK 和产品：** 它们还没有代码，`A-18-outside`、`A-18-sdk` 目前只在样例上运行。
 
 ## 对外契约
