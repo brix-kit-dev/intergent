@@ -21,10 +21,10 @@ import org.testcontainers.utility.DockerImageName;
 import org.testcontainers.utility.MountableFile;
 
 /** A throwaway database set up the way a cell is: same image as the dev database, same role script. */
-final class TestDatabase {
+public final class TestDatabase {
 
-    static final String OWNER_PASSWORD = "owner-test-password";
-    static final String APP_PASSWORD = "app-test-password";
+    public static final String OWNER_PASSWORD = "owner-test-password";
+    public static final String APP_PASSWORD = "app-test-password";
 
     private static final Pattern IMAGE = Pattern.compile("(?m)^\\s*image:\\s*(\\S+)");
     static final String LOCALHOST = "127.0.0.1";
@@ -34,7 +34,7 @@ final class TestDatabase {
     private TestDatabase() {
     }
 
-    static PostgreSQLContainer container() {
+    public static PostgreSQLContainer container() {
         return new PostgreSQLContainer(DockerImageName.parse(devImage()).asCompatibleSubstituteFor("postgres"))
                 .withDatabaseName("engine")
                 .withUsername("postgres")
@@ -47,7 +47,7 @@ final class TestDatabase {
         command.getHostConfig().withPortBindings(new PortBinding(Ports.Binding.bindIp(LOCALHOST), ExposedPort.tcp(PostgreSQLContainer.POSTGRESQL_PORT)));
     }
 
-    static ExecResult createRoles(PostgreSQLContainer database, String... variables) throws IOException, InterruptedException {
+    public static ExecResult createRoles(PostgreSQLContainer database, String... variables) throws IOException, InterruptedException {
         List<String> command = new ArrayList<>(List.of("psql", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "engine"));
         for (String variable : variables) {
             command.add("-v");
@@ -58,11 +58,11 @@ final class TestDatabase {
         return database.execInContainer(command.toArray(String[]::new));
     }
 
-    static Connection connect(PostgreSQLContainer database, String user, String password) throws SQLException {
+    public static Connection connect(PostgreSQLContainer database, String user, String password) throws SQLException {
         return DriverManager.getConnection(database.getJdbcUrl(), user, password);
     }
 
-    static Connection admin(PostgreSQLContainer database) throws SQLException {
+    public static Connection admin(PostgreSQLContainer database) throws SQLException {
         return connect(database, database.getUsername(), database.getPassword());
     }
 

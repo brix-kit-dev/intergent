@@ -212,6 +212,7 @@ fbe9f83528b2779be9db1a1fb37e41684de24835af6558aaf25d73723d41da5f  io/micrometer/
 eb34f0cd84a879393ae5c21160fc06385ccdc74f36a4d1e31b199f59acfdaf71  io/micrometer/micrometer-observation/1.17.1/micrometer-observation-1.17.1.jar
 af6167ebad3cf1c2eef590a5e567d5342245b8aa2b0ded93ca04fffc466225cc  io/micrometer/micrometer-observation/1.17.1/micrometer-observation-1.17.1.pom
 34fd5628eda9c82d41842f5b11e7cc5a9503cbf44fe73f50ce84eab9b050242c  io/micrometer/micrometer-tracing-bom/1.7.1/micrometer-tracing-bom-1.7.1.pom
+4b1eac8791c931a33d9e2fb8c083432552cf87469db419b7d2434178e34f070c  io/netty/netty-bom/4.2.12.Final/netty-bom-4.2.12.Final.pom
 0951aa35bdcbf6dbc87af75a67e9af43c01687ed571f77c2e9195417c3afe969  io/netty/netty-bom/4.2.17.Final/netty-bom-4.2.17.Final.pom
 44fcba73912b950d3ec88129e38e03c181b975f5b5ee73d7bab7866a4b376c50  io/opentelemetry/opentelemetry-bom/1.49.0/opentelemetry-bom-1.49.0.pom
 d854f79a86be682184cf1d7f721fa74483dc7234a8434172ccf843036a344f98  io/opentelemetry/opentelemetry-bom/1.62.0/opentelemetry-bom-1.62.0.pom
@@ -567,6 +568,11 @@ b90579bc652eac7331436e0a25533fce14130b9c6e015f2dd3a3d4bb07e942b7  org/eclipse/si
 90b4be7a71c979d0c4dea20c20a28eb9e76a29df68ab9018cf011019a3e4f562  org/eclipse/sisu/org.eclipse.sisu.plexus/0.9.0.M4/org.eclipse.sisu.plexus-0.9.0.M4.pom
 0c829c9641ccac870d7d7ff012cbbad8447e912eb9a26d0d7283f09cba44c0d9  org/eclipse/sisu/sisu-inject/0.9.0.M4/sisu-inject-0.9.0.M4.pom
 ec6e99407036014f81a39d81c56ba40d924c72d96e402ad14f7efd29b2c775cd  org/eclipse/sisu/sisu-plexus/0.9.0.M2/sisu-plexus-0.9.0.M2.pom
+c3f93df1f3e0c9d14652adb5ade97401f2ede503859ac693c2af5c06e2797799  org/flywaydb/flyway-core/12.4.0/flyway-core-12.4.0.jar
+31432b9590cfeaf495603eeb7c86e52061a4a8b9cca1331b4df167ed4b2285be  org/flywaydb/flyway-core/12.4.0/flyway-core-12.4.0.pom
+abc075a5c3cbf37dc64b28fec7e2398fb14f31109f7ab6271854738797407b85  org/flywaydb/flyway-database-postgresql/12.4.0/flyway-database-postgresql-12.4.0.jar
+e61221d4404382f791988a2ccd9bed83a1ea0b4be4d2d3d906ce4485ee7fa658  org/flywaydb/flyway-database-postgresql/12.4.0/flyway-database-postgresql-12.4.0.pom
+70767d82783ee14e0ac0b7be78a68ebd92308c9bebe5c3f8925d24db4ac54088  org/flywaydb/flyway-parent/12.4.0/flyway-parent-12.4.0.pom
 1233e0d0e57d7d20b311de46364f611782d096a324a4fb4acc40c55157a182e7  org/glassfish/jersey/jersey-bom/4.0.2/jersey-bom-4.0.2.pom
 5d66b6a4a680755cb6ed7cb104fa7835ef644667586ff0737adeb977c39ecdbc  org/hamcrest/hamcrest/3.0/hamcrest-3.0.jar
 4a04a68133bf32461f47b8a53c8ee9df4ce2f49a0dad9794bce8717bee5bac31  org/hamcrest/hamcrest/3.0/hamcrest-3.0.pom

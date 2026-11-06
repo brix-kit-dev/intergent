@@ -1,0 +1,3 @@
+ALTER TABLE alpha_items NO FORCE ROW LEVEL SECURITY;
+UPDATE alpha_items SET note = 'changed';
+ALTER TABLE alpha_items FORCE ROW LEVEL SECURITY;

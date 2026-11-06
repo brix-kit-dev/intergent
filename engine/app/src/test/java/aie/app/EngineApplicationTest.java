@@ -19,7 +19,7 @@ class EngineApplicationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"worker", "migrate", "admin"})
+    @ValueSource(strings = {"worker", "admin"})
     void rolesWithoutAnImplementationSaySo(String role) {
         assertThat(EngineApplication.launch(new String[] {"--role=" + role}))
                 .isEqualTo(EngineApplication.EXIT_NOT_IMPLEMENTED);

@@ -3,6 +3,7 @@ package aie.app;
 /** The only main class. It picks the role and starts it. */
 public final class EngineApplication {
 
+    static final int EXIT_FAILED = 1;
     static final int EXIT_USAGE = 2;
     static final int EXIT_NOT_IMPLEMENTED = 3;
 
@@ -24,11 +25,18 @@ public final class EngineApplication {
             System.err.println(e.getMessage());
             return EXIT_USAGE;
         }
-        if (role != EngineRole.API) {
-            System.err.println("Role " + role.argument() + " is not implemented yet.");
-            return EXIT_NOT_IMPLEMENTED;
-        }
-        ApiRole.start(args);
-        return 0;
+        return switch (role) {
+            case API -> {
+                ApiRole.start(args);
+                yield 0;
+            }
+            case MIGRATE -> MigrateRole.run(args);
+            case WORKER, ADMIN -> notImplemented(role);
+        };
+    }
+
+    private static int notImplemented(EngineRole role) {
+        System.err.println("Role " + role.argument() + " is not implemented yet.");
+        return EXIT_NOT_IMPLEMENTED;
     }
 }

@@ -17,7 +17,7 @@ mvn verify
 
 产物是 `engine/app/target/engine.jar`。
 
-推送前运行完整检查，约 2 分钟。GitHub Actions 运行的是同一个脚本：
+推送前运行完整检查，约 3 分钟。GitHub Actions 运行的是同一个脚本：
 
 ```bash
 engine/verify.sh
@@ -41,12 +41,44 @@ docker compose -f deploy/dev/compose.yaml down -v
 
 数据库测试不用这个容器。Testcontainers 每次起一个临时数据库，用同一个镜像和同一个脚本，端口只绑定 `127.0.0.1`。
 
+建表用 `migrate` 角色。先构建 `engine.jar`，再运行：
+
+```bash
+deploy/dev/migrate.sh
+```
+
 模块写自己的 SQL，通过 `aie.ports.DatabasePort` 执行。适配器 `store-postgres` 按蓝图 5.5 保证：
 
 - 开启事务必须给出租户，租户号只在这个事务里有效。系统路径用 `inSystemTx`，它不带租户，业务表读出来是空的。
 - 事务不能嵌套。
 - 事务结束后，或者换一个线程，`Tx` 就不能再用，否则语句会跑在事务外面。
 - 事务有超时。
+
+## 数据库迁移
+
+迁移脚本放在所属模块的目录里，如 `engine/core/src/main/resources/db/migration/tenancy`。目录名就是模块名，新模块加目录就行，不用登记。每个模块有自己的历史表 `flyway_history_<模块>`，所以版本号互不影响，模块拆走时脚本和历史一起带走。
+
+真实单元这样运行，部署时跑一次：
+
+```bash
+ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_OWNER_PASSWORD=... java -jar engine.jar --role=migrate
+```
+
+`migrate` 总是用 `engine_owner` 连接，地址里写别的用户也不起作用。密码只放环境变量，不写在地址或命令行里。
+
+| 情况 | 结果 |
+| --- | --- |
+| 脚本出错 | 这个脚本整个回滚，退出码 1 |
+| 已执行的脚本被改过 | 校验失败，退出码 1。要改就加一个新脚本 |
+| 文件名不合规 | 报错，不会被跳过 |
+| 一个脚本都没找到 | 报错，防止打包漏了脚本还显示成功 |
+| 数据库里缺 `engine` schema | 报错。它由 `create-roles.sql` 创建，`migrate` 不建 |
+| 表被别的事务锁住 | 等 10 秒就失败，否则请求会排在 `ALTER TABLE` 后面堵住 |
+| 同时跑两个 `migrate` | 后一个等前一个，最多 10 秒，等不到就失败。重跑即可 |
+
+**新表：** 照 `V1__create_tenants.sql` 写，这是蓝图 5.6 的模板：行级安全、`FORCE`、租户策略、授权。有序列时序列也要授权给 `engine_app`。
+
+**改租户表的数据：** 表所有者也受 `FORCE` 限制，所以 `migrate` 连接设了 `row_security = off`，忘了解除时直接报错，不会静默更新 0 行。在同一个脚本里先 `NO FORCE`，改完再 `FORCE`。
 
 ## 启动
 
@@ -63,7 +95,8 @@ curl http://127.0.0.1:18080/healthz
 | 角色 | 现状 |
 | --- | --- |
 | `api` | 提供 HTTP 服务，目前只有 `/healthz` |
-| `worker`、`migrate`、`admin` | 还没实现，打印提示后退出 |
+| `migrate` | 运行数据库迁移，完成后退出 |
+| `worker`、`admin` | 还没实现，打印提示后退出 |
 
 `/healthz` 给运维探活用，不属于公开 API。
 
@@ -72,7 +105,7 @@ curl http://127.0.0.1:18080/healthz
 | 退出码 | 含义 |
 | --- | --- |
 | 0 | 正常结束 |
-| 1 | 启动失败，如端口被占用 |
+| 1 | 启动失败，如端口被占用；迁移失败 |
 | 2 | 角色参数不对：没给、给了多个或不认识 |
 | 3 | 角色还没实现 |
 | 143 | 收到 SIGTERM，处理完请求后退出 |
