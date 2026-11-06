@@ -12,6 +12,10 @@
 
     <artifactId>engine-adapters</artifactId>
     <packaging>pom</packaging>
+
+    <modules>
+        <module>store-postgres</module>
+    </modules>
     <name>Adapters (L0)</name>
 
     <!-- Each adapter is a child module of this one and inherits this dependency. -->

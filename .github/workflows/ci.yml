@@ -16,10 +16,9 @@ jobs:
   verify:
     name: Engine
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    container:
-      image: eclipse-temurin:21.0.12.1_1-jdk-noble@sha256:57424b1d8eca9c4cf8a4fe226207027911f08d6758628891bf59fcfb53777029 # JDK 21.0.12.1, released 2026-10-26
+    timeout-minutes: 25
     env:
+      JDK_SHA256: ce79869e1307ed8ee1e2baa86a412b1eb5b75d10a01006d788a6f968bcfaee94 # Temurin 21.0.12.1, released 2026-08-19
       MAVEN_VERSION: 3.8.7
       MAVEN_SHA256: 628b49352130d1d25d5519b1c724f0efe58b86bad55f37a694ca8f73f11e3604 # Maven 3.8.7, released 2022-12-24
     steps:
@@ -28,12 +27,20 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install JDK
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/jdk.tar.gz" "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_x64_linux_hotspot_21.0.12.1_1.tar.gz"
+          echo "${JDK_SHA256}  $RUNNER_TEMP/jdk.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/jdk.tar.gz" -C "$RUNNER_TEMP"
+          echo "JAVA_HOME=$RUNNER_TEMP/jdk-21.0.12.1+1" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/jdk-21.0.12.1+1/bin" >> "$GITHUB_PATH"
+
       - name: Install Maven
         run: |
-          curl -fsSL -o /tmp/maven.tar.gz "https://repo1.maven.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
-          echo "${MAVEN_SHA256}  /tmp/maven.tar.gz" | sha256sum -c -
-          tar -xzf /tmp/maven.tar.gz -C /opt
-          echo "/opt/apache-maven-${MAVEN_VERSION}/bin" >> "$GITHUB_PATH"
+          curl -fsSL -o "$RUNNER_TEMP/maven.tar.gz" "https://repo1.maven.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          echo "${MAVEN_SHA256}  $RUNNER_TEMP/maven.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/maven.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/apache-maven-${MAVEN_VERSION}/bin" >> "$GITHUB_PATH"
 
       - name: Verify
         run: engine/verify.sh

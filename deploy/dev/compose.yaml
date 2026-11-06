@@ -1,0 +1,27 @@
+# The engine's development database. Name, port and volume stay apart from Brix (blueprint 12.6).
+# Start it with deploy/dev/up.sh, which creates the passwords. Tests use this same image.
+name: aie-dev
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.6-pg17-bookworm@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f # released 2026-08-13
+    container_name: aie-postgres
+    environment:
+      POSTGRES_DB: engine
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run deploy/dev/up.sh}
+      ENGINE_OWNER_PASSWORD: ${ENGINE_OWNER_PASSWORD:?run deploy/dev/up.sh}
+      ENGINE_APP_PASSWORD: ${ENGINE_APP_PASSWORD:?run deploy/dev/up.sh}
+    ports:
+      - "127.0.0.1:15432:5432"
+    volumes:
+      - aie-postgres-data:/var/lib/postgresql/data
+      - ../db/create-roles.sql:/create-roles.sql:ro
+      - ./init/create-roles.sh:/docker-entrypoint-initdb.d/create-roles.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d engine"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  aie-postgres-data:

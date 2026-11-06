@@ -81,6 +81,13 @@ ca70c90a5d1ce1511880ce9c93d4ad22108f61111d3daf91eb52762b571bd179  com/github/ben
 9f704f9083797b4f7d0c1d5c855d34cd268d544cf06b4283d5ce4288acfc9ee0  com/github/ben-manes/caffeine/caffeine/3.2.3/caffeine-3.2.3.pom
 b13b074bf04578a39100417087446648a079e2d626cd841f9794e34e68a6e8ec  com/github/curious-odd-man/rgxgen/1.4/rgxgen-1.4.jar
 af02079a561998d4bbafbca928bc43e6a4a37daeacbecd33881ca93cd5ba4e74  com/github/curious-odd-man/rgxgen/1.4/rgxgen-1.4.pom
+dad153d484b1f4ef009e2fdbad27e07aeb3191122da52b8985507ac504300081  com/github/docker-java/docker-java-api/3.7.1/docker-java-api-3.7.1.jar
+8d3586d7080e0787a7212bed4f6fe11a54d52f9abeeca5f89bee208c6308b16c  com/github/docker-java/docker-java-api/3.7.1/docker-java-api-3.7.1.pom
+78e673434e0e1a4b825863a8fe4d6417f495affdce7b4d308f3774447a73b0ff  com/github/docker-java/docker-java-parent/3.7.1/docker-java-parent-3.7.1.pom
+b89bdb1754160323597f9ea32a7fe7a4a3aa8f5b3b43b88e8d71fff3b267ab21  com/github/docker-java/docker-java-transport-zerodep/3.7.1/docker-java-transport-zerodep-3.7.1.jar
+d72f69b2f40ba791f3b32cab4f165ccc11836ff1811d0533751cf2dcc57495ed  com/github/docker-java/docker-java-transport-zerodep/3.7.1/docker-java-transport-zerodep-3.7.1.pom
+d15eec8034bf0f92c2a48ca9172691804048115c96dc853272f9486fa2695c3c  com/github/docker-java/docker-java-transport/3.7.1/docker-java-transport-3.7.1.jar
+3baef9998eeea238ef4432fe2ce0ff0eeaf90fe8d3a03fd06a5e224814be4916  com/github/docker-java/docker-java-transport/3.7.1/docker-java-transport-3.7.1.pom
 67c3e462eb50807f4e0a5f4dee304bbf17cd986a42ee5eb0b2f4c9bf64d130d9  com/github/java-json-tools/btf/1.3/btf-1.3.jar
 a9bf1b3956e6d46cbdf7379128eb1732cde1ac654097944dc65a1b6dc42570f0  com/github/java-json-tools/btf/1.3/btf-1.3.pom
 eb4a9ad7d803fb084bffcf793c8a81f51d745b6d438c28470ef9d5aa5fb8a182  com/github/java-json-tools/jackson-coreutils-equivalence/1.0/jackson-coreutils-equivalence-1.0.jar
@@ -170,6 +177,8 @@ c1e7140d1dea8fdf3528bc1e3c5444ac0b541297311f45f9806c213ec3ee9a10  commons-codec/
 c01c4cda5e408f41ed1d83e4a0a170cf53801b6338aba49f0f904786bc1214fc  commons-codec/commons-codec/1.17.0/commons-codec-1.17.0.pom
 f9f6cb103f2ddc3c99a9d80ada2ae7bf0685111fd6bffccb72033d1da4e6ff23  commons-codec/commons-codec/1.17.1/commons-codec-1.17.1.jar
 7fa0db4d8150daf932958b8aea89ee24abb4d18e2316a5de535278fc131512a0  commons-codec/commons-codec/1.17.1/commons-codec-1.17.1.pom
+4da851cb6abfb98bfe9eb77c5e5fc47f5414fa28b94e21b7fd9a646705dc167f  commons-codec/commons-codec/1.21.0/commons-codec-1.21.0.jar
+b230416ba6f5bf9df8fcb6e7f4a6c26b8fb0fe85ce371d13d5846ed3768309b7  commons-codec/commons-codec/1.21.0/commons-codec-1.21.0.pom
 961b2f6d87dbacc5d54abf45ab7a6e2495f89b75598962d8c723cea9bc210908  commons-io/commons-io/2.11.0/commons-io-2.11.0.jar
 2e016fd7e3244b5f2c20acad834d93aa4790486ee1e4564641361a3e831eef59  commons-io/commons-io/2.11.0/commons-io-2.11.0.pom
 671eaa39688dac2ffaa4645b3c9980ae2d0ea2471e4ae6a5da199cd15ae23666  commons-io/commons-io/2.13.0/commons-io-2.13.0.jar
@@ -177,6 +186,7 @@ db3fed64c2e1774ebfd6b1a749037732b149b9111dd7e6b985f08dda55470439  commons-io/com
 171a1af82b6759eb5740b3b8809aca80113deaf1153036f2f4445901dfd3f91d  commons-io/commons-io/2.15.1/commons-io-2.15.1.pom
 f41f7baacd716896447ace9758621f62c1c6b0a91d89acee488da26fc477c84f  commons-io/commons-io/2.16.1/commons-io-2.16.1.jar
 5777d292251c7895c04a4c57015683ec3b353a12486c9b3e7178e9b0b3c38fff  commons-io/commons-io/2.16.1/commons-io-2.16.1.pom
+df90bba0fe3cb586b7f164e78fe8f8f4da3f2dd5c27fa645f888100ccc25dd72  commons-io/commons-io/2.20.0/commons-io-2.20.0.jar
 bdbdf81072c190ee9a8b181a5c58f5bd917a750fb13a256debbf53f5dbd33a2a  commons-io/commons-io/2.20.0/commons-io-2.20.0.pom
 6425cec0ea760035efa77277de85f89fa6dbed147ab3dd95b8d2cbc55340accf  commons-io/commons-io/2.22.0/commons-io-2.22.0.pom
 f877d304660ac2a142f3865badfc971dec7ed73c747c7f8d5d2f5139ca736513  commons-io/commons-io/2.6/commons-io-2.6.jar
@@ -278,6 +288,8 @@ b7e3d46c87bad2eb409b0e704916bcd81206168e357312dfddd0e253679cd9e0  net/java/dev/j
 65ff25849bad859554b50317792f5689adb4529ae4031e9a5246319cb2b85356  net/java/dev/jna/jna/5.12.1/jna-5.12.1.pom
 b3a9408e7c51e08ef0e3bfcc08f443f6ec0f6191ba8cd7c18d53d2b22e5bdbc0  net/java/dev/jna/jna/5.17.0/jna-5.17.0.jar
 501a0ff05d84a4ad10f6de25be94f49398b70a31be8f3a0ed9f4c6b44fbefee4  net/java/dev/jna/jna/5.17.0/jna-5.17.0.pom
+260c4b1e22b1db9e110ee441c4f13ce115f841fa48c41d78750986214b395557  net/java/dev/jna/jna/5.18.1/jna-5.18.1.jar
+98b62ae6ff280d747fb359fc42e48fed113d45bc3729a823dc30b8308a806645  net/java/dev/jna/jna/5.18.1/jna-5.18.1.pom
 222c9f547bb20a99fc486403a398352d1306fb671b38abd7ecab6401df170e61  net/minidev/accessors-smart/2.6.0/accessors-smart-2.6.0.jar
 268315791ec661e28614f461212c06181c06a042733428d8ba711f0aad56e9f9  net/minidev/accessors-smart/2.6.0/accessors-smart-2.6.0.pom
 1ae4b561458afb540be8ec5c6dbb4f2e715a319a7ae64854998aaf924770d61b  net/minidev/json-smart/2.6.0/json-smart-2.6.0.jar
@@ -312,6 +324,8 @@ cf475bbf4556bf371d51f36ac60c28c275ae753d857470076f04ff27dc5b9875  org/apache/art
 1428719895cd0a913aee33e2424b9a804b10f1197e5d35a9ce99cf2a1174cb0e  org/apache/commons/commons-compress/1.26.2/commons-compress-1.26.2.pom
 293d80f54b536b74095dcd7ea3cf0a29bbfc3402519281332495f4420d370d16  org/apache/commons/commons-compress/1.27.1/commons-compress-1.27.1.jar
 df8cc1a8387d4ce842363b7209fdc6d35df9763839fd3fcab558a0f83f9d841c  org/apache/commons/commons-compress/1.27.1/commons-compress-1.27.1.pom
+e1522945218456f3649a39bc4afd70ce4bd466221519dba7d378f2141a4642ca  org/apache/commons/commons-compress/1.28.0/commons-compress-1.28.0.jar
+033f4c78d632da88d0eb8ead974fc14a264392cebf12ab6c68d6cea7adf0c64a  org/apache/commons/commons-compress/1.28.0/commons-compress-1.28.0.pom
 82d31f1dcc4583effd744e979165b16da64bf86bca623fc5d1b03ed94f45c85a  org/apache/commons/commons-lang3/3.12.0/commons-lang3-3.12.0.pom
 82f528cf718c7a3c2f30fc5bc784e3c6a0a10b17605dadb9e16c82ede11e6064  org/apache/commons/commons-lang3/3.13.0/commons-lang3-3.13.0.jar
 ff7cea4eb239dd62117510dabe51a8d5f0c9e4cc426bc3e8c2c221a718f86484  org/apache/commons/commons-lang3/3.13.0/commons-lang3-3.13.0.pom
@@ -321,6 +335,7 @@ e280383956c2e72c1deb3a307b3b75f05ee43649b7d43f0215f7b6c7b15eea2c  org/apache/com
 351c6e4940e939b1f330df47f60f13ba383db81ee008181af541f3a2a6d2a56c  org/apache/commons/commons-lang3/3.17.0/commons-lang3-3.17.0.pom
 4eeeae8d20c078abb64b015ec158add383ac581571cddc45c68f0c9ae0230720  org/apache/commons/commons-lang3/3.18.0/commons-lang3-3.18.0.jar
 aa254b373b6f6d46bc9dca86331b072a8ab86eb25ea9921fd439618392e98a16  org/apache/commons/commons-lang3/3.18.0/commons-lang3-3.18.0.pom
+69e5c9fa35da7a51a5fd2099dfe56a2d8d32cf233e2f6d770e796146440263f4  org/apache/commons/commons-lang3/3.20.0/commons-lang3-3.20.0.jar
 7ca83b2709c1e7a9e03b576cd41422190379489a80866e542f8c8b955411a2aa  org/apache/commons/commons-lang3/3.20.0/commons-lang3-3.20.0.pom
 3a2e69d06d641d1f3b293126dc9e2e4ea6563bf8c36c87e0ab6fa4292d04b79c  org/apache/commons/commons-parent/34/commons-parent-34.pom
 cd313494c670b483ec256972af1698b330e598f807002354eb765479f604b09c  org/apache/commons/commons-parent/42/commons-parent-42.pom
@@ -336,6 +351,7 @@ d50da9c39bdca823d618d1b4a03b73f196497fcb8616fd0da727c8623592a9bb  org/apache/com
 348d4e7c131be6114c854a719ce7a44307a7c39bd366084977b24fd29ad0edb4  org/apache/commons/commons-parent/81/commons-parent-81.pom
 d189ff2c0027e96bb65d31e6f227ed2af966169b36af1e973dd5ba08926dc7b5  org/apache/commons/commons-parent/85/commons-parent-85.pom
 94f6c027b15f6402995dd1b2c7ea35bfe1ebc88b6832b3134368b41998721953  org/apache/commons/commons-parent/92/commons-parent-92.pom
+2cd3289b44efa53052d9cdaf3f05544833a520a682f9c7ffd403a00bbb157f9a  org/apache/commons/commons-parent/96/commons-parent-96.pom
 14366dcbef67a69bb2a8fe9ca7289c215381c5c25093542a499f9d523a2cad7b  org/apache/commons/commons-parent/97/commons-parent-97.pom
 d40318527f56033e0ff0789971cc38c856aa99a685eea11270814e7f1eda9fba  org/apache/commons/commons-parent/98/commons-parent-98.pom
 770cd903fa7b604d1f7ef7ba17f84108667294b2b478be8ed1af3bffb4ae0018  org/apache/commons/commons-text/1.10.0/commons-text-1.10.0.jar
@@ -471,6 +487,8 @@ ec817516c83141a33f695ff8f4d73ca6df3af268c3ab377e5cee7effccca8140  org/awaitility
 deb10353dd2b1bee0e548b74014d80a1179a8faaf8d0d886c01b4d6ca9300068  org/checkerframework/checker-qual/2.0.0/checker-qual-2.0.0.pom
 e4ce1376cc2735e1dde220b62ad0913f51297704daad155a33f386bc5db0d9f7  org/checkerframework/checker-qual/3.37.0/checker-qual-3.37.0.jar
 02392fbd4ce21901f945615472b1d4d4d3591b3aabdf013105f5c92ec32cb4f0  org/checkerframework/checker-qual/3.37.0/checker-qual-3.37.0.pom
+857658c8bdcbff794949a8d9922f88d63ee3751c203c7cd7d21ea97f9e745288  org/checkerframework/checker-qual/3.55.1/checker-qual-3.55.1.jar
+627d92aa92fd4d6bb8c2b56bcbb38543417f49d38b5a62fbdb4aeff551e7b760  org/checkerframework/checker-qual/3.55.1/checker-qual-3.55.1.pom
 6b87237de8c2e1740cf80627c7f3ce3e15de1930bb250c55a1eca94fa3e014df  org/codehaus/codehaus-parent/4/codehaus-parent-4.pom
 1879f19a05991e3ed95910b96689333396b0c467a215dc4d1f90018404b72a26  org/codehaus/mojo/animal-sniffer-annotations/1.14/animal-sniffer-annotations-1.14.pom
 adf522f4839c35f5329ea97c407aebebfa8807b644852dc4d5cd7c97b7a6d2e0  org/codehaus/mojo/animal-sniffer-annotations/1.18/animal-sniffer-annotations-1.18.pom
@@ -555,6 +573,8 @@ aeabde04eca66e1ac30f9df3cc36c9b07a25a37c52043b33418e274ce5a23616  org/infinispan
 a709ce17111e4149d9b79a5295644e0cd5a8355aec4b2ef4c0436aba7b25d08a  org/iq80/snappy/snappy/0.4/snappy-0.4.pom
 0b20f45e3a0fd8f0d12cdc5316b06776e902b1365db00118876f9175c60f302c  org/jdom/jdom2/2.0.6.1/jdom2-2.0.6.1.jar
 55795e1018b8ae647b937967cf810a99b08582c2374e7873c128734c8c914bf3  org/jdom/jdom2/2.0.6.1/jdom2-2.0.6.1.pom
+195fb0da046d55bb042e91543484cf1da68b02bb7afbfe031f229e45ac84b3f2  org/jetbrains/annotations/17.0.0/annotations-17.0.0.jar
+8390ee0b4dff7f568b1336e061f694e77d761a505169aed8964e75482c990eed  org/jetbrains/annotations/17.0.0/annotations-17.0.0.pom
 950704bad04c5143656cfca1d2c574f25fcad9cac33905ab22a57e9fdf7bfd88  org/jetbrains/kotlin/kotlin-bom/2.3.21/kotlin-bom-2.3.21.pom
 faf0c6538e53ddc0499a63664d8e763c216580b2e18e722ccbdf1b431a6afe26  org/jetbrains/kotlinx/kotlinx-coroutines-bom/1.10.2/kotlinx-coroutines-bom-1.10.2.pom
 3be221b6da86dcda51cac6c4b2404b89e95ab09cc8d06a05689be2ef36735dec  org/jetbrains/kotlinx/kotlinx-serialization-bom/1.11.0/kotlinx-serialization-bom-1.11.0.pom
@@ -640,8 +660,12 @@ de00115f1d84f3a0b2ee3a4b6f6192d066f86d185d67b9d1522f2c80feac5f00  org/ow2/asm/as
 6f3828a215c920059a5efa2fb55c233d6c54ec5cadca99ce1b1bdd10077c7ddd  org/ow2/asm/asm/9.9.1/asm-9.9.1.jar
 aca68dee9ba2f6cd90ffde728efdc7e3ebfcf59f3f41fbfe248d2d01d5b866af  org/ow2/asm/asm/9.9.1/asm-9.9.1.pom
 321ddbb7ee6fe4f53dea6b4cd6db74154d6bfa42391c1f763b361b9f485acf05  org/ow2/ow2/1.5.1/ow2-1.5.1.pom
+6e0e4cc2d8cae902084f8a2b18728b073a6fd9d1f87c9d8bff8f298c18185b93  org/postgresql/postgresql/42.7.13/postgresql-42.7.13.jar
+3957417ecaee342521b61310fdc21bd37fcb8bba3f7547ece9b78fd03cd53f26  org/postgresql/postgresql/42.7.13/postgresql-42.7.13.pom
 1e1e427c36ff63c44fd30ef292d9e773ea3154460ab6265d3fed7e6f5bc50fb9  org/projectlombok/lombok/1.18.38/lombok-1.18.38.jar
 8165ee87299a7daf069a7c981b7bb860434213b9afcaabab0b469b3babf48e6d  org/projectlombok/lombok/1.18.38/lombok-1.18.38.pom
+31cef12ddec979d1f86d7cf708c41a17da523d05c685fd6642e9d0b2addb7240  org/rnorth/duct-tape/duct-tape/1.0.8/duct-tape-1.0.8.jar
+2636f66debe6e12437632f23a67b9bc961b03633009e52527a3bbc871f4069b4  org/rnorth/duct-tape/duct-tape/1.0.8/duct-tape-1.0.8.pom
 5e4f359f35628282770c29398d342c2665ebb1ed66d390b8c37d925a1ea8a6a6  org/seleniumhq/selenium/selenium-bom/4.43.0/selenium-bom-4.43.0.pom
 719095c07d4203961320da593441d8b3b643c18eb1d81aa98ea933bb7eb351ba  org/skyscreamer/jsonassert/1.5.3/jsonassert-1.5.3.jar
 c6a880737b6b3c8a27d9a05c6048536a7a70bb350cb91dce2336b6710a2ba628  org/skyscreamer/jsonassert/1.5.3/jsonassert-1.5.3.pom
@@ -742,6 +766,16 @@ d4dcffdbbf8714ace6304c6d12bfe0e2ccd365809e98ba6288763dd933bb0962  org/springfram
 86549176d6579a496881dac41308c3673d8975a7cc7b3d92e6e6453fbbc3f402  org/springframework/spring-webmvc/7.0.9/spring-webmvc-7.0.9.pom
 1e357a81e78cd8620f23bf95d3c66c1a2719fe5444deae10f2430acacdabd96f  org/springframework/ws/spring-ws-bom/5.0.2/spring-ws-bom-5.0.2.pom
 bbba1376021fbf4e14663a61f10cd1aff14a5d74fb55f1a14be6fd6de83d7eef  org/testcontainers/testcontainers-bom/2.0.5/testcontainers-bom-2.0.5.pom
+0ebbc62bdcfb315cb840a63fbaa148b455927666d9034b5e5c00009d84c755b0  org/testcontainers/testcontainers-database-commons/2.0.5/testcontainers-database-commons-2.0.5.jar
+1be61fe838a86a0eacf6d52adcd0564ea728d6add53ac76daaf874ea3e19fff2  org/testcontainers/testcontainers-database-commons/2.0.5/testcontainers-database-commons-2.0.5.pom
+0f7fe603a32692c33739cf99d638206f9060ca47615bf0141ca2eb32d33d764a  org/testcontainers/testcontainers-jdbc/2.0.5/testcontainers-jdbc-2.0.5.jar
+aeaac6dcd5b8a128e2ae5d723f4f7b460b656937a30ce7caac0b0091569a8f66  org/testcontainers/testcontainers-jdbc/2.0.5/testcontainers-jdbc-2.0.5.pom
+d66eb7f257a85833a8cc973e3814d740967d40a7db1a0de0040653c6ed236748  org/testcontainers/testcontainers-junit-jupiter/2.0.5/testcontainers-junit-jupiter-2.0.5.jar
+4968a10f9c34413e936c8fa68d50d074208349fa9effa85ab16ab20224834efc  org/testcontainers/testcontainers-junit-jupiter/2.0.5/testcontainers-junit-jupiter-2.0.5.pom
+8dbfb2fda977eb813ed1188ce02f098b8b634910eeab220568d54d6bd5b7ce9f  org/testcontainers/testcontainers-postgresql/2.0.5/testcontainers-postgresql-2.0.5.jar
+8f68c9fbec5a242dffbb01ea6a2d3a99104f1f0af6fd54d10cbdf7e5a47e1a10  org/testcontainers/testcontainers-postgresql/2.0.5/testcontainers-postgresql-2.0.5.pom
+0466f481343d5f350a91274cd7bf984308cbaf90d706247fd1cf4b1a8010c2e1  org/testcontainers/testcontainers/2.0.5/testcontainers-2.0.5.jar
+78839aaa8e34da1c483deb57e4f383a8045abacda5549bc79840f25794963103  org/testcontainers/testcontainers/2.0.5/testcontainers-2.0.5.pom
 857917d2319a4e92dc1c5e3aeb75a0dac84445ed315e7ac3d82bb8d2b298977f  org/threeten/threetenbp/1.7.0/threetenbp-1.7.0.jar
 9cbb614aefec6d5729eccadd64c9a19e9b2183fc3a0e093c00f376acfa6d0b44  org/threeten/threetenbp/1.7.0/threetenbp-1.7.0.pom
 32697c7567b2921c473678a820b13fc64700aa87bb14576eeb48d0ed5847cfd4  org/tomlj/tomlj/1.0.0/tomlj-1.0.0.jar

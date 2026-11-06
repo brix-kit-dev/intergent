@@ -25,6 +25,7 @@ public final class WorkflowPolicy {
     private static final Pattern RELEASED = Pattern.compile("#.*released (\\d{4}-\\d{2}-\\d{2})");
     private static final Pattern READ_ONLY = Pattern.compile("(?m)^permissions:\\s*\\n\\s+contents: read\\s*$");
     private static final Pattern DOWNLOAD = Pattern.compile("\\b(curl|wget)\\b");
+    private static final Pattern LOCAL_PORT = Pattern.compile("- \"?127\\.0\\.0\\.1:\\d+:\\d+\"?");
 
     private static final Map<Pattern, String> FORBIDDEN = Map.ofEntries(
             Map.entry(Pattern.compile("pull_request_target"), "pull_request_target runs with write access"),
@@ -68,6 +69,26 @@ public final class WorkflowPolicy {
         }
         if (DOWNLOAD.matcher(text).find() && !text.contains("sha256sum -c")) {
             problems.add("S-8: " + name + ": a download must be checked with sha256sum -c");
+        }
+        return problems;
+    }
+
+    /** A Compose file: images are pinned like a workflow's (S-8) and ports stay on localhost (blueprint 12.6). */
+    public static List<String> composeViolations(String name, String text, LocalDate today) {
+        List<String> problems = new ArrayList<>();
+        String[] lines = text.split("\n");
+        boolean inPorts = false;
+        for (int number = 0; number < lines.length; number++) {
+            String where = name + ":" + (number + 1);
+            String line = lines[number].strip();
+            checkPin(IMAGE, DIGEST_PIN, "a digest", lines[number], where, today, problems);
+            if (line.startsWith("ports:") && !line.equals("ports:")) {
+                problems.add("12.6: " + where + ": write ports as a list, so the address can be checked");
+            }
+            if (inPorts && line.startsWith("- ") && !LOCAL_PORT.matcher(line).matches()) {
+                problems.add("12.6: " + where + ": a port must bind 127.0.0.1: " + line);
+            }
+            inPorts = line.equals("ports:") || inPorts && line.startsWith("- ");
         }
         return problems;
     }

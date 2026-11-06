@@ -55,6 +55,18 @@ class RepositoryFilesTest {
     }
 
     @Test
+    void everyComposeFileFollowsTheRules() throws IOException {
+        List<Path> composeFiles;
+        try (Stream<Path> files = Files.walk(repository.resolve("deploy"))) {
+            composeFiles = files.filter(file -> file.getFileName().toString().matches("compose.*\\.ya?ml")).toList();
+        }
+        assertThat(composeFiles).isNotEmpty();
+        for (Path file : composeFiles) {
+            assertThat(WorkflowPolicy.composeViolations(file.getFileName().toString(), Files.readString(file), LocalDate.now())).isEmpty();
+        }
+    }
+
+    @Test
     void ciRunsTheWholeCheck() throws IOException {
         assertThat(Files.readString(repository.resolve(".github/workflows/ci.yml")))
                 .contains("run: engine/verify.sh\n");

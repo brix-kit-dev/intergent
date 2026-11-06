@@ -134,6 +134,53 @@ class WorkflowPolicyTest {
     }
 
     @Test
+    void aComposeImageWithADigestAndDatePasses() {
+        assertThat(WorkflowPolicy.composeViolations("compose.yaml", "    image: db:1@" + DIGEST + " # released 2026-08-13\n", TODAY)).isEmpty();
+    }
+
+    @Test
+    void aComposeImageByTagFails() {
+        assertThat(WorkflowPolicy.composeViolations("compose.yaml", "    image: db:1 # released 2026-08-13\n", TODAY))
+                .singleElement().asString().contains("S-8", "compose.yaml:1", "not pinned to a digest");
+    }
+
+    @Test
+    void aComposeImageWithoutADateFails() {
+        assertThat(WorkflowPolicy.composeViolations("compose.yaml", "    image: db:1@" + DIGEST + "\n", TODAY))
+                .singleElement().asString().contains("S-8", "released YYYY-MM-DD");
+    }
+
+    @Test
+    void aComposeImageUnderSevenDaysOldFails() {
+        assertThat(WorkflowPolicy.composeViolations("compose.yaml", "    image: db:1@" + DIGEST + " # released 2026-11-01\n", TODAY))
+                .singleElement().asString().contains("S-8", "less than 7 days");
+    }
+
+    @Test
+    void aComposePortOnLocalhostPasses() {
+        assertThat(WorkflowPolicy.composeViolations("compose.yaml", "    ports:\n      - \"127.0.0.1:15432:5432\"\n    volumes:\n      - data:/var/lib\n", TODAY)).isEmpty();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"\"15432:5432\"", "15432:5432", "\"0.0.0.0:15432:5432\"", "\"5432\"", "\"127.0.0.2:15432:5432\""})
+    void aComposePortOffLocalhostFails(String port) {
+        assertThat(WorkflowPolicy.composeViolations("compose.yaml", "    ports:\n      - " + port + "\n", TODAY))
+                .singleElement().asString().contains("12.6", "compose.yaml:2");
+    }
+
+    @Test
+    void everyComposePortIsChecked() {
+        assertThat(WorkflowPolicy.composeViolations("compose.yaml", "    ports:\n      - \"127.0.0.1:1:1\"\n      - \"2:2\"\n", TODAY))
+                .singleElement().asString().contains("12.6", "compose.yaml:3");
+    }
+
+    @Test
+    void portsWrittenOnOneLineFail() {
+        assertThat(WorkflowPolicy.composeViolations("compose.yaml", "    ports: [\"15432:5432\"]\n", TODAY))
+                .singleElement().asString().contains("12.6", "as a list");
+    }
+
+    @Test
     void aCacheActionFails() {
         assertThat(violations(LEGAL + "      - uses: actions/cache@" + COMMIT + " # v5, released 2026-01-01\n"))
                 .singleElement().asString().contains("S-8", "cache");

@@ -6,6 +6,7 @@ AI 引擎。架构见[蓝图](docs/ai-engine-architecture-blueprint.md)，v1.0 �
 
 - Java 21 起
 - Maven 3.8.7 起，`engine/verify.sh` 要求正好是 3.8.7
+- Docker，数据库测试要用
 
 ## 构建和测试
 
@@ -21,6 +22,24 @@ mvn verify
 ```bash
 engine/verify.sh
 ```
+
+## 开发数据库
+
+```bash
+deploy/dev/up.sh
+```
+
+这条命令启动引擎自己的 PostgreSQL，端口是 `127.0.0.1:15432`，容器名 `aie-postgres`，都和 Brix 分开。第一次运行会生成随机密码，写在 `deploy/dev/.env`，这个文件不进仓库。
+
+角色和 schema 来自 [create-roles.sql](deploy/db/create-roles.sql)，按蓝图 7.6 建 `engine_owner`、`engine_app`、`engine_system`。真实单元也用这个脚本。
+
+重新开始时清空数据：
+
+```bash
+docker compose -f deploy/dev/compose.yaml down -v
+```
+
+数据库测试不用这个容器。Testcontainers 每次起一个临时数据库，用同一个镜像和同一个脚本，端口只绑定 `127.0.0.1`。
 
 ## 启动
 
@@ -56,11 +75,12 @@ curl http://127.0.0.1:18080/healthz
 | 目录 | 层 | 可依赖 |
 | --- | --- | --- |
 | `contracts` | 公开 API 的契约 | 无 |
+| `deploy` | 数据库脚本、开发环境 | 无 |
 | `engine/ports` | 能力契约（L1） | 无 |
 | `engine/core` | 平台核心（L2） | `ports` |
 | `engine/modules` | 能力模块（L3） | `core`、`ports` |
 | `engine/http` | 接口层（L4） | `modules`、`core` |
-| `engine/adapters` | 适配器（L0），每个适配器是它的子模块，目前还没有 | `ports` |
+| `engine/adapters` | 适配器（L0），每个适配器是它的子模块。`store-postgres` 目前只有测试 | `ports` |
 | `engine/app` | 启动入口 | 引擎内所有层 |
 | `engine/guard` | 架构守卫、依赖检查和契约检查，只在构建时运行 | 不进运行时 |
 
@@ -125,7 +145,7 @@ curl http://127.0.0.1:18080/healthz
 
 ## CI 和依赖规则
 
-每次推送，GitHub Actions 运行 [ci.yml](.github/workflows/ci.yml)。它只做一件事：在固定的 JDK 镜像里运行 `engine/verify.sh`。
+每次推送，GitHub Actions 运行 [ci.yml](.github/workflows/ci.yml)。它只做一件事：用固定哈希的 JDK 和 Maven 运行 `engine/verify.sh`。
 
 `verify.sh` 从空的 Maven 仓库开始构建，再检查这次构建实际下载了什么，所以 CI 不用缓存。
 
@@ -135,6 +155,7 @@ curl http://127.0.0.1:18080/healthz
 | S-8 | 构建下载的每个文件都记在 `engine/dependency-lock.txt`，哈希一致 | `verify.sh` |
 | S-8 | 每个版本都发布满 7 天，日期从 Maven Central 读取 | `verify.sh` |
 | S-8 | CI 工具固定到提交、digest 或哈希，发布满 7 天；工作流只读，不用密钥，不能跳过检查 | `mvn verify` |
+| S-8 | `deploy` 下 Compose 文件的镜像固定到 digest，发布满 7 天，端口只绑定 `127.0.0.1` | `mvn verify` |
 | S-8 | 有 `package.json` 时，工作区必须有锁文件、固定的 pnpm 和 7 天等待，不许依赖运行构建脚本 | `mvn verify` |
 | S-9 | `engine.jar` 里每个第三方 jar 都至少有一个允许的许可 | `verify.sh` |
 
@@ -160,6 +181,6 @@ engine/verify.sh --update-lock
 
 **已知限制：**
 
-- `runs-on: ubuntu-24.04` 的宿主镜像由 GitHub 更新，固定不了。任务都在固定的 JDK 镜像里运行，影响有限。
+- `runs-on: ubuntu-24.04` 的宿主镜像由 GitHub 更新，固定不了。JDK 和 Maven 按哈希下载，不用它自带的。任务不放在容器里跑，因为数据库测试的端口只绑定本机，容器里访问不到。
 - 许可检查读的是 POM 里写的许可，不分析 jar 里的代码。
 - 引擎镜像还没有，S-9 现在检查的是 `engine.jar`。写镜像时要把基础镜像一起考虑。
