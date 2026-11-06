@@ -1,6 +1,6 @@
 # Intergent
 
-AI 引擎。架构见[蓝图](docs/ai-engine-architecture-blueprint.md)，v1.0 已冻结，改动规则见蓝图 17.3。
+AI 引擎。架构见[蓝图](docs/ai-engine-architecture-blueprint.md)，v1.0 已冻结，改动规则见蓝图 17.3。开发顺序见[第一阶段计划](docs/phase-1-plan.md)。
 
 ## 环境
 
