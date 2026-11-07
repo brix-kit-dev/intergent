@@ -13,6 +13,7 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -59,7 +60,7 @@ class MigrateRoleTest {
 
     @BeforeEach
     void emptyTheTables() throws SQLException {
-        TestDatabase.asAdmin(DATABASE, "TRUNCATE engine.tenancy_applications, engine.tenancy_tenants");
+        TestDatabase.asAdmin(DATABASE, "TRUNCATE engine.tenancy_tenants CASCADE");
     }
 
     private static int migrate() {
@@ -83,7 +84,8 @@ class MigrateRoleTest {
     void theScriptsWereAppliedInOrder() throws SQLException {
         assertThat(TestDatabase.firstColumn(
                         DATABASE, "SELECT version FROM engine.flyway_history_tenancy WHERE type = 'SQL' ORDER BY installed_rank"))
-                .containsExactly("1", "2");
+                .startsWith("1", "2", "3")
+                .isSortedAccordingTo(Comparator.comparingInt(Integer::parseInt));
     }
 
     @Test

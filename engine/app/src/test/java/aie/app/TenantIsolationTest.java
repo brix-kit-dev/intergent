@@ -50,6 +50,10 @@ class TenantIsolationTest {
             new Sample("tenancy_applications", """
                     INSERT INTO tenancy_applications (application_id, tenant_id, environment, api_version, default_data_class)
                     VALUES ('app_{tenant}', '{tenant}', 'test', '2026-11-05', 'internal')
+                    """),
+            new Sample("tenancy_idempotency_keys", """
+                    INSERT INTO tenancy_idempotency_keys (tenant_id, application_id, idempotency_key, fingerprint)
+                    VALUES ('{tenant}', 'app_{tenant}', 'key_1', 'fingerprint')
                     """));
 
     private static final String TENANT_TABLES = """

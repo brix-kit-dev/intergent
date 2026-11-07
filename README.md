@@ -257,6 +257,19 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 
 **`Engine-Version`：** `/v1` 下的请求可以传日期版本，如 `Engine-Version: 2026-11-05`。现在只有这一个版本，不传时也用它；以后按应用锁定的版本走。传别的版本返回 400 `invalid_request`，不会悄悄用另一个版本回答。版本写在 `EngineVersionFilter` 和契约的 `info.version`，测试保证两边一致。
 
+**`Idempotency-Key`：** 判断已经写好，在 `aie.core.tenancy.api.IdempotencyKeys`，还没接到 HTTP。接 HTTP 要先知道调用方是谁，所以排在第 10 小点的身份认证之后。键按租户和应用隔离，保留 24 小时：
+
+| 同一个键再来一次 | 结果 |
+| --- | --- |
+| 第一次 | 拿到键，执行请求 |
+| 上一次还在处理 | `idempotency_key_in_use`（409） |
+| 上一次已经完成 | 原样返回上一次的结果，失败也一样 |
+| 请求内容不同 | `idempotency_key_reused`（422），不管上一次完成没有 |
+| 上一次的进程中途死了，5 分钟没有完成 | 这一次接管，重新执行 |
+| 超过 24 小时 | 当作新键 |
+
+结果和业务数据不在同一个事务里，因为事务不跨模块。进程刚做完业务、还没存结果就死了的话，接管的那次会再执行一遍。
+
 **错误格式：** 所有错误都是 `application/problem+json`，带稳定的 `code`。客户端看 `code`，不要解析 `title` 和 `detail`：
 
 ```json
