@@ -2,10 +2,10 @@
 server:
   address: 127.0.0.1
   port: 18080
-# A log line carries the ID of its request, so an ID quoted by a caller leads to the logs.
+# A log line carries the ID of its request and the caller's trace, so both lead to the logs.
 logging:
   pattern:
-    correlation: "[%X{request_id:-}] "
+    correlation: "[%X{request_id:-}] [%X{trace_id:-}] "
 spring:
   main:
     banner-mode: "off"

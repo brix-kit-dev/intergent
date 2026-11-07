@@ -518,7 +518,7 @@ components:
     Traceparent:
       name: traceparent
       in: header
-      description: W3C Trace Context. The engine passes it on.
+      description: W3C Trace Context. The engine logs the trace and passes it on. An invalid value is ignored.
       schema:
         type: string
         maxLength: 55

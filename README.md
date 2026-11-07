@@ -244,10 +244,16 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 **`Request-Id`：** 每个响应都带一个请求号，包括 Tomcat 自己拒绝的请求，如 `req_01M6T3X5Q1GRQ53EE6MPP5WVKP`。调用方报问题时报这个号，日志里搜它就能找到这个请求：
 
 ```text
-2026-11-07T13:21:07.503+09:00  INFO 4041939 --- [omcat-handler-1] [req_01M6T3X5Q1GRQ53EE6MPP5WVKP] aie.http.Xxx : ...
+2026-11-07T13:21:07.503+09:00  INFO 4041939 --- [omcat-handler-1] [req_01M6T3X5Q1GRQ53EE6MPP5WVKP] [4bf92f3577b34da6a3ce929d0e0e4736] aie.http.Xxx : ...
 ```
 
 请求号总是引擎自己生成，客户端传来的不用，否则能伪造日志，或者把问题指到别人的请求上。
+
+**`traceparent`：** 调用方按 W3C Trace Context 传这个请求头，它的 trace ID 就会进日志，就是上面第二个方括号，这样宿主和引擎的日志能对起来。没传时这个方括号是空的。
+
+- **值不合法时忽略：** 请求照常处理，这是 W3C 的规定。两个 `traceparent` 头也算不合法。
+- **响应不返回：** 响应只带 `Request-Id`。
+- **传给外部调用：** 现在引擎还没有外部调用，等 M3 接 OpenTelemetry 时做。
 
 **错误格式：** 所有错误都是 `application/problem+json`，带稳定的 `code`。客户端看 `code`，不要解析 `title` 和 `detail`：
 

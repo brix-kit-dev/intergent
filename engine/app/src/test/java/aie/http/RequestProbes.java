@@ -37,6 +37,10 @@ final class RequestProbes {
         public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain)
                 throws IOException, ServletException {
             switch (((HttpServletRequest) request).getRequestURI()) {
+                case "/test/filter-log" -> {
+                    LOG.info("a line from inside a filter");
+                    chain.doFilter(request, response);
+                }
                 case "/test/refused-by-filter" -> ((HttpServletResponse) response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
                 case "/test/send-error" -> ((HttpServletResponse) response).sendError(HttpServletResponse.SC_BAD_REQUEST);
                 case "/test/filter-fails" -> throw new IllegalStateException("a failure inside a filter");
