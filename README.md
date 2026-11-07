@@ -150,7 +150,8 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 | --- | --- |
 | `api` | 先过启动自检，再提供 HTTP 服务，目前只有 `/healthz` |
 | `migrate` | 运行数据库迁移，完成后退出 |
-| `worker`、`admin` | 还没实现，打印提示后退出 |
+| `admin` | 开通租户和应用，完成后退出，见[开通租户](#开通租户) |
+| `worker` | 还没实现，打印提示后退出 |
 
 `/healthz` 给运维探活用，不属于公开 API。
 
@@ -160,9 +161,38 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 | --- | --- |
 | 0 | 正常结束 |
 | 1 | 启动失败，如端口被占用；启动自检不通过；迁移失败 |
-| 2 | 角色参数不对：没给、给了多个或不认识 |
+| 2 | 角色参数不对：没给、给了多个或不认识；`admin` 的命令或选项不对 |
 | 3 | 角色还没实现 |
 | 143 | 收到 SIGTERM，处理完请求后退出 |
+
+## 开通租户
+
+租户和应用不走公开 API，用 `admin` 角色在命令行开通，这是蓝图 12.5 的要求。开发环境先按[开发数据库](#开发数据库)建好表，再运行：
+
+```bash
+TENANT=$(deploy/dev/admin.sh create-tenant)
+```
+
+```bash
+deploy/dev/admin.sh create-application --tenant="$TENANT"
+```
+
+| 命令 | 选项 | 输出 |
+| --- | --- | --- |
+| `create-tenant` | `--parent=<租户号>`：上级租户，可以在别的数据库或单元 | 新租户号，如 `ten_01M6...` |
+| `create-application` | `--tenant`：必填；`--environment=test\|live`：默认 `test`；`--data-class`：默认 `internal` | 新应用号，如 `app_01M6...` |
+
+- **输出：** 标准输出只有新 ID，脚本可以直接接住。出错写到标准错误，退出码 1；命令或选项写错，退出码 2。
+- **连接：** 和 `api` 一样先过启动自检，再用 `engine_app` 连接。地址里写的用户和会话参数都不起作用。
+- **单元码：** 新租户的单元码取自 `ENGINE_CELL_CODE`，必须是 1 到 8 位小写字母和数字，因为它会写进密钥。开发服务器不是单元，用 `dev`。
+- **API 版本：** 新应用锁定当前版本 `2026-11-05`。
+- **密钥：** 还不能发，下一步做。
+
+真实单元这样运行：
+
+```bash
+ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD=... ENGINE_CELL_CODE=jp1 java -jar engine.jar --role=admin create-tenant
+```
 
 ## 目录
 

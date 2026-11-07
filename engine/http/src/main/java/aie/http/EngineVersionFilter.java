@@ -1,5 +1,6 @@
 package aie.http;
 
+import aie.core.tenancy.api.ApiVersion;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -21,7 +22,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
 @Order(Ordered.HIGHEST_PRECEDENCE + 2)
 class EngineVersionFilter extends OncePerRequestFilter {
 
-    static final String CURRENT = "2026-11-05";
+    static final String CURRENT = ApiVersion.CURRENT;
     private static final String HEADER = "Engine-Version";
     private static final String PUBLIC_API = "/v1";
 

@@ -11,6 +11,7 @@ import org.springframework.core.env.Environment;
 final class RoleSettings {
 
     static final String DATABASE_URL = "engine.database.url";
+    static final String APP_PASSWORD = "engine.app.password";
 
     private final Environment environment;
 

@@ -5,6 +5,9 @@ import org.postgresql.ds.PGSimpleDataSource;
 /** Connections for one fixed role. The address only picks the server, so a wrong setting cannot change who connects. */
 final class PgConnections {
 
+    /** api, worker and admin all run as this role (blueprint 7.6). */
+    static final String RUNTIME_ROLE = "engine_app";
+
     private PgConnections() {
     }
 

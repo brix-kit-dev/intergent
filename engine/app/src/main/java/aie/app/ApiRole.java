@@ -11,8 +11,6 @@ import org.springframework.context.ConfigurableApplicationContext;
 @SpringBootApplication(scanBasePackages = "aie.http")
 class ApiRole {
 
-    private static final String APP_PASSWORD = "engine.app.password";
-
     static int run(String... args) {
         try {
             start(args);
@@ -26,7 +24,7 @@ class ApiRole {
     /** The self-check of blueprint 7.6 comes first, so a role that may not serve traffic never opens a port. */
     static ConfigurableApplicationContext start(String... args) {
         RoleSettings settings = RoleSettings.read(args);
-        PgSelfCheck.run(settings.required(RoleSettings.DATABASE_URL), settings.required(APP_PASSWORD));
+        PgSelfCheck.run(settings.required(RoleSettings.DATABASE_URL), settings.required(RoleSettings.APP_PASSWORD));
         return new SpringApplicationBuilder(ApiRole.class).web(WebApplicationType.SERVLET).run(args);
     }
 }

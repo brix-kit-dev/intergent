@@ -28,7 +28,8 @@ public final class EngineApplication {
         return switch (role) {
             case API -> ApiRole.run(args);
             case MIGRATE -> MigrateRole.run(args);
-            case WORKER, ADMIN -> notImplemented(role);
+            case ADMIN -> AdminRole.run(args);
+            case WORKER -> notImplemented(role);
         };
     }
 

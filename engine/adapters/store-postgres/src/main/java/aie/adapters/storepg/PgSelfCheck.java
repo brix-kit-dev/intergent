@@ -16,7 +16,6 @@ import org.postgresql.ds.PGSimpleDataSource;
  */
 public final class PgSelfCheck {
 
-    private static final String RUNTIME_ROLE = "engine_app";
     private static final int TIMEOUT_SECONDS = 10;
 
     private static final String ROLE_FACTS = """
@@ -42,7 +41,7 @@ public final class PgSelfCheck {
     }
 
     static void run(String url, String appPassword, int timeoutSeconds) {
-        PGSimpleDataSource dataSource = PgConnections.as(RUNTIME_ROLE, url, appPassword);
+        PGSimpleDataSource dataSource = PgConnections.as(PgConnections.RUNTIME_ROLE, url, appPassword);
         dataSource.setSocketTimeout(timeoutSeconds);
         List<String> problems;
         try (Connection connection = dataSource.getConnection();
@@ -54,7 +53,7 @@ public final class PgSelfCheck {
             throw new DatabaseException("The database role could not be checked: " + e.getMessage(), e);
         }
         if (!problems.isEmpty()) {
-            throw new DatabaseException(RUNTIME_ROLE + " may not serve traffic: it " + String.join(", ", problems), null);
+            throw new DatabaseException(PgConnections.RUNTIME_ROLE + " may not serve traffic: it " + String.join(", ", problems), null);
         }
     }
 
