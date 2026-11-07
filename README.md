@@ -255,6 +255,8 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 - **响应不返回：** 响应只带 `Request-Id`。
 - **传给外部调用：** 现在引擎还没有外部调用，等 M3 接 OpenTelemetry 时做。
 
+**`Engine-Version`：** `/v1` 下的请求可以传日期版本，如 `Engine-Version: 2026-11-05`。现在只有这一个版本，不传时也用它；以后按应用锁定的版本走。传别的版本返回 400 `invalid_request`，不会悄悄用另一个版本回答。版本写在 `EngineVersionFilter` 和契约的 `info.version`，测试保证两边一致。
+
 **错误格式：** 所有错误都是 `application/problem+json`，带稳定的 `code`。客户端看 `code`，不要解析 `title` 和 `detail`：
 
 ```json

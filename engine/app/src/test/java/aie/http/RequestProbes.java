@@ -43,6 +43,8 @@ final class RequestProbes {
                 }
                 case "/test/refused-by-filter" -> ((HttpServletResponse) response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
                 case "/test/send-error" -> ((HttpServletResponse) response).sendError(HttpServletResponse.SC_BAD_REQUEST);
+                case "/test/send-error-500" -> ((HttpServletResponse) response).sendError(
+                        HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "an internal message");
                 case "/test/filter-fails" -> throw new IllegalStateException("a failure inside a filter");
                 default -> chain.doFilter(request, response);
             }

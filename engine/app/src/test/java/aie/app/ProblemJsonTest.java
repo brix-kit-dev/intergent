@@ -100,6 +100,7 @@ class ProblemJsonTest {
                 arguments("a bad path variable", request("/test/number/abc"), 400, "invalid_request"),
                 arguments("a missing parameter", request("/test/param"), 400, "invalid_request"),
                 arguments("sendError in a filter", request("/test/send-error"), 400, "invalid_request"),
+                arguments("a 500 from a filter", request("/test/send-error-500"), 500, "internal_error"),
                 arguments("a failure in a controller", request("/test/fail"), 500, "internal_error"),
                 arguments("a failure in a filter", request("/test/filter-fails"), 500, "internal_error"));
     }
@@ -144,12 +145,17 @@ class ProblemJsonTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"/test/fail", "/test/filter-fails"})
+    @ValueSource(strings = {"/test/fail", "/test/filter-fails", "/test/send-error-500"})
     void aFailureTellsTheCallerNothingAboutTheEngine(String path) throws Exception {
         String body = get(path).body();
 
         assertThat(problem(body).getDetail()).isNull();
-        assertThat(body).doesNotContain("failure inside", "IllegalState", "Exception", "aie.", "trace");
+        assertThat(body).doesNotContain("failure inside", "internal message", "IllegalState", "Exception", "aie.", "trace");
+    }
+
+    @Test
+    void aRefusalWithNoReasonHasNoDetail() throws Exception {
+        assertThat(problem(get("/test/send-error").body()).getDetail()).isNull();
     }
 
     @ParameterizedTest

@@ -3,6 +3,7 @@ package aie.http;
 import jakarta.servlet.RequestDispatcher;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -36,6 +37,14 @@ class ProblemErrorController implements ErrorController {
                 MDC.remove(RequestIdFilter.LOG_KEY);
             }
         }
-        return Problems.response(status, null, HttpHeaders.EMPTY);
+        return Problems.response(status, detail(request, status), HttpHeaders.EMPTY);
+    }
+
+    /** A refusal may say why. What the engine got wrong itself stays in the logs. */
+    private static @Nullable String detail(HttpServletRequest request, int status) {
+        boolean refusal = status < HttpStatus.INTERNAL_SERVER_ERROR.value();
+        return refusal && request.getAttribute(RequestDispatcher.ERROR_MESSAGE) instanceof String message && !message.isBlank()
+                ? message
+                : null;
     }
 }
