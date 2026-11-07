@@ -76,9 +76,26 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_OWNER_PASSWO
 | 表被别的事务锁住 | 等 10 秒就失败，否则请求会排在 `ALTER TABLE` 后面堵住 |
 | 同时跑两个 `migrate` | 后一个等前一个，最多 10 秒，等不到就失败。重跑即可 |
 
-**新表：** 照 `V1__create_tenants.sql` 写，这是蓝图 5.6 的模板：行级安全、`FORCE`、租户策略、授权。有序列时序列也要授权给 `engine_app`。
+**新表：** 照 `V1__create_tenants.sql` 写，这是蓝图 5.6 的模板：行级安全、`FORCE`、租户策略、授权。有序列时序列也要授权给 `engine_app`。带 `tenant_id` 的表还要加一条样例行，见[租户隔离](#租户隔离)。
 
 **改租户表的数据：** 表所有者也受 `FORCE` 限制，所以 `migrate` 连接设了 `row_security = off`，忘了解除时直接报错，不会静默更新 0 行。在同一个脚本里先 `NO FORCE`，改完再 `FORCE`。
+
+## 租户隔离
+
+红线 T-2 由 [TenantIsolationTest.java](engine/app/src/test/java/aie/app/TenantIsolationTest.java) 检查，CI 每次都跑。它用真实脚本建库，从数据库目录里找出所有带 `tenant_id` 的表，再以 `engine_app` 经 `DatabasePort` 逐张验证：
+
+| 情况 | 结果 |
+| --- | --- |
+| 租户读数据 | 只看到自己的行，上级租户也看不到下级的行 |
+| 不带条件地改或删 | 只影响自己的行，别的租户不受影响 |
+| 写别的租户的行，或把自己的行改给别的租户 | 被行级安全拒绝 |
+| `TRUNCATE` | 没有权限。行级安全管不到它，只能靠授权挡住 |
+| 没有租户上下文 | 读不到、改不到、写不进 |
+| 租户号是空串的行 | 没有上下文时同样碰不到 |
+
+没有上下文的情况在新连接和复用的连接上各跑一次。两种连接状态不同：复用的连接上这个变量是空串，新连接上没有这个变量。
+
+**新表：** 在测试的 `SAMPLES` 里加一条样例行，父表排在子表前面。不加时这个测试类全部失败，所以新表漏不掉。
 
 ## 启动
 

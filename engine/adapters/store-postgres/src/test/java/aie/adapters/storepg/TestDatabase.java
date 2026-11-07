@@ -10,7 +10,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Matcher;
@@ -64,6 +66,26 @@ public final class TestDatabase {
 
     public static Connection admin(PostgreSQLContainer database) throws SQLException {
         return connect(database, database.getUsername(), database.getPassword());
+    }
+
+    /** Runs SQL as the superuser, which row-level security does not stop, so it shows what is really in a table. */
+    public static void asAdmin(PostgreSQLContainer database, String sql) throws SQLException {
+        try (Connection admin = admin(database); Statement statement = admin.createStatement()) {
+            statement.execute(sql);
+        }
+    }
+
+    /** Reads the first column as the superuser. */
+    public static List<String> firstColumn(PostgreSQLContainer database, String sql) throws SQLException {
+        try (Connection admin = admin(database);
+                Statement statement = admin.createStatement();
+                ResultSet rows = statement.executeQuery(sql)) {
+            List<String> values = new ArrayList<>();
+            while (rows.next()) {
+                values.add(rows.getString(1));
+            }
+            return values;
+        }
     }
 
     private static String devImage() {

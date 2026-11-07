@@ -6,14 +6,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import aie.adapters.storepg.PgDatabase;
 import aie.adapters.storepg.TestDatabase;
 import aie.ports.DatabaseException;
-import aie.ports.Tx;
 import java.io.IOException;
 import java.sql.Connection;
-import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -28,16 +25,12 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
-/**
- * Runs the role and the real scripts, then uses the tables the way the engine will: as engine_app, on one connection
- * that is reused like a pooled one. After a tenant transaction it holds an empty setting, which a fresh one does not.
- */
+/** Runs the role and the real scripts, then uses the tables as engine_app. {@link TenantIsolationTest} covers isolation. */
 @Testcontainers
 @ExtendWith(OutputCaptureExtension.class)
 class MigrateRoleTest {
 
     private static final String TENANT_A = "ten_a";
-    private static final String TENANT_B = "ten_b";
     private static final String ADD_TENANT = "INSERT INTO tenancy_tenants (tenant_id, cell_id) VALUES (?, 'jp1')";
     private static final String ADD_APPLICATION = """
             INSERT INTO tenancy_applications (application_id, tenant_id, environment, api_version, default_data_class)
@@ -62,13 +55,7 @@ class MigrateRoleTest {
 
     @BeforeEach
     void emptyTheTables() throws SQLException {
-        asAdmin("TRUNCATE engine.tenancy_applications, engine.tenancy_tenants");
-    }
-
-    private static void asAdmin(String sql) throws SQLException {
-        try (Connection admin = TestDatabase.admin(DATABASE); Statement statement = admin.createStatement()) {
-            statement.execute(sql);
-        }
+        TestDatabase.asAdmin(DATABASE, "TRUNCATE engine.tenancy_applications, engine.tenancy_tenants");
     }
 
     private static int migrate() {
@@ -77,15 +64,7 @@ class MigrateRoleTest {
     }
 
     private static List<String> firstColumn(String sql) throws SQLException {
-        try (Connection admin = TestDatabase.admin(DATABASE);
-                Statement statement = admin.createStatement();
-                ResultSet rows = statement.executeQuery(sql)) {
-            List<String> values = new ArrayList<>();
-            while (rows.next()) {
-                values.add(rows.getString(1));
-            }
-            return values;
-        }
+        return TestDatabase.firstColumn(DATABASE, sql);
     }
 
     private static void addTenant(String tenant) {
@@ -94,34 +73,6 @@ class MigrateRoleTest {
 
     private static void addApplication(String application, String tenant) {
         app.inTenantTx(tenant, tx -> tx.update(ADD_APPLICATION, application, tenant));
-    }
-
-    private static List<String> tenantIds(Tx tx) {
-        return tx.query("SELECT tenant_id FROM tenancy_tenants ORDER BY tenant_id", row -> row.string("tenant_id"));
-    }
-
-    private static List<String> applicationIds(Tx tx) {
-        return tx.query("SELECT application_id FROM tenancy_applications ORDER BY application_id", row -> row.string("application_id"));
-    }
-
-    private static List<String> tenantsSeenBy(String tenant) {
-        return app.inTenantTx(tenant, MigrateRoleTest::tenantIds);
-    }
-
-    private static List<String> applicationsSeenBy(String tenant) {
-        return app.inTenantTx(tenant, MigrateRoleTest::applicationIds);
-    }
-
-    private static List<String> tenantsSeenWithoutAContext() {
-        return app.inSystemTx(MigrateRoleTest::tenantIds);
-    }
-
-    private static List<String> applicationsSeenWithoutAContext() {
-        return app.inSystemTx(MigrateRoleTest::applicationIds);
-    }
-
-    private static int updateAs(String tenant, String sql) {
-        return app.inTenantTx(tenant, tx -> tx.update(sql));
     }
 
     private static List<String> tenantColumn(String tenant, String column) {
@@ -191,91 +142,6 @@ class MigrateRoleTest {
     }
 
     @Test
-    void aTenantReadsOnlyItsOwnRows() {
-        addTenant(TENANT_A);
-        addTenant(TENANT_B);
-        addApplication("app_a", TENANT_A);
-        addApplication("app_b", TENANT_B);
-
-        assertThat(tenantsSeenBy(TENANT_A)).containsExactly(TENANT_A);
-        assertThat(applicationsSeenBy(TENANT_A)).containsExactly("app_a");
-    }
-
-    @Test
-    void withoutATenantNothingCanBeRead() {
-        addTenant(TENANT_A);
-        addApplication("app_a", TENANT_A);
-
-        assertThat(tenantsSeenWithoutAContext()).isEmpty();
-        assertThat(applicationsSeenWithoutAContext()).isEmpty();
-    }
-
-    @Test
-    void aTenantCannotWriteRowsOfAnother() {
-        addTenant(TENANT_A);
-        addTenant(TENANT_B);
-
-        assertThatThrownBy(() -> app.inTenantTx(TENANT_A, tx -> tx.update(ADD_TENANT, "ten_c")))
-                .isInstanceOf(DatabaseException.class);
-        assertThatThrownBy(() -> app.inTenantTx(TENANT_A, tx -> tx.update(ADD_APPLICATION, "app_x", TENANT_B)))
-                .isInstanceOf(DatabaseException.class);
-    }
-
-    @Test
-    void aTenantCannotChangeRowsOfAnother() {
-        addTenant(TENANT_A);
-        addTenant(TENANT_B);
-        addApplication("app_b", TENANT_B);
-
-        assertThat(updateAs(TENANT_A, "UPDATE tenancy_applications SET api_version = 'x'")).isZero();
-        assertThat(updateAs(TENANT_A, "DELETE FROM tenancy_applications")).isZero();
-        assertThat(applicationsSeenBy(TENANT_B)).containsExactly("app_b");
-    }
-
-    @Test
-    void aTenantCannotMoveItsRowToAnother() {
-        addTenant(TENANT_A);
-        addTenant(TENANT_B);
-        addApplication("app_a", TENANT_A);
-
-        assertThatThrownBy(() -> app.inTenantTx(TENANT_A, tx -> tx.update("UPDATE tenancy_applications SET tenant_id = ?", TENANT_B)))
-                .isInstanceOf(DatabaseException.class);
-    }
-
-    @Test
-    void anEmptyTenantIdCannotBeWrittenWithoutAContext() {
-        addTenant(TENANT_A);
-
-        assertThatThrownBy(() -> app.inSystemTx(tx -> tx.update(ADD_TENANT, "")))
-                .isInstanceOf(DatabaseException.class)
-                .hasStackTraceContaining("row-level security");
-    }
-
-    /** The tenant row is there so that row-level security refuses this, not the foreign key. */
-    @Test
-    void anApplicationWithAnEmptyTenantIdCannotBeWrittenWithoutAContext() throws SQLException {
-        addTenant(TENANT_A);
-        asAdmin("INSERT INTO engine.tenancy_tenants (tenant_id, cell_id) VALUES ('', 'jp1')");
-
-        assertThatThrownBy(() -> app.inSystemTx(tx -> tx.update(ADD_APPLICATION, "app_x", "")))
-                .isInstanceOf(DatabaseException.class)
-                .hasStackTraceContaining("row-level security");
-    }
-
-    @Test
-    void aRowWithAnEmptyTenantIdStaysHiddenWithoutAContext() throws SQLException {
-        addTenant(TENANT_A);
-        asAdmin("""
-                INSERT INTO engine.tenancy_tenants (tenant_id, cell_id) VALUES ('', 'jp1');
-                INSERT INTO engine.tenancy_applications (application_id, tenant_id, environment, api_version, default_data_class)
-                VALUES ('app_x', '', 'test', '2026-11-05', 'internal');
-                """);
-
-        assertThat(tenantsSeenWithoutAContext()).isEmpty();
-        assertThat(applicationsSeenWithoutAContext()).isEmpty();
-    }
-
-    @Test
     void anApplicationNeedsAnExistingTenant() {
         assertThatThrownBy(() -> addApplication("app_x", "ten_unknown"))
                 .isInstanceOf(DatabaseException.class);
@@ -283,10 +149,10 @@ class MigrateRoleTest {
 
     @Test
     void aParentTenantMayLiveInAnotherDatabase() {
-        app.inTenantTx(TENANT_B, tx -> tx.update(
-                "INSERT INTO tenancy_tenants (tenant_id, parent_tenant_id, cell_id) VALUES (?, 'ten_elsewhere', 'jp1')", TENANT_B));
+        app.inTenantTx(TENANT_A, tx -> tx.update(
+                "INSERT INTO tenancy_tenants (tenant_id, parent_tenant_id, cell_id) VALUES (?, 'ten_elsewhere', 'jp1')", TENANT_A));
 
-        assertThat(tenantColumn(TENANT_B, "parent_tenant_id")).containsExactly("ten_elsewhere");
+        assertThat(tenantColumn(TENANT_A, "parent_tenant_id")).containsExactly("ten_elsewhere");
     }
 
     @Test
@@ -367,7 +233,6 @@ class MigrateRoleTest {
         "ALTER TABLE tenancy_tenants NO FORCE ROW LEVEL SECURITY",
         "DROP POLICY tenant_isolation ON tenancy_tenants",
         "DROP TABLE tenancy_applications",
-        "TRUNCATE tenancy_tenants",
         "CREATE TABLE tenancy_extra (id text)"
     })
     void theAppCannotChangeTheStructure(String sql) throws SQLException {

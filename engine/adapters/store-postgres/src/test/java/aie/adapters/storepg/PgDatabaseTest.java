@@ -14,9 +14,13 @@ import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -60,13 +64,17 @@ class PgDatabaseTest {
                     GRANT SELECT, INSERT, UPDATE, DELETE ON engine.notes TO engine_app;
                     """);
         }
+        pool = pool(1);
+        database = new PgDatabase(pool, Duration.ofSeconds(30));
+    }
+
+    private static HikariDataSource pool(int size) {
         HikariConfig config = new HikariConfig();
         config.setJdbcUrl(DATABASE.getJdbcUrl());
         config.setUsername("engine_app");
         config.setPassword(TestDatabase.APP_PASSWORD);
-        config.setMaximumPoolSize(1);
-        pool = new HikariDataSource(config);
-        database = new PgDatabase(pool, Duration.ofSeconds(30));
+        config.setMaximumPoolSize(size);
+        return new HikariDataSource(config);
     }
 
     @AfterAll
@@ -122,6 +130,28 @@ class PgDatabaseTest {
     void aTenantCannotWriteARowForAnotherTenant() {
         assertThatThrownBy(() -> database.inTenantTx(TENANT_A, tx -> tx.update("INSERT INTO notes (tenant_id) VALUES (?)", TENANT_B)))
                 .isInstanceOf(DatabaseException.class);
+    }
+
+    /** Virtual threads, as in the api role, with far fewer connections than work, so tenants keep taking them over. */
+    @Test
+    void tenantsWorkingAtOnceStayApart() throws Exception {
+        insert(TENANT_A, "note of a");
+        insert(TENANT_B, "note of b");
+        try (HikariDataSource twoConnections = pool(2); ExecutorService threads = Executors.newVirtualThreadPerTaskExecutor()) {
+            PgDatabase shared = new PgDatabase(twoConnections, Duration.ofSeconds(30));
+            List<Future<List<String>>> seenByA = new ArrayList<>();
+            List<Future<List<String>>> seenByB = new ArrayList<>();
+            for (int round = 0; round < 100; round++) {
+                seenByA.add(threads.submit(() -> shared.inTenantTx(TENANT_A, PgDatabaseTest::bodies)));
+                seenByB.add(threads.submit(() -> shared.inTenantTx(TENANT_B, PgDatabaseTest::bodies)));
+            }
+            for (Future<List<String>> seen : seenByA) {
+                assertThat(seen.get()).containsExactly("note of a");
+            }
+            for (Future<List<String>> seen : seenByB) {
+                assertThat(seen.get()).containsExactly("note of b");
+            }
+        }
     }
 
     @Test
