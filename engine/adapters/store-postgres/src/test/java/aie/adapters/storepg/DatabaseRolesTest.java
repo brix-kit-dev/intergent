@@ -90,9 +90,19 @@ class DatabaseRolesTest {
         assertThat(flag("SELECT rolinherit FROM pg_roles WHERE rolname = 'engine_owner'")).isFalse();
     }
 
+    /** The new owner needs CREATE on the schema, and only for this, so the script takes it back at once. */
     @Test
-    void engineOwnerCanHandFunctionsToEngineSystem() throws SQLException {
-        assertThat(flag("SELECT pg_has_role('engine_owner', 'engine_system', 'SET')")).isTrue();
+    void engineOwnerCanHandAFunctionToEngineSystem() throws SQLException {
+        run(owner(), """
+                CREATE FUNCTION handed_over() RETURNS int LANGUAGE sql AS 'SELECT 1';
+                GRANT CREATE ON SCHEMA engine TO engine_system;
+                ALTER FUNCTION handed_over() OWNER TO engine_system;
+                REVOKE CREATE ON SCHEMA engine FROM engine_system;
+                """);
+
+        assertThat(flag("SELECT pg_get_userbyid(proowner) = 'engine_system' FROM pg_proc WHERE proname = 'handed_over'"))
+                .isTrue();
+        run(TestDatabase.admin(DATABASE), "DROP FUNCTION engine.handed_over()");
     }
 
     @Test

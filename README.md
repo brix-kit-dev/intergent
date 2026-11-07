@@ -78,6 +78,12 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_OWNER_PASSWO
 
 **新表：** 照 `V1__create_tenants.sql` 写，这是蓝图 5.6 的模板：行级安全、`FORCE`、租户策略、授权。有序列时序列也要授权给 `engine_app`。带 `tenant_id` 的表还要加一条样例行，见[租户隔离](#租户隔离)。
 
+**系统表和系统函数：** 先写进名单 [SystemObjects.java](engine/app/src/test/java/aie/app/SystemObjects.java)，再照 [V1__templates.sql](engine/adapters/store-postgres/src/test/resources/migrations/templates/sample/V1__templates.sql) 写，这是蓝图 7.6 的模板。系统函数有三个容易错的地方：
+
+- **用 PL/pgSQL：** `migrate` 关了 `row_security`，`LANGUAGE sql` 的函数读 `FORCE` 表时建不起来。PL/pgSQL 建函数时不检查里面的 SQL，所以每个系统函数都要有调用它的测试。
+- **先撤销 PUBLIC 权限，再移交所有者：** 移交之后 `engine_owner` 再撤销不报错，但不起作用。
+- **移交时临时授权：** 新所有者要有 schema 的 `CREATE` 权限才能移交，移交后马上收回，否则目录检查失败。
+
 **改租户表的数据：** 表所有者也受 `FORCE` 限制，所以 `migrate` 连接设了 `row_security = off`，忘了解除时直接报错，不会静默更新 0 行。在同一个脚本里先 `NO FORCE`，改完再 `FORCE`。
 
 ## 租户隔离
@@ -96,6 +102,18 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_OWNER_PASSWO
 没有上下文的情况在新连接和复用的连接上各跑一次。两种连接状态不同：复用的连接上这个变量是空串，新连接上没有这个变量。
 
 **新表：** 在测试的 `SAMPLES` 里加一条样例行，父表排在子表前面。不加时这个测试类全部失败，所以新表漏不掉。
+
+这个测试只看得到样例行用到的值。红线 T-1 和 T-5 的迁移部分由目录检查 [CatalogCheck.java](engine/adapters/store-postgres/src/test/java/aie/adapters/storepg/CatalogCheck.java) 管。它在所有脚本跑完后读数据库目录，所以后面的脚本撤掉前面的保护也逃不掉：
+
+| 对象 | 要求 |
+| --- | --- |
+| 名单之外的表 | 有 `NOT NULL` 的 `tenant_id`；行级安全开启并 `FORCE`；策略和模板逐字一致；给 `engine_app` 的授权不超过增删改查，不对 PUBLIC 开放 |
+| 表上的其他策略 | 只能是给 `engine_system` 的只读策略 |
+| 物化视图 | 不允许，行级安全管不到它 |
+| 所有表 | 所有者是 `engine_owner` |
+| `SECURITY DEFINER` 函数 | 在名单里；`search_path` 固定为 `engine, pg_temp`；不对 PUBLIC 开放；所有者是 `engine_system` |
+| `engine_system` | 平时不能在 schema 里建对象 |
+| 名单 | 名单上的表和函数必须存在 |
 
 ## 启动
 

@@ -3,7 +3,9 @@ package aie.app;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import aie.adapters.storepg.CatalogCheck;
 import aie.adapters.storepg.PgDatabase;
+import aie.adapters.storepg.PgMigrations;
 import aie.adapters.storepg.TestDatabase;
 import aie.ports.DatabaseException;
 import java.io.IOException;
@@ -11,7 +13,9 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -63,10 +67,6 @@ class MigrateRoleTest {
                 "--engine.database.url=" + DATABASE.getJdbcUrl(), "--engine.owner.password=" + TestDatabase.OWNER_PASSWORD);
     }
 
-    private static List<String> firstColumn(String sql) throws SQLException {
-        return TestDatabase.firstColumn(DATABASE, sql);
-    }
-
     private static void addTenant(String tenant) {
         app.inTenantTx(tenant, tx -> tx.update(ADD_TENANT, tenant));
     }
@@ -81,7 +81,8 @@ class MigrateRoleTest {
 
     @Test
     void theScriptsWereAppliedInOrder() throws SQLException {
-        assertThat(firstColumn("SELECT version FROM engine.flyway_history_tenancy WHERE type = 'SQL' ORDER BY installed_rank"))
+        assertThat(TestDatabase.firstColumn(
+                        DATABASE, "SELECT version FROM engine.flyway_history_tenancy WHERE type = 'SQL' ORDER BY installed_rank"))
                 .containsExactly("1", "2");
     }
 
@@ -122,23 +123,13 @@ class MigrateRoleTest {
                 .isEqualTo(EngineApplication.EXIT_FAILED);
     }
 
-    @ParameterizedTest
-    @ValueSource(strings = {"tenancy_tenants", "tenancy_applications"})
-    void everyTableFollowsTheTemplate(String table) throws SQLException {
-        String name = "'engine." + table + "'::regclass";
+    @Test
+    void theRealScriptsPassTheCatalogCheck() throws SQLException {
+        Set<String> systemTables = new HashSet<>(SystemObjects.TABLES);
+        new PgMigrations(DATABASE.getJdbcUrl(), TestDatabase.OWNER_PASSWORD).run().keySet()
+                .forEach(module -> systemTables.add("flyway_history_" + module));
 
-        assertThat(firstColumn("SELECT relrowsecurity AND relforcerowsecurity FROM pg_class WHERE oid = " + name))
-                .containsExactly("t");
-        assertThat(firstColumn("SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = " + name))
-                .containsExactly("engine_owner");
-        assertThat(firstColumn("SELECT polname FROM pg_policy WHERE polrelid = " + name))
-                .containsExactly("tenant_isolation");
-        assertThat(firstColumn("SELECT polcmd FROM pg_policy WHERE polrelid = " + name)).containsExactly("*");
-        assertThat(firstColumn("SELECT polroles = '{0}' FROM pg_policy WHERE polrelid = " + name)).containsExactly("t");
-        assertThat(firstColumn("""
-                SELECT privilege_type FROM information_schema.role_table_grants
-                WHERE grantee = 'engine_app' AND table_name = '%s' ORDER BY privilege_type""".formatted(table)))
-                .containsExactly("DELETE", "INSERT", "SELECT", "UPDATE");
+        assertThat(CatalogCheck.violations(DATABASE, systemTables, SystemObjects.FUNCTIONS)).isEmpty();
     }
 
     @Test

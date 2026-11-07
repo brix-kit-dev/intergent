@@ -107,7 +107,9 @@ class TenantIsolationTest {
     }
 
     static List<String> tenantTables() throws SQLException {
-        return TestDatabase.firstColumn(DATABASE, TENANT_TABLES);
+        return TestDatabase.firstColumn(DATABASE, TENANT_TABLES).stream()
+                .filter(table -> !SystemObjects.TABLES.contains(table))
+                .toList();
     }
 
     /** What is really in the table, whatever row-level security lets the engine see. */
