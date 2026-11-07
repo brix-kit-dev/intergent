@@ -54,6 +54,10 @@ class TenantIsolationTest {
             new Sample("tenancy_idempotency_keys", """
                     INSERT INTO tenancy_idempotency_keys (tenant_id, application_id, idempotency_key, fingerprint)
                     VALUES ('{tenant}', 'app_{tenant}', 'key_1', 'fingerprint')
+                    """),
+            new Sample("tenancy_api_keys", """
+                    INSERT INTO tenancy_api_keys (key_id, tenant_id, application_id, key_hash)
+                    VALUES ('key_{tenant}', '{tenant}', 'app_{tenant}', md5('{tenant}') || md5('{tenant}'))
                     """));
 
     private static final String TENANT_TABLES = """

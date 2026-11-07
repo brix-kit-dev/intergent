@@ -12,8 +12,8 @@ import java.util.regex.Pattern;
 import org.springframework.boot.DefaultApplicationArguments;
 
 /**
- * The admin role of blueprint 12.5: opens tenants and applications from the command line, with no HTTP entry. Standard
- * output holds only the new ID, so a script can take it from there.
+ * The admin role of blueprint 12.5: opens tenants and applications and issues their first key, from the command line,
+ * with no HTTP entry. Standard output holds only what was created, so a script can take it from there.
  */
 final class AdminRole {
 
@@ -21,7 +21,8 @@ final class AdminRole {
             Usage: --role=admin <command> [options]
               create-tenant [--parent=<tenant id>]
               create-application --tenant=<tenant id> [--environment=test|live] \
-            [--data-class=public|internal|personal|sensitive]""";
+            [--data-class=public|internal|personal|sensitive]
+              create-key --tenant=<tenant id> --application=<application id>""";
 
     private static final String CELL_CODE = "engine.cell.code";
     /** Blueprint 12.1: the cell code goes into API keys, and anything else would break parsing them. */
@@ -29,7 +30,8 @@ final class AdminRole {
     private static final Set<String> SETTINGS = Set.of("role", RoleSettings.DATABASE_URL, RoleSettings.APP_PASSWORD, CELL_CODE);
     private static final Map<String, Options> COMMANDS = Map.of(
             "create-tenant", new Options(Set.of(), Set.of("parent")),
-            "create-application", new Options(Set.of("tenant"), Set.of("environment", "data-class")));
+            "create-application", new Options(Set.of("tenant"), Set.of("environment", "data-class")),
+            "create-key", new Options(Set.of("tenant", "application"), Set.of()));
 
     private AdminRole() {
     }
@@ -52,6 +54,7 @@ final class AdminRole {
                 case "create-tenant" -> provisioning.createTenant(cell, command.option("parent"));
                 case "create-application" -> provisioning.createApplication(
                         command.option("tenant"), command.option("environment", "test"), command.option("data-class", "internal"));
+                case "create-key" -> issued(provisioning.createKey(command.option("tenant"), command.option("application")));
                 default -> throw new IllegalStateException("No action for " + command.name());
             });
             return 0;
@@ -59,6 +62,11 @@ final class AdminRole {
             System.err.println("Admin failed: " + reason(e));
             return EngineApplication.EXIT_FAILED;
         }
+    }
+
+    /** One line, the ID and then the key, so a script can read both. This is the only time the key is shown. */
+    private static String issued(Provisioning.IssuedKey key) {
+        return key.keyId() + " " + key.key();
     }
 
     private static String cellCode(RoleSettings settings) {

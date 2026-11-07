@@ -167,26 +167,25 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 
 ## 开通租户
 
-租户和应用不走公开 API，用 `admin` 角色在命令行开通，这是蓝图 12.5 的要求。开发环境先按[开发数据库](#开发数据库)建好表，再运行：
+租户、应用和第一把密钥不走公开 API，用 `admin` 角色在命令行开通，这是蓝图 12.5 的要求。开发环境先按[开发数据库](#开发数据库)建好表，再运行：
 
 ```bash
 TENANT=$(deploy/dev/admin.sh create-tenant)
-```
-
-```bash
-deploy/dev/admin.sh create-application --tenant="$TENANT"
+APP=$(deploy/dev/admin.sh create-application --tenant="$TENANT")
+read -r KEY_ID API_KEY <<< "$(deploy/dev/admin.sh create-key --tenant="$TENANT" --application="$APP")"
 ```
 
 | 命令 | 选项 | 输出 |
 | --- | --- | --- |
 | `create-tenant` | `--parent=<租户号>`：上级租户，可以在别的数据库或单元 | 新租户号，如 `ten_01M6...` |
 | `create-application` | `--tenant`：必填；`--environment=test\|live`：默认 `test`；`--data-class`：默认 `internal` | 新应用号，如 `app_01M6...` |
+| `create-key` | `--tenant`、`--application`：都必填 | 一行：密钥号和密钥，如 `key_01M6... aie_test_dev_...` |
 
 - **输出：** 标准输出只有新 ID，脚本可以直接接住。出错写到标准错误，退出码 1；命令或选项写错，退出码 2。
 - **连接：** 和 `api` 一样先过启动自检，再用 `engine_app` 连接。地址里写的用户和会话参数都不起作用。
 - **单元码：** 新租户的单元码取自 `ENGINE_CELL_CODE`，必须是 1 到 8 位小写字母和数字，因为它会写进密钥。开发服务器不是单元，用 `dev`。
 - **API 版本：** 新应用锁定当前版本 `2026-11-05`。
-- **密钥：** 还不能发，下一步做。
+- **密钥：** 形如 `aie_test_dev_` 加 40 位随机字母和数字。前面是应用的环境和租户的单元码，不查库就能看出来。数据库只存 SHA-256 哈希，检查约束挡住任何不像哈希的值。明文只在发放时打印这一次，丢了只能再发一把。一个应用可以有多把密钥。
 
 真实单元这样运行：
 

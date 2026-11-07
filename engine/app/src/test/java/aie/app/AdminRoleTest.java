@@ -1,8 +1,10 @@
 package aie.app;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import aie.adapters.storepg.TestDatabase;
+import aie.core.tenancy.api.ApiKeys;
 import aie.core.tenancy.api.ApiVersion;
 import java.io.IOException;
 import java.sql.SQLException;
@@ -201,6 +203,109 @@ class AdminRoleTest {
         assertThat(admin("create-tenant", "--engine.database.url=")).isEqualTo(EngineApplication.EXIT_FAILED);
 
         assertThat(output.getErr()).contains("ENGINE_DATABASE_URL is required");
+    }
+
+    private static String[] issuedKey(CapturedOutput output, String environment) {
+        String tenant = created(output, "create-tenant");
+        String application = created(output, "create-application", "--tenant=" + tenant, "--environment=" + environment);
+        return created(output, "create-key", "--tenant=" + tenant, "--application=" + application).split(" ");
+    }
+
+    @Test
+    void createKeyPrintsTheKeyIdAndTheKeyAndKeepsOnlyItsHash(CapturedOutput output) throws SQLException {
+        String tenant = created(output, "create-tenant");
+        String application = created(output, "create-application", "--tenant=" + tenant);
+        String[] printed = created(output, "create-key", "--tenant=" + tenant, "--application=" + application).split(" ");
+
+        assertThat(printed).hasSize(2);
+        assertThat(printed[0]).matches("key" + AN_ID);
+        assertThat(printed[1]).matches("aie_test_jp1_[0-9A-Za-z]{40}");
+        assertThat(rows("SELECT concat_ws(',', key_id, tenant_id, application_id, key_hash) FROM engine.tenancy_api_keys"))
+                .containsExactly(String.join(",", printed[0], tenant, application, ApiKeys.hash(printed[1])));
+    }
+
+    @Test
+    void aLiveApplicationGetsALiveKey(CapturedOutput output) {
+        assertThat(issuedKey(output, "live")[1]).startsWith("aie_live_jp1_");
+    }
+
+    /** Every column of every table, as text: the secret part of the key appears in none of them. */
+    @Test
+    void theKeyItselfIsStoredNowhere(CapturedOutput output) throws SQLException {
+        String secret = issuedKey(output, "test")[1].substring("aie_test_jp1_".length());
+
+        for (String table : rows("SELECT relname FROM pg_class WHERE relnamespace = 'engine'::regnamespace AND relkind = 'r'")) {
+            assertThat(rows("SELECT count(*) FROM engine." + table + " t WHERE t::text LIKE '%" + secret + "%'"))
+                    .as(table).containsExactly("0");
+        }
+    }
+
+    @Test
+    void twoKeysOfOneApplicationDiffer(CapturedOutput output) throws SQLException {
+        String tenant = created(output, "create-tenant");
+        String application = created(output, "create-application", "--tenant=" + tenant);
+        String first = created(output, "create-key", "--tenant=" + tenant, "--application=" + application);
+        String second = created(output, "create-key", "--tenant=" + tenant, "--application=" + application);
+
+        assertThat(first.split(" ")[1]).isNotEqualTo(second.split(" ")[1]);
+        assertThat(rows("SELECT count(DISTINCT key_hash) FROM engine.tenancy_api_keys")).containsExactly("2");
+    }
+
+    @Test
+    void aKeyNeedsAnApplicationOfThatTenant(CapturedOutput output) throws SQLException {
+        String owner = created(output, "create-tenant");
+        String application = created(output, "create-application", "--tenant=" + owner);
+        String other = created(output, "create-tenant");
+
+        assertThat(admin("create-key", "--tenant=" + other, "--application=" + application)).isEqualTo(EngineApplication.EXIT_FAILED);
+
+        assertThat(output.getErr()).contains("Admin failed: Application " + application + " does not exist in tenant " + other);
+        assertThat(rows("SELECT count(*) FROM engine.tenancy_api_keys")).containsExactly("0");
+    }
+
+    @Test
+    void createKeyNeedsTheApplication(CapturedOutput output) {
+        assertThat(admin("create-key", "--tenant=ten_x")).isEqualTo(EngineApplication.EXIT_USAGE);
+
+        assertThat(output.getErr()).contains("create-key needs --application.");
+    }
+
+    /** The check behind "only a hash is kept": a key stored in the clear by mistake does not get in. */
+    @Test
+    void theDatabaseRefusesAKeyStoredInTheClear(CapturedOutput output) throws SQLException {
+        String tenant = created(output, "create-tenant");
+        String application = created(output, "create-application", "--tenant=" + tenant);
+
+        assertThatThrownBy(() -> TestDatabase.asAdmin(DATABASE, """
+                INSERT INTO engine.tenancy_api_keys (key_id, tenant_id, application_id, key_hash)
+                VALUES ('key_x', '%s', '%s', '%s')""".formatted(tenant, application, ApiKeys.issue("test", "jp1"))))
+                .hasMessageContaining("tenancy_api_keys_key_hash_check");
+    }
+
+    /** A request finds its key by the hash alone, so no two keys may share one, not even across tenants. */
+    @Test
+    void aHashBelongsToOneKeyOnly(CapturedOutput output) throws SQLException {
+        String[] first = issuedKey(output, "test");
+        String tenant = created(output, "create-tenant");
+        String application = created(output, "create-application", "--tenant=" + tenant);
+
+        assertThatThrownBy(() -> TestDatabase.asAdmin(DATABASE, """
+                INSERT INTO engine.tenancy_api_keys (key_id, tenant_id, application_id, key_hash)
+                VALUES ('key_x', '%s', '%s', '%s')""".formatted(tenant, application, ApiKeys.hash(first[1]))))
+                .hasMessageContaining("tenancy_api_keys_key_hash_key");
+    }
+
+    /** Foreign keys ignore row-level security, so this only holds because the tenant is part of the key. */
+    @Test
+    void aKeyCannotPointAtAnotherTenantsApplication(CapturedOutput output) throws SQLException {
+        String owner = created(output, "create-tenant");
+        String application = created(output, "create-application", "--tenant=" + owner);
+        String other = created(output, "create-tenant");
+
+        assertThatThrownBy(() -> TestDatabase.asAdmin(DATABASE, """
+                INSERT INTO engine.tenancy_api_keys (key_id, tenant_id, application_id, key_hash)
+                VALUES ('key_x', '%s', '%s', '%s')""".formatted(other, application, ApiKeys.hash("x"))))
+                .hasMessageContaining("violates foreign key constraint");
     }
 
     @Test

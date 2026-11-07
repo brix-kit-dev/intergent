@@ -11,4 +11,11 @@ public interface Provisioning {
 
     /** Creates an application of the tenant, locked to the current API version, and returns its ID. */
     String createApplication(String tenantId, String environment, String defaultDataClass);
+
+    /** Issues a key for an application of the tenant. The key itself comes back this once and is stored nowhere. */
+    IssuedKey createKey(String tenantId, String applicationId);
+
+    /** The ID names the key from then on. The key is what the host keeps. */
+    record IssuedKey(String keyId, String key) {
+    }
 }
