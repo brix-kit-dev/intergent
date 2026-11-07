@@ -8,6 +8,9 @@ info:
 
     Compatibility: new fields, optional parameters, event types and enum values are not
     breaking changes, so clients must ignore what they do not recognise.
+
+    Errors: any request can also fail with `internal_error` (500) or, for a wrong method, media
+    type or size, with `invalid_request` and the HTTP status that says so (405, 406, 413, 415).
 servers:
   - url: http://127.0.0.1:18080
     description: Dev server. Each cell has its own address.
@@ -733,6 +736,7 @@ components:
         - action_schema_invalid
         - rate_limited
         - model_unavailable
+        - internal_error
         - output_blocked
         - model_failed
         - stream_interrupted

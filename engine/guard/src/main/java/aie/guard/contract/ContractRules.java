@@ -24,7 +24,7 @@ public final class ContractRules {
     static final Set<String> ERROR_CODES = Set.of(
             "invalid_request", "unauthorized", "budget_exceeded", "forbidden", "not_found", "idempotency_key_in_use",
             "stream_expired", "idempotency_key_reused", "input_blocked", "no_eligible_model", "action_schema_invalid",
-            "rate_limited", "model_unavailable", "output_blocked", "model_failed", "stream_interrupted");
+            "rate_limited", "model_unavailable", "internal_error", "output_blocked", "model_failed", "stream_interrupted");
     /** Blueprint 6.4. */
     static final Set<String> STREAM_EVENTS = Set.of(
             "message.started", "message.delta", "message.citation", "tool.started", "tool.finished",

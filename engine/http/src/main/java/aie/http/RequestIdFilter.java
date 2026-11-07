@@ -23,7 +23,7 @@ class RequestIdFilter extends OncePerRequestFilter {
 
     static final String HEADER = "Request-Id";
     static final String LOG_KEY = "request_id";
-    private static final String PREFIX = "req";
+    static final String PREFIX = "req";
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)

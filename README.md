@@ -1,6 +1,6 @@
 # Intergent
 
-AI 引擎。架构见[蓝图](docs/ai-engine-architecture-blueprint.md)，v1.0 已冻结，改动规则见蓝图 17.3。开发顺序见[第一阶段计划](docs/phase-1-plan.md)。
+AI 引擎。架构见[蓝图](docs/ai-engine-architecture-blueprint.md)，v1.1 已冻结，改动规则见蓝图 17.3。开发顺序见[第一阶段计划](docs/phase-1-plan.md)。
 
 ## 环境
 
@@ -241,13 +241,36 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 
 这些约定在 `engine/http` 实现，对所有路径生效，不只是 `/v1`。
 
-**`Request-Id`：** 每个响应都带一个请求号，如 `req_01M6T3X5Q1GRQ53EE6MPP5WVKP`。调用方报问题时报这个号，日志里搜它就能找到这个请求：
+**`Request-Id`：** 每个响应都带一个请求号，包括 Tomcat 自己拒绝的请求，如 `req_01M6T3X5Q1GRQ53EE6MPP5WVKP`。调用方报问题时报这个号，日志里搜它就能找到这个请求：
 
 ```text
 2026-11-07T13:21:07.503+09:00  INFO 4041939 --- [omcat-handler-1] [req_01M6T3X5Q1GRQ53EE6MPP5WVKP] aie.http.Xxx : ...
 ```
 
 请求号总是引擎自己生成，客户端传来的不用，否则能伪造日志，或者把问题指到别人的请求上。
+
+**错误格式：** 所有错误都是 `application/problem+json`，带稳定的 `code`。客户端看 `code`，不要解析 `title` 和 `detail`：
+
+```json
+{"type":"about:blank","title":"Method Not Allowed","status":405,"code":"invalid_request","detail":"Method 'POST' is not supported."}
+```
+
+| 情况 | HTTP | `code` |
+| --- | --- | --- |
+| 路径不存在 | 404 | `not_found` |
+| 请求格式不对：参数、JSON、方法、媒体类型 | 400、405、406、415 | `invalid_request` |
+| Tomcat 自己拒绝：路径非法、请求行错误、缺 `Host`、请求头过大 | 400 | `invalid_request` |
+| 引擎内部出错 | 500 | `internal_error` |
+
+错误在三个地方转换，这样无论在哪一层失败，格式都一样：
+
+| 在哪里失败 | 谁来转换 |
+| --- | --- |
+| 控制器和 Spring MVC | `ProblemAdvice` |
+| 过滤器抛异常或调用 `sendError` | `ProblemErrorController` |
+| 请求还没到程序，Tomcat 自己拒绝 | `ProblemReportValve`，这种请求的 `Request-Id` 也在这里生成 |
+
+500 不告诉调用方任何内部信息。原因写在日志里，用 `Request-Id` 能查到。`internal_error` 的来历见 [ADR-0001](docs/adr/0001-internal-error-code.md)。
 
 **ID：** `aie.core.Ids` 生成蓝图 6.2 的 ID：类型前缀、时间、随机数。时间在前，所以后生成的排在后面；随机部分让人猜不到相邻的 ID。
 

@@ -192,6 +192,7 @@ components:
         - action_schema_invalid
         - rate_limited
         - model_unavailable
+        - internal_error
         - output_blocked
         - model_failed
         - stream_interrupted

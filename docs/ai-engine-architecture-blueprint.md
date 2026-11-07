@@ -1,8 +1,8 @@
 # Intergent AI 引擎架构设计蓝图
 
-> **版本**: v1.0（已冻结）
-> **日期**: 2026-11-05
-> **状态**: 已冻结。Q-1 到 Q-5 已全部确认，所有单向门都已定下。单向门和红线的变更按 17.3 走 ADR，从 v0.4 到 v1.0 的每一点改动见提交历史
+> **版本**: v1.1（已冻结）
+> **日期**: 2026-11-07
+> **状态**: 已冻结。Q-1 到 Q-5 已全部确认，所有单向门都已定下。单向门和红线的变更按 17.3 走 ADR，从 v0.4 到 v1.0 的每一点改动见提交历史。v1.1 的改动见 [ADR-0001](adr/0001-internal-error-code.md)
 > **权限**: 本文件不授权任何代码改动、远端操作或部署
 > **关联**: [AI 产品平台技术方案](ai-product-platform-technical-plan.md)（为什么做、做什么）、[AI 客服方案](ai-customer-service-module-development-guide.md)（第一个产品）。这两份还没有放进本仓库
 
@@ -605,7 +605,7 @@ Brix 的金仓支持目前只有 `DatabaseDialect` 枚举和驱动类名映射�
 
 | `code` | HTTP | 含义 |
 | --- | --- | --- |
-| `invalid_request` | 400 | 请求格式不对 |
+| `invalid_request` | 400、405、406、413、415 | 请求格式不对。客户端看 `code`，HTTP 状态保持协议上的含义 |
 | `unauthorized` | 401 | 密钥或令牌无效、过期 |
 | `budget_exceeded` | 402 | 预算用完，重试没有用。产品层决定怎么办，比如转留言 |
 | `forbidden` | 403 | 调用方没有这个接口的权限 |
@@ -618,6 +618,7 @@ Brix 的金仓支持目前只有 `DatabaseDialect` 枚举和驱动类名映射�
 | `action_schema_invalid` | 422 | 动作声明不合格，如出现身份字段 |
 | `rate_limited` | 429 | 触发限流，带 `Retry-After` |
 | `model_unavailable` | 503 | 所有候选模型都失败，可以稍后重试 |
+| `internal_error` | 500 | 引擎内部出错，和请求内容无关。响应不含内部细节，凭 `Request-Id` 查日志 |
 | `output_blocked` | 事件 | `message.blocked` 的原因 |
 | `model_failed`、`stream_interrupted` | 事件 | `error` 事件的原因：模型中途失败、生成方崩溃 |
 
