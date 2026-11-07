@@ -29,8 +29,11 @@ class ProblemErrorController implements ErrorController {
             return Problems.response(HttpStatus.NOT_FOUND.value(), null, HttpHeaders.EMPTY);
         }
         if (request.getAttribute(RequestDispatcher.ERROR_EXCEPTION) instanceof Throwable failure) {
-            try (MDC.MDCCloseable context = MDC.putCloseable(RequestIdFilter.LOG_KEY, response.getHeader(RequestIdFilter.HEADER))) {
+            MDC.put(RequestIdFilter.LOG_KEY, response.getHeader(RequestIdFilter.HEADER));
+            try {
                 LOG.error("The request failed", failure);
+            } finally {
+                MDC.remove(RequestIdFilter.LOG_KEY);
             }
         }
         return Problems.response(status, null, HttpHeaders.EMPTY);
