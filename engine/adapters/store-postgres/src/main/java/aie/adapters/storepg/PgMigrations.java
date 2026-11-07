@@ -38,7 +38,7 @@ public final class PgMigrations {
      */
     static final long RUN_LOCK = 20261105L;
 
-    private final PGSimpleDataSource dataSource = new PGSimpleDataSource();
+    private final PGSimpleDataSource dataSource;
     private final String root;
 
     public PgMigrations(String url, String ownerPassword) {
@@ -47,14 +47,7 @@ public final class PgMigrations {
 
     PgMigrations(String url, String ownerPassword, String root) {
         this.root = root;
-        try {
-            dataSource.setUrl(url);
-        } catch (IllegalArgumentException e) {
-            // The driver's message repeats the address, and an address can carry a password.
-            throw new IllegalArgumentException("The database address is not a PostgreSQL JDBC URL");
-        }
-        dataSource.setUser(OWNER);
-        dataSource.setPassword(ownerPassword);
+        this.dataSource = PgConnections.as(OWNER, url, ownerPassword);
         dataSource.setOptions(SESSION_OPTIONS);
     }
 

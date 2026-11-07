@@ -26,10 +26,7 @@ public final class EngineApplication {
             return EXIT_USAGE;
         }
         return switch (role) {
-            case API -> {
-                ApiRole.start(args);
-                yield 0;
-            }
+            case API -> ApiRole.run(args);
             case MIGRATE -> MigrateRole.run(args);
             case WORKER, ADMIN -> notImplemented(role);
         };

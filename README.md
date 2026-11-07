@@ -17,7 +17,7 @@ mvn verify
 
 产物是 `engine/app/target/engine.jar`。
 
-推送前运行完整检查，约 3 分钟。GitHub Actions 运行的是同一个脚本：
+推送前运行完整检查，约 4 分钟。GitHub Actions 运行的是同一个脚本：
 
 ```bash
 engine/verify.sh
@@ -117,19 +117,38 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_OWNER_PASSWO
 
 ## 启动
 
-一个程序包，多种角色，用 `--role` 选择：
+一个程序包，多种角色，用 `--role` 选择。`api` 启动时要连数据库，所以先按[开发数据库](#开发数据库)建好表，再运行：
 
 ```bash
-java -jar engine/app/target/engine.jar --role=api
+deploy/dev/api.sh
 ```
 
 ```bash
 curl http://127.0.0.1:18080/healthz
 ```
 
+真实单元这样运行：
+
+```bash
+ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD=... java -jar engine.jar --role=api
+```
+
+`api` 总是用 `engine_app` 连接，地址里写别的用户也不起作用。
+
+**启动自检：** `api` 先检查 `engine_app`，通过了才打开端口，这是蓝图 7.6 和红线 T-5 的要求。用错角色时程序照常运行，只是隔离悄悄失效，所以下面任何一条成立都拒绝启动，退出码 1：
+
+| 情况 | 为什么拒绝 |
+| --- | --- |
+| 是超级用户，或有 `BYPASSRLS` | 行级安全对它不起作用 |
+| 拥有表 | 所有者能解除 `FORCE` |
+| 是 `engine_system` 的成员 | 这个角色能跨租户读 |
+| 连不上数据库、密码不对、一直没有回应（约 20 秒后放弃） | 查不了就不能当成合规 |
+
+`worker`、`admin` 实现时也要先过这道检查。
+
 | 角色 | 现状 |
 | --- | --- |
-| `api` | 提供 HTTP 服务，目前只有 `/healthz` |
+| `api` | 先过启动自检，再提供 HTTP 服务，目前只有 `/healthz` |
 | `migrate` | 运行数据库迁移，完成后退出 |
 | `worker`、`admin` | 还没实现，打印提示后退出 |
 
@@ -140,7 +159,7 @@ curl http://127.0.0.1:18080/healthz
 | 退出码 | 含义 |
 | --- | --- |
 | 0 | 正常结束 |
-| 1 | 启动失败，如端口被占用；迁移失败 |
+| 1 | 启动失败，如端口被占用；启动自检不通过；迁移失败 |
 | 2 | 角色参数不对：没给、给了多个或不认识 |
 | 3 | 角色还没实现 |
 | 143 | 收到 SIGTERM，处理完请求后退出 |
