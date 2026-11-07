@@ -237,6 +237,20 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 
 **流式接口：** 生成的方法只覆盖 JSON。`text/event-stream` 那一路要手写，第 7 点做。
 
+## 接口约定
+
+这些约定在 `engine/http` 实现，对所有路径生效，不只是 `/v1`。
+
+**`Request-Id`：** 每个响应都带一个请求号，如 `req_01M6T3X5Q1GRQ53EE6MPP5WVKP`。调用方报问题时报这个号，日志里搜它就能找到这个请求：
+
+```text
+2026-11-07T13:21:07.503+09:00  INFO 4041939 --- [omcat-handler-1] [req_01M6T3X5Q1GRQ53EE6MPP5WVKP] aie.http.Xxx : ...
+```
+
+请求号总是引擎自己生成，客户端传来的不用，否则能伪造日志，或者把问题指到别人的请求上。
+
+**ID：** `aie.core.Ids` 生成蓝图 6.2 的 ID：类型前缀、时间、随机数。时间在前，所以后生成的排在后面；随机部分让人猜不到相邻的 ID。
+
 ## CI 和依赖规则
 
 每次推送，GitHub Actions 运行 [ci.yml](.github/workflows/ci.yml)。它只做一件事：用固定哈希的 JDK 和 Maven 运行 `engine/verify.sh`。
