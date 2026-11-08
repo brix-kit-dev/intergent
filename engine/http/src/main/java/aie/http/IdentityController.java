@@ -10,6 +10,8 @@ import aie.http.api.model.CreateSessionRequest;
 import aie.http.api.model.CreatedApiKey;
 import aie.http.api.model.Session;
 import jakarta.servlet.http.HttpServletRequest;
+import java.time.Instant;
+import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.Objects;
 import java.util.Set;
@@ -55,18 +57,20 @@ class IdentityController implements IdentityApi {
     @Override
     public ResponseEntity<CreatedApiKey> createApiKey(CreateApiKeyRequest body, @Nullable String idempotencyKey,
             @Nullable String engineVersion, @Nullable String traceparent, @Nullable String onBehalfOf) {
-        if (body.getExpiresAt() != null) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "expires_at is not supported yet");
+        OffsetDateTime expiresAt = body.getExpiresAt();
+        if (expiresAt != null && !expiresAt.toInstant().isAfter(Instant.now())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "expires_at must be in the future");
         }
         String name = body.getName();
         if (name != null && name.codePointCount(0, name.length()) > MAX_NAME) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "name may be at most " + MAX_NAME + " characters");
         }
-        CreatedKey created = keys.create(caller(), name);
+        CreatedKey created = keys.create(caller(), name, expiresAt == null ? null : expiresAt.toInstant());
         request.setAttribute(IdempotencyFilter.NOT_STORED, Set.of("key"));
         CreatedApiKey answer = new CreatedApiKey(created.keyId(), created.createdAt().atOffset(ZoneOffset.UTC))
                 .key(created.key())
-                .name(created.name());
+                .name(created.name())
+                .expiresAt(created.expiresAt() == null ? null : created.expiresAt().atOffset(ZoneOffset.UTC));
         return ResponseEntity.status(HttpStatus.CREATED).body(answer);
     }
 

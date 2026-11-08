@@ -45,7 +45,7 @@ public final class DatabaseProvisioning implements Provisioning {
     /** Row-level security hides the applications of other tenants, so one of them reads as missing. */
     @Override
     public IssuedKey createKey(String tenantId, String applicationId) {
-        KeyIssuing.Issued issued = database.inTenantTx(tenantId, tx -> KeyIssuing.issue(tx, tenantId, applicationId, null))
+        KeyIssuing.Issued issued = database.inTenantTx(tenantId, tx -> KeyIssuing.issue(tx, tenantId, applicationId, null, null))
                 .orElseThrow(() -> new IllegalArgumentException("Application " + applicationId + " does not exist in tenant " + tenantId));
         return new IssuedKey(issued.keyId(), issued.key());
     }

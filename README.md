@@ -87,7 +87,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_OWNER_PASSWO
 
 **改已有的系统函数：** 函数归 `engine_system` 所有，`engine_owner` 改不了它。照 [V6__revoke_api_keys.sql](engine/core/src/main/resources/db/migration/tenancy/V6__revoke_api_keys.sql) 写：先临时授予 schema 的 `CREATE`，`SET ROLE engine_system` 后用 `CREATE OR REPLACE` 改写，再 `RESET ROLE`，收回授权。`CREATE OR REPLACE` 保留所有者和 `EXECUTE` 授权，但 `SECURITY DEFINER` 和 `search_path` 要重新写上，漏了目录检查会失败。函数读到新列时，记得给 `engine_system` 加这一列的读权限。
 
-现有的系统函数只有 `tenancy_find_api_key`：按哈希找到正在使用的密钥属于哪个租户和应用，已吊销的找不到。`engine_system` 只能读密钥表里它用到的五列，而且只能读不能写。测试函数自己固定的 `search_path` 时，要先给 `engine_app` 临时放开建临时表的权限。[create-roles.sql](deploy/db/create-roles.sql) 已经收回了这个权限，这是第一层防护；不放开的话，测到的只是这一层。
+现有的系统函数只有 `tenancy_find_api_key`：按哈希找到正在使用的密钥属于哪个租户和应用，已吊销和已过期的都找不到。`engine_system` 只能读密钥表里它用到的六列，而且只能读不能写。测试函数自己固定的 `search_path` 时，要先给 `engine_app` 临时放开建临时表的权限。[create-roles.sql](deploy/db/create-roles.sql) 已经收回了这个权限，这是第一层防护；不放开的话，测到的只是这一层。
 
 **改租户表的数据：** 表所有者也受 `FORCE` 限制，所以 `migrate` 连接设了 `row_security = off`，忘了解除时直接报错，不会静默更新 0 行。在同一个脚本里先 `NO FORCE`，改完再 `FORCE`。
 
@@ -296,7 +296,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 | 情况 | HTTP | `code` |
 | --- | --- | --- |
 | 没带密钥，或用的不是 `Bearer` | 401，带 `WWW-Authenticate: Bearer` | `unauthorized` |
-| 密钥格式不对，或查不到 | 401，带 `WWW-Authenticate: Bearer error="invalid_token"` | `unauthorized` |
+| 密钥格式不对、查不到、已吊销或已过期 | 401，带 `WWW-Authenticate: Bearer error="invalid_token"` | `unauthorized` |
 | 带了两个 `Authorization` 头 | 400 | `invalid_request` |
 | 密钥有效，但带了 `On-Behalf-Of` | 403 | `forbidden`，第 10-6 小点之前一律拒绝 |
 | 查找时数据库出错 | 500 | `internal_error`，不会放行 |
@@ -309,7 +309,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 **吊销密钥：** `DELETE /v1/api-keys/{key_id}` 吊销同一个应用的密钥，成功返回 204，吊销后马上失效，再用就是 401：
 
 - **能吊销哪些：** 同一个应用的密钥，包括这次请求用的这把，最后一把也行。密钥泄露时必须能马上停掉；之后要用，再让 `admin` 发一把。
-- **读作不存在：** 别的应用或别的租户的密钥、不存在的、已经吊销的，都返回 404 `not_found`。
+- **读作不存在：** 别的应用或别的租户的密钥、不存在的、已经吊销或已经过期的，都返回 404 `not_found`。
 - **记录保留：** 密钥那一行不删，记下吊销时间，以后能追查。
 
 **新建密钥：** `POST /v1/api-keys` 给调用方的应用再发一把密钥，返回 201，明文只在这次回答里出现。新旧密钥可以同时用，所以轮换的做法是：先建新的，换上，再吊销旧的。
@@ -317,7 +317,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 - **名称：** 可以不写，最多 100 个字符，按字符算，不按字节。
 - **环境和单元码：** 跟着调用方的应用和租户，和 `admin` 发的密钥一样。
 - **重试：** 带同一个 `Idempotency-Key` 重试，拿回同一个密钥号，但没有明文，因为明文从不保存。第一次的回答丢了的话，吊销这个密钥号，换一个新的 `Idempotency-Key` 再建一把。
-- **过期时间：** `expires_at` 在第 10-5-2 小点支持，现在带了返回 400。
+- **过期时间：** `expires_at` 可以不写，写了必须是将来的时间，否则返回 400。过了这个时间，密钥和吊销了一样返回 401，那一行仍然保留。不写就一直有效，直到被吊销。
 
 **`Engine-Version`：** `/v1` 下的请求可以传日期版本，如 `Engine-Version: 2026-11-05`。现在只有这一个版本，不传时也用它；以后按应用锁定的版本走。传别的版本返回 400 `invalid_request`，不会悄悄用另一个版本回答。版本写在 `EngineVersionFilter` 和契约的 `info.version`，测试保证两边一致。
 

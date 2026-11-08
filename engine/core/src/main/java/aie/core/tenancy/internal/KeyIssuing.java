@@ -18,8 +18,8 @@ final class KeyIssuing {
             WHERE a.application_id = ?
             """;
     private static final String ADD_KEY = """
-            INSERT INTO tenancy_api_keys (key_id, tenant_id, application_id, key_hash, name)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO tenancy_api_keys (key_id, tenant_id, application_id, key_hash, name, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             RETURNING created_at
             """;
 
@@ -32,16 +32,16 @@ final class KeyIssuing {
 
     /**
      * Issues a key inside the tenant's transaction. Row-level security hides the applications of other tenants, so one
-     * of them reads as missing and gets nothing. The name may be null.
+     * of them reads as missing and gets nothing. The name and the expiry may be null.
      */
-    static Optional<Issued> issue(Tx tx, String tenantId, String applicationId, String name) {
+    static Optional<Issued> issue(Tx tx, String tenantId, String applicationId, String name, Instant expiresAt) {
         List<String> keys = tx.query(KEY_PARTS, row -> ApiKeys.issue(row.string("environment"), row.string("cell_id")), applicationId);
         if (keys.isEmpty()) {
             return Optional.empty();
         }
         String keyId = Ids.next("key");
         String key = keys.getFirst();
-        Instant createdAt = tx.query(ADD_KEY, row -> row.time("created_at"), keyId, tenantId, applicationId, ApiKeys.hash(key), name)
+        Instant createdAt = tx.query(ADD_KEY, row -> row.time("created_at"), keyId, tenantId, applicationId, ApiKeys.hash(key), name, expiresAt)
                 .getFirst();
         return Optional.of(new Issued(keyId, key, createdAt));
     }

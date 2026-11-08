@@ -286,6 +286,23 @@ class ApiRoleTest {
                 .singleElement().asString().contains(second.getId()).doesNotContain(second.getKey());
     }
 
+    /** A key created with an expiry works until then and gets 401 from that moment on. */
+    @Test
+    void aKeyStopsWorkingWhenItExpires() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String first = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "internal")).key();
+        String expiry = java.time.Instant.now().plusSeconds(3).toString();
+
+        HttpResponse<String> created = createKey(first, "expiring-1", "{\"expires_at\":\"" + expiry + "\"}");
+        String expiring = JSON.readValue(created.body(), CreatedApiKey.class).getKey();
+
+        assertThat(created.statusCode()).isEqualTo(201);
+        assertThat(status("/v1/nothing-here", expiring)).isEqualTo(404);
+        await().atMost(SETTLES).until(() -> status("/v1/nothing-here", expiring) == 401);
+        assertThat(status("/v1/nothing-here", first)).isEqualTo(404);
+    }
+
     @Test
     void missingTheAddressIsRefusedByName(CapturedOutput output) {
         assertThat(ApiRole.run("--engine.database.url=", password("x"))).isEqualTo(EngineApplication.EXIT_FAILED);

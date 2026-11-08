@@ -94,7 +94,7 @@ class ApiKeyManagementTest {
     void aCreatedKeyWorksForTheCallersApplicationNextToTheOldOne() {
         Held held = newKeyOfANewTenant();
 
-        CreatedKey created = management.create(held.owner(), "second");
+        CreatedKey created = management.create(held.owner(), "second", null);
 
         assertThat(lookup.find(created.key()))
                 .contains(new Owner(created.keyId(), held.owner().tenantId(), held.owner().applicationId()));
@@ -106,7 +106,7 @@ class ApiKeyManagementTest {
         String tenant = provisioning.createTenant("jp2", null);
         Held held = newKey(tenant, provisioning.createApplication(tenant, "live", "internal"));
 
-        assertThat(management.create(held.owner(), null).key()).startsWith("aie_live_jp2_");
+        assertThat(management.create(held.owner(), null, null).key()).startsWith("aie_live_jp2_");
     }
 
     @Test
@@ -114,7 +114,7 @@ class ApiKeyManagementTest {
         Held held = newKeyOfANewTenant();
         Instant before = Instant.now();
 
-        CreatedKey created = management.create(held.owner(), "ci");
+        CreatedKey created = management.create(held.owner(), "ci", null);
 
         assertThat(created.name()).isEqualTo("ci");
         assertThat(keyColumn("name", created.keyId())).isEqualTo("ci");
@@ -123,7 +123,7 @@ class ApiKeyManagementTest {
 
     @Test
     void aKeyWithoutANameHasNone() throws SQLException {
-        CreatedKey created = management.create(newKeyOfANewTenant().owner(), null);
+        CreatedKey created = management.create(newKeyOfANewTenant().owner(), null, null);
 
         assertThat(created.name()).isNull();
         assertThat(keyColumn("name", created.keyId())).isNull();
@@ -134,8 +134,8 @@ class ApiKeyManagementTest {
     void theDatabaseRefusesANameOverOneHundredCharacters() {
         Owner owner = newKeyOfANewTenant().owner();
 
-        assertThat(management.create(owner, "n".repeat(100)).name()).hasSize(100);
-        assertThatThrownBy(() -> management.create(owner, "n".repeat(101))).isInstanceOf(DatabaseException.class);
+        assertThat(management.create(owner, "n".repeat(100), null).name()).hasSize(100);
+        assertThatThrownBy(() -> management.create(owner, "n".repeat(101), null)).isInstanceOf(DatabaseException.class);
     }
 
     /** Row-level security hides another tenant's application, so a forged caller gets no key there. */
@@ -145,9 +145,35 @@ class ApiKeyManagementTest {
         Held theirs = newKeyOfANewTenant();
         Owner forged = new Owner(mine.owner().keyId(), mine.owner().tenantId(), theirs.owner().applicationId());
 
-        assertThatThrownBy(() -> management.create(forged, null)).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> management.create(forged, null, null)).isInstanceOf(IllegalStateException.class);
 
         assertThat(TestDatabase.firstColumn(DATABASE, "SELECT count(*) FROM engine.tenancy_api_keys")).containsExactly("2");
+    }
+
+    private static void expire(String keyId) throws SQLException {
+        TestDatabase.asAdmin(DATABASE,
+                "UPDATE engine.tenancy_api_keys SET expires_at = now() - interval '1 second' WHERE key_id = '" + keyId + "'");
+    }
+
+    @Test
+    void aKeyKeepsTheExpiryItWasCreatedWith() throws SQLException {
+        Instant expiry = Instant.parse("2030-01-01T00:00:00Z");
+
+        CreatedKey created = management.create(newKeyOfANewTenant().owner(), null, expiry);
+
+        assertThat(created.expiresAt()).isEqualTo(expiry);
+        assertThat(keyColumn("expires_at = '2030-01-01T00:00:00Z'", created.keyId())).isEqualTo("t");
+        assertThat(lookup.find(created.key())).isPresent();
+    }
+
+    /** An expired key no longer works, so there is nothing left to revoke: it reads as missing. */
+    @Test
+    void anExpiredKeyCannotBeRevoked() throws SQLException {
+        Held held = newKeyOfANewTenant();
+        CreatedKey created = management.create(held.owner(), null, Instant.parse("2030-01-01T00:00:00Z"));
+        expire(created.keyId());
+
+        assertThat(management.revoke(held.owner(), created.keyId())).isFalse();
     }
 
     @Test

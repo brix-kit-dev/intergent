@@ -148,6 +148,27 @@ class ApiKeyLookupTest {
         assertThat(lookup.find(changed)).isEmpty();
     }
 
+    private static void setExpiry(Issued issued, String expiry) throws SQLException {
+        TestDatabase.asAdmin(DATABASE, "UPDATE engine.tenancy_api_keys SET expires_at = " + expiry
+                + " WHERE key_id = '" + issued.key().keyId() + "'");
+    }
+
+    @Test
+    void anExpiredKeyFindsNothing() throws SQLException {
+        Issued issued = issue();
+        setExpiry(issued, "now() - interval '1 second'");
+
+        assertThat(lookup.find(issued.key().key())).isEmpty();
+    }
+
+    @Test
+    void aKeyThatExpiresLaterStillWorks() throws SQLException {
+        Issued issued = issue();
+        setExpiry(issued, "now() + interval '1 hour'");
+
+        assertThat(lookup.find(issued.key().key())).contains(issued.owner());
+    }
+
     /** The function asks for keys in use only, so a revoked key leads nowhere, whoever revoked it. */
     @Test
     void aRevokedKeyFindsNothing() throws SQLException {
@@ -195,6 +216,7 @@ class ApiKeyLookupTest {
     void engineSystemMayOnlyReadWhatTheFunctionNeeds() throws SQLException {
         assertThat(TestDatabase.firstColumn(DATABASE, KEY_TABLE_PRIVILEGES)).containsExactly(
                 "tenancy_api_keys.application_id SELECT",
+                "tenancy_api_keys.expires_at SELECT",
                 "tenancy_api_keys.key_hash SELECT",
                 "tenancy_api_keys.key_id SELECT",
                 "tenancy_api_keys.revoked_at SELECT",

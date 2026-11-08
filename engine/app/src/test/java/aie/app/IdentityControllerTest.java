@@ -140,13 +140,23 @@ class IdentityControllerTest {
         assertThat(KEYS.calls).containsExactly(CALLER + " creates null");
     }
 
-    /** Expiry comes with 10-5-2. Until then a key that would quietly never expire is refused. */
     @Test
-    void anExpiryIsRefusedForNow() throws Exception {
-        HttpResponse<String> response = create("{\"expires_at\":\"2027-01-01T00:00:00Z\"}");
+    void anExpiryInTheFutureIsKept() throws Exception {
+        HttpResponse<String> response = create("{\"expires_at\":\"2030-01-01T09:00:00+09:00\"}");
+
+        assertThat(response.statusCode()).isEqualTo(201);
+        assertThat(response.body()).contains("\"expires_at\":\"2030-01-01T00:00:00Z\"");
+        assertThat(KEYS.calls).containsExactly(CALLER + " creates null until 2030-01-01T00:00:00Z");
+    }
+
+    /** A key that would be dead on arrival is a mistake of the caller, so it gets no key at all. */
+    @ParameterizedTest
+    @ValueSource(strings = {"2020-01-01T00:00:00Z", "2026-11-08T00:00:00Z"})
+    void anExpiryThatHasPassedIsRefused(String expiry) throws Exception {
+        HttpResponse<String> response = create("{\"expires_at\":\"" + expiry + "\"}");
 
         assertProblem(response, 400, "invalid_request");
-        assertThat(detail(response)).isEqualTo("expires_at is not supported yet");
+        assertThat(detail(response)).isEqualTo("expires_at must be in the future");
         assertThat(KEYS.calls).isEmpty();
     }
 

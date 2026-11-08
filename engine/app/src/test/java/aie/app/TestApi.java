@@ -72,9 +72,10 @@ final class TestApi {
         }
 
         @Override
-        public CreatedKey create(Owner caller, String name) {
-            calls.add(caller.keyId() + " of " + caller.tenantId() + "/" + caller.applicationId() + " creates " + name);
-            return new CreatedKey("key_created" + calls.size(), "aie_test_dev_" + "5".repeat(40), name, CREATED_AT);
+        public CreatedKey create(Owner caller, String name, Instant expiresAt) {
+            calls.add(caller.keyId() + " of " + caller.tenantId() + "/" + caller.applicationId() + " creates " + name
+                    + (expiresAt == null ? "" : " until " + expiresAt));
+            return new CreatedKey("key_created" + calls.size(), "aie_test_dev_" + "5".repeat(40), name, CREATED_AT, expiresAt);
         }
 
         @Override
