@@ -162,11 +162,56 @@ class ApiKeyFilterTest {
         }
     }
 
-    @Test
-    void onBehalfOfIsRefusedUntilLowerTenantsAreChecked() throws Exception {
-        HttpResponse<String> response = send(withKey(PATH).header("On-Behalf-Of", "ten_lower"));
+    static List<String> notTenantIds() {
+        return List.of("app_lower", "ten_", "ten_low er", "TEN_lower", "ten_lower-1", "ten_" + "x".repeat(61));
+    }
 
-        assertThat(problem(response, 403, "forbidden").getDetail()).isEqualTo("On-Behalf-Of is not supported yet");
+    private static String raw(String headers) throws IOException {
+        try (Socket socket = new Socket("127.0.0.1", port)) {
+            socket.setSoTimeout(5000);
+            socket.getOutputStream().write(("GET " + PATH + " HTTP/1.1\r\nHost: x\r\nConnection: close\r\nAuthorization: "
+                            + TestApi.AUTHORIZATION + "\r\n" + headers + "\r\n")
+                    .getBytes(StandardCharsets.ISO_8859_1));
+            return new String(socket.getInputStream().readAllBytes(), StandardCharsets.ISO_8859_1);
+        }
+    }
+
+    /** Blueprint 6.5: the request runs as the lower tenant's application of the key's environment, under the platform's key. */
+    @Test
+    void aLowerTenantIsActedForAsItsApplicationOfTheKeysEnvironment() throws Exception {
+        HttpResponse<String> response = send(withKey("/v1/test/caller").header("On-Behalf-Of", "ten_lower"));
+
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(JSON.readValue(response.body(), Caller.class)).isEqualTo(new Caller("key_test", "ten_lower", "app_lower_test"));
+    }
+
+    @Test
+    void aTenantThatIsNotALowerTenantIsForbidden() throws Exception {
+        HttpResponse<String> response = send(withKey(PATH).header("On-Behalf-Of", "ten_other"));
+
+        assertThat(problem(response, 403, "forbidden").getDetail()).isEqualTo("ten_other is not a lower tenant of this key's tenant");
+    }
+
+    @Test
+    void aLowerTenantWithoutASingleApplicationIsForbidden() throws Exception {
+        HttpResponse<String> response = send(withKey(PATH).header("On-Behalf-Of", "ten_empty"));
+
+        assertThat(problem(response, 403, "forbidden").getDetail()).isEqualTo("ten_empty has no single test application to act as");
+    }
+
+    @ParameterizedTest
+    @MethodSource("notTenantIds")
+    void anOnBehalfOfThatIsNoTenantIdIsRefused(String value) throws Exception {
+        HttpResponse<String> response = send(withKey(PATH).header("On-Behalf-Of", value));
+
+        assertThat(problem(response, 400, "invalid_request").getDetail()).isEqualTo("Send one On-Behalf-Of with a tenant ID");
+    }
+
+    /** Two of them, or an empty one, would leave it open whom the request is for. */
+    @ParameterizedTest
+    @ValueSource(strings = {"On-Behalf-Of: ten_lower\r\nOn-Behalf-Of: ten_lower\r\n", "On-Behalf-Of:\r\n"})
+    void twoOrAnEmptyOnBehalfOfAreRefused(String headers) throws Exception {
+        assertThat(raw(headers)).startsWith("HTTP/1.1 400").contains("Send one On-Behalf-Of with a tenant ID");
     }
 
     @Test

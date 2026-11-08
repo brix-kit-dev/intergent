@@ -304,13 +304,23 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 | 没带密钥，或用的不是 `Bearer` | 401，带 `WWW-Authenticate: Bearer` | `unauthorized` |
 | 密钥格式不对、查不到、已吊销或已过期 | 401，带 `WWW-Authenticate: Bearer error="invalid_token"` | `unauthorized` |
 | 带了两个 `Authorization` 头 | 400 | `invalid_request` |
-| 密钥有效，但带了 `On-Behalf-Of` | 403 | `forbidden`，第 10-6 小点之前一律拒绝 |
+| `On-Behalf-Of` 不是一个租户号，或带了两个 | 400 | `invalid_request` |
+| `On-Behalf-Of` 指的不是这个密钥所属租户的直接下级 | 403 | `forbidden` |
+| 下级租户在密钥的环境里没有应用，或有不止一个 | 403 | `forbidden` |
 | 查找时数据库出错 | 500 | `internal_error`，不会放行 |
 
 - **怎么查：** 先看格式，格式不对就不查数据库。格式对的，按 SHA-256 哈希调用系统函数 `tenancy_find_api_key`，找到租户和应用。之后的处理都在这个租户的事务里做。
 - **调用方：** `/v1` 的处理代码从请求属性 `aie.http.caller` 读调用方，里面有密钥号、租户号和应用号。
 - **密钥不进日志：** 不管密钥对不对，请求成功还是失败，日志里都没有它。
 - **不需要密钥：** `/healthz` 和 `/v1` 以外的路径。
+
+**代下级租户操作（`On-Behalf-Of`）：** Brix 这类平台型宿主用自己的密钥，加上 `On-Behalf-Of: <下级租户号>`，替它的下级租户调用。这和 Stripe Connect 的做法一样：
+
+- **算哪个应用：** 请求按这个下级租户、以及它和密钥同环境的那个应用来处理。测试密钥对应测试应用，正式密钥对应正式应用。
+- **不猜：** 同环境的应用没有或不止一个，就返回 403，不会挑一个。
+- **只算直接下级：** 下级的下级、无关租户、自己的租户，都不行。
+- **密钥号：** 请求里的密钥号仍是平台自己的，以后审计能看出是谁代为操作。
+- **其他功能照常：** 新建、吊销密钥和幂等记录，都记在下级租户的应用名下。
 
 **吊销密钥：** `DELETE /v1/api-keys/{key_id}` 吊销同一个应用的密钥，成功返回 204，吊销后马上失效，再用就是 401：
 
@@ -356,7 +366,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 | 情况 | HTTP | `code` |
 | --- | --- | --- |
 | 没带密钥，或密钥无效 | 401 | `unauthorized` |
-| 没有权限，比如现在的 `On-Behalf-Of` | 403 | `forbidden` |
+| 没有权限，比如代一个不是下级的租户操作 | 403 | `forbidden` |
 | 路径不存在 | 404 | `not_found` |
 | 请求格式不对：参数、JSON、方法、媒体类型、请求体太大 | 400、405、406、413、415 | `invalid_request` |
 | 同一个 `Idempotency-Key` 的请求还在处理 | 409 | `idempotency_key_in_use` |

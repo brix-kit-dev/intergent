@@ -527,7 +527,10 @@ components:
     OnBehalfOf:
       name: On-Behalf-Of
       in: header
-      description: The lower tenant a platform host acts for. Server keys only.
+      description: |
+        The lower tenant a platform host acts for, with a key of its own tenant. Server keys only. The request
+        runs as that tenant's application of the key's environment. It is `forbidden` when the tenant is not a
+        direct lower tenant of the key's tenant, or has no single application of that environment.
       schema:
         type: string
         maxLength: 64

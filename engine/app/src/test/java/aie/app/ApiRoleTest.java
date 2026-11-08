@@ -99,6 +99,16 @@ class ApiRoleTest {
         return HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
     }
 
+    private static HttpResponse<String> onBehalfOf(HttpRequest.Builder request, String key, String lower) throws Exception {
+        return HttpClient.newHttpClient().send(
+                request.header("Authorization", "Bearer " + key).header("On-Behalf-Of", lower).build(),
+                HttpResponse.BodyHandlers.ofString());
+    }
+
+    private static HttpRequest.Builder at(String path) {
+        return HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path));
+    }
+
     private static int status(String path, String key) throws Exception {
         HttpRequest request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
                 .header("Authorization", "Bearer " + key)
@@ -301,6 +311,34 @@ class ApiRoleTest {
         assertThat(status("/v1/nothing-here", expiring)).isEqualTo(404);
         await().atMost(SETTLES).until(() -> status("/v1/nothing-here", expiring) == 401);
         assertThat(status("/v1/nothing-here", first)).isEqualTo(404);
+    }
+
+    /** On-Behalf-Of on the real database: the platform's key works as its lower tenant's application, and nowhere else. */
+    @Test
+    void aPlatformActsForItsLowerTenant() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String platform = provisioning.createTenant("jp1", null);
+        IssuedKey platformKey = provisioning.createKey(platform, provisioning.createApplication(platform, "test", "internal"));
+        String lower = provisioning.createTenant("jp1", platform);
+        String lowerApplication = provisioning.createApplication(lower, "test", "internal");
+        String unrelated = provisioning.createTenant("jp1", null);
+        provisioning.createApplication(unrelated, "test", "internal");
+
+        HttpResponse<String> seen = onBehalfOf(at("/v1/test/caller"), platformKey.key(), lower);
+        HttpResponse<String> created = onBehalfOf(at("/v1/api-keys").header("Idempotency-Key", "for-lower-1")
+                .header("Content-Type", "application/json").POST(BodyPublishers.ofString("{\"name\":\"lower\"}")), platformKey.key(), lower);
+        String lowerKey = JSON.readValue(created.body(), CreatedApiKey.class).getKey();
+        HttpResponse<String> seenWithTheNewKey = HttpClient.newHttpClient().send(
+                at("/v1/test/caller").header("Authorization", "Bearer " + lowerKey).build(), HttpResponse.BodyHandlers.ofString());
+
+        assertThat(seen.body()).contains("\"keyId\":\"" + platformKey.keyId() + "\"")
+                .contains("\"tenantId\":\"" + lower + "\"").contains("\"applicationId\":\"" + lowerApplication + "\"");
+        assertThat(created.statusCode()).isEqualTo(201);
+        assertThat(seenWithTheNewKey.body()).contains("\"tenantId\":\"" + lower + "\"").contains("\"applicationId\":\"" + lowerApplication + "\"");
+        assertThat(TestDatabase.firstColumn(DATABASE,
+                        "SELECT tenant_id || ' ' || application_id FROM engine.tenancy_idempotency_keys WHERE idempotency_key = 'for-lower-1'"))
+                .containsExactly(lower + " " + lowerApplication);
+        assertThat(onBehalfOf(at("/v1/test/caller"), platformKey.key(), unrelated).statusCode()).isEqualTo(403);
     }
 
     @Test

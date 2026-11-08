@@ -2,6 +2,9 @@ package aie.http;
 
 import aie.core.tenancy.api.ApiKeyLookup;
 import aie.core.tenancy.api.ApiKeyLookup.Owner;
+import aie.core.tenancy.api.ApiKeys;
+import aie.core.tenancy.api.LowerTenants;
+import aie.core.tenancy.api.LowerTenants.Acting;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -10,6 +13,7 @@ import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
+import java.util.regex.Pattern;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpHeaders;
@@ -21,6 +25,10 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * 6750). The key leads to its tenant and application through the system path of blueprint 7.6, and the request carries
  * them from here on as {@link #CALLER}. This runs before the version check, because the version a request gets will
  * depend on its application. The key itself is never logged.
+ *
+ * <p>With On-Behalf-Of, a platform host's key acts for one of its lower tenants (blueprint 6.5): the request then
+ * carries that tenant and its application of the key's environment, as {@link LowerTenants} decides, and keeps the
+ * platform's key ID, so that it shows who acted.
  */
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE + 2)
@@ -33,11 +41,15 @@ class ApiKeyFilter extends OncePerRequestFilter {
     /** RFC 6750 3.1: a request without Bearer credentials gets the challenge alone, a bad key gets the error too. */
     private static final String INVALID_KEY = SCHEME + " error=\"invalid_token\"";
     private static final String ON_BEHALF_OF = "On-Behalf-Of";
+    /** A tenant ID; the contract allows On-Behalf-Of 64 characters. */
+    private static final Pattern TENANT_ID = Pattern.compile("ten_[0-9A-Za-z]{1,60}");
 
     private final ApiKeyLookup keys;
+    private final LowerTenants lowerTenants;
 
-    ApiKeyFilter(ApiKeyLookup keys) {
+    ApiKeyFilter(ApiKeyLookup keys, LowerTenants lowerTenants) {
         this.keys = keys;
+        this.lowerTenants = lowerTenants;
     }
 
     @Override
@@ -59,17 +71,35 @@ class ApiKeyFilter extends OncePerRequestFilter {
             refuse(response, SCHEME, "Send an API key as Authorization: Bearer");
             return;
         }
-        Optional<Owner> owner = keys.find(space < 0 ? "" : header.substring(space).strip());
+        String token = space < 0 ? "" : header.substring(space).strip();
+        Optional<Owner> owner = keys.find(token);
         if (owner.isEmpty()) {
             refuse(response, INVALID_KEY, "The API key is not valid");
             return;
         }
-        // Acting for a lower tenant needs the check of 10-6. Until then no tenant is one this key may act for.
-        if (request.getHeader(ON_BEHALF_OF) != null) {
-            response.sendError(HttpServletResponse.SC_FORBIDDEN, ON_BEHALF_OF + " is not supported yet");
-            return;
+        Owner caller = owner.get();
+        List<String> lower = Collections.list(request.getHeaders(ON_BEHALF_OF));
+        if (!lower.isEmpty()) {
+            if (lower.size() > 1 || !TENANT_ID.matcher(lower.getFirst()).matches()) {
+                response.sendError(HttpServletResponse.SC_BAD_REQUEST, "Send one " + ON_BEHALF_OF + " with a tenant ID");
+                return;
+            }
+            String tenant = lower.getFirst();
+            String environment = ApiKeys.parse(token).orElseThrow().environment();
+            switch (lowerTenants.actFor(caller, environment, tenant)) {
+                case Acting.As(Owner acting) -> caller = acting;
+                case Acting.NotALowerTenant notOne -> {
+                    response.sendError(HttpServletResponse.SC_FORBIDDEN, tenant + " is not a lower tenant of this key's tenant");
+                    return;
+                }
+                case Acting.NoSingleApplication none -> {
+                    response.sendError(HttpServletResponse.SC_FORBIDDEN,
+                            tenant + " has no single " + environment + " application to act as");
+                    return;
+                }
+            }
         }
-        request.setAttribute(CALLER, owner.get());
+        request.setAttribute(CALLER, caller);
         chain.doFilter(request, response);
     }
 

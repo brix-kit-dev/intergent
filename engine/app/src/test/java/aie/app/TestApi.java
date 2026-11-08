@@ -5,6 +5,8 @@ import aie.core.tenancy.api.ApiKeyLookup.Owner;
 import aie.core.tenancy.api.ApiKeyManagement;
 import aie.core.tenancy.api.ApiKeyManagement.CreatedKey;
 import aie.core.tenancy.api.IdempotencyKeys;
+import aie.core.tenancy.api.LowerTenants;
+import aie.core.tenancy.api.LowerTenants.Acting;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -23,6 +25,12 @@ final class TestApi {
     static final String AUTHORIZATION = "Bearer " + KEY;
     /** Knows {@link #KEY} and nothing else. */
     static final ApiKeyLookup LOOKUP = key -> KEY.equals(key) ? Optional.of(OWNER) : Optional.empty();
+    /** ten_lower is a lower tenant with one application of each environment, ten_empty one without any. */
+    static final LowerTenants LOWER_TENANTS = (caller, environment, tenant) -> switch (tenant) {
+        case "ten_lower" -> new Acting.As(new Owner(caller.keyId(), "ten_lower", "app_lower_" + environment));
+        case "ten_empty" -> new Acting.NoSingleApplication();
+        default -> new Acting.NotALowerTenant();
+    };
     /** Lets every request run and remembers nothing. IdempotencyTest checks the real keys on a database. */
     static final IdempotencyKeys NO_REPLAYS = new IdempotencyKeys() {
 
@@ -52,6 +60,7 @@ final class TestApi {
             context.registerBean(ApiKeyLookup.class, () -> keys);
             context.registerBean(ApiKeyManagement.class, () -> management);
             context.registerBean(IdempotencyKeys.class, () -> NO_REPLAYS);
+            context.registerBean(LowerTenants.class, () -> LOWER_TENANTS);
         }, args);
     }
 

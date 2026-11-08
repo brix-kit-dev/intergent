@@ -103,10 +103,22 @@ class IdentityControllerTest {
         assertThat(KEYS.calls).isEmpty();
     }
 
+    /** On-Behalf-Of: the platform's key revokes a key of the lower tenant's application. */
     @Test
-    void revokingOnBehalfOfALowerTenantIsRefusedForNow() throws Exception {
-        HttpResponse<String> response = send(request("/v1/api-keys/key_other")
+    void aPlatformRevokesAKeyOfItsLowerTenant() throws Exception {
+        KEYS.allow("key_lower");
+
+        HttpResponse<String> response = send(request("/v1/api-keys/key_lower")
                 .header("Authorization", TestApi.AUTHORIZATION).header("On-Behalf-Of", "ten_lower").DELETE());
+
+        assertThat(response.statusCode()).isEqualTo(204);
+        assertThat(KEYS.calls).containsExactly("key_test of ten_lower/app_lower_test revokes key_lower");
+    }
+
+    @Test
+    void actingForATenantThatIsNotALowerTenantIsForbidden() throws Exception {
+        HttpResponse<String> response = send(request("/v1/api-keys/key_other")
+                .header("Authorization", TestApi.AUTHORIZATION).header("On-Behalf-Of", "ten_other").DELETE());
 
         assertProblem(response, 403, "forbidden");
         assertThat(KEYS.calls).isEmpty();
