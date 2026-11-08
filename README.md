@@ -78,11 +78,14 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_OWNER_PASSWO
 
 **新表：** 照 `V1__create_tenants.sql` 写，这是蓝图 5.6 的模板：行级安全、`FORCE`、租户策略、授权。有序列时序列也要授权给 `engine_app`。带 `tenant_id` 的表还要加一条样例行，见[租户隔离](#租户隔离)。
 
-**系统表和系统函数：** 先写进名单 [SystemObjects.java](engine/app/src/test/java/aie/app/SystemObjects.java)，再照 [V1__templates.sql](engine/adapters/store-postgres/src/test/resources/migrations/templates/sample/V1__templates.sql) 写，这是蓝图 7.6 的模板。系统函数有三个容易错的地方：
+**系统表和系统函数：** 先写进名单 [SystemObjects.java](engine/app/src/test/java/aie/app/SystemObjects.java)，再照 [V1__templates.sql](engine/adapters/store-postgres/src/test/resources/migrations/templates/sample/V1__templates.sql) 写，这是蓝图 7.6 的模板。系统函数有四个容易错的地方：
 
 - **用 PL/pgSQL：** `migrate` 关了 `row_security`，`LANGUAGE sql` 的函数读 `FORCE` 表时建不起来。PL/pgSQL 建函数时不检查里面的 SQL，所以每个系统函数都要有调用它的测试。
 - **先撤销 PUBLIC 权限，再移交所有者：** 移交之后 `engine_owner` 再撤销不报错，但不起作用。
 - **移交时临时授权：** 新所有者要有 schema 的 `CREATE` 权限才能移交，移交后马上收回，否则目录检查失败。
+- **输出列和表里的列同名时写上表名：** `RETURNS TABLE` 的列在函数体里也是变量，不写表名，调用时会报列名有歧义。
+
+现有的系统函数只有 `tenancy_find_api_key`：按哈希找到密钥属于哪个租户和应用。`engine_system` 只能读密钥表里它用到的四列，而且只能读不能写。测试函数自己固定的 `search_path` 时，要先给 `engine_app` 临时放开建临时表的权限。[create-roles.sql](deploy/db/create-roles.sql) 已经收回了这个权限，这是第一层防护；不放开的话，测到的只是这一层。
 
 **改租户表的数据：** 表所有者也受 `FORCE` 限制，所以 `migrate` 连接设了 `row_security = off`，忘了解除时直接报错，不会静默更新 0 行。在同一个脚本里先 `NO FORCE`，改完再 `FORCE`。
 

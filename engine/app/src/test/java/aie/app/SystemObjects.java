@@ -10,7 +10,7 @@ import java.util.Set;
 final class SystemObjects {
 
     static final Set<String> TABLES = Set.of();
-    static final Set<String> FUNCTIONS = Set.of();
+    static final Set<String> FUNCTIONS = Set.of("tenancy_find_api_key");
 
     private SystemObjects() {
     }
