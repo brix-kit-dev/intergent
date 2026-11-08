@@ -71,9 +71,25 @@ class RepositoryFilesTest {
         assertThat(Files.readString(repository.resolve(".github/workflows/ci.yml")))
                 .contains("run: engine/verify.sh\n");
         assertThat(Files.readString(engine.resolve("verify.sh")))
-                .contains("mvn -B -ntp -Dmaven.repo.local=\"$repository\" clean verify\n")
+                .contains("mvn -B -ntp \"${retries[@]}\" -Dmaven.repo.local=\"$repository\" clean verify\n")
                 .contains("\"${check[@]}\" check . \"$repository\"\n")
                 .contains("set -euo pipefail\n");
+    }
+
+    /** Maven 3.8.7 gives up on the first 503 from Maven Central unless the build sets these (code point 18). */
+    @Test
+    void theBuildRetriesMavenCentral() throws IOException {
+        assertThat(Files.readString(engine.resolve("verify.sh"))).contains("""
+
+                retries=(
+                  -Dmaven.wagon.http.serviceUnavailableRetryStrategy.class=standard
+                  -Dmaven.wagon.http.serviceUnavailableRetryStrategy.retryInterval=5000
+                  -Dmaven.wagon.http.serviceUnavailableRetryStrategy.maxRetries=10
+                  -Dmaven.wagon.http.retryHandler.count=3
+                  -Dmaven.wagon.httpconnectionManager.ttlSeconds=25
+                )
+                mvn -B -ntp "${retries[@]}" -Dmaven.repo.local="$repository" clean verify
+                """);
     }
 
     @Test
