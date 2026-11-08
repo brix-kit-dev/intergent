@@ -156,6 +156,8 @@ f430c92394c2053f168715853da96d99996e94e34e5a291b97c5c86a5ad62a98  com/googlecode
 8ab515baad74a82dabb02ebe9e6f172d48f4afed0ac80c67eda28846a6cdedd0  com/googlecode/libphonenumber/libphonenumber/8.11.1/libphonenumber-8.11.1.pom
 890daa95dd3892d34d9fabc27cd5153656e6f369358625c88f4dc7b79cbd6c5a  com/jayway/jsonpath/json-path/2.10.0/json-path-2.10.0.jar
 68caa1e4610b9657ca9a3cb8ee6a6f92be3223197dfa1aa4f2a98c2f4f5f04e5  com/jayway/jsonpath/json-path/2.10.0/json-path-2.10.0.pom
+0edd2fbaab79e13f87d145d021f85a5c59956b2b6b5e761c0d664c87f94cda15  com/nimbusds/nimbus-jose-jwt/10.10/nimbus-jose-jwt-10.10.jar
+ffde352127bbf74d868d6c307791321f38911afd8458c56d89522cfe9793e11e  com/nimbusds/nimbus-jose-jwt/10.10/nimbus-jose-jwt-10.10.pom
 8853dce132c9ece4c295c7f4d4f3c2832eee0d7d44930870c0666fa72043ca56  com/querydsl/querydsl-bom/5.1.0/querydsl-bom-5.1.0.pom
 3d4b984abd66908f05b38c9c892325cd4785d01ff33922569ff9b90c9ebfc475  com/samskivert/jmustache/1.16/jmustache-1.16.jar
 8df023119cadcb6ec5780abc8e61f873c572065d99d3ba646e250c4693e77354  com/samskivert/jmustache/1.16/jmustache-1.16.pom
