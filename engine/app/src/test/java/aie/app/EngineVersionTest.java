@@ -20,15 +20,15 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
-import org.springframework.boot.WebApplicationType;
-import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
-import org.springframework.boot.web.server.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.context.ConfigurableApplicationContext;
 import tools.jackson.databind.json.JsonMapper;
 
-/** No /v1 route exists yet, so a request that passes the check ends in a 404, and one that does not in a 400. */
+/**
+ * No /v1 route exists yet, so a request that passes the check ends in a 404, and one that does not in a 400. Every
+ * request carries the stand-in's key, because the key is checked first.
+ */
 @ExtendWith(OutputCaptureExtension.class)
 class EngineVersionTest {
 
@@ -43,8 +43,8 @@ class EngineVersionTest {
 
     @BeforeAll
     static void start() {
-        context = new SpringApplicationBuilder(ApiRole.class).web(WebApplicationType.SERVLET).run("--server.port=0");
-        port = ((ServletWebServerApplicationContext) context).getWebServer().getPort();
+        context = TestApi.start("--server.port=0");
+        port = TestApi.port(context);
     }
 
     @AfterAll
@@ -53,7 +53,8 @@ class EngineVersionTest {
     }
 
     private static HttpRequest.Builder request(String path) {
-        return HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path));
+        return HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
+                .header("Authorization", TestApi.AUTHORIZATION);
     }
 
     private static HttpResponse<String> send(HttpRequest.Builder request) throws Exception {
@@ -115,7 +116,7 @@ class EngineVersionTest {
 
         try (Socket socket = new Socket("127.0.0.1", port)) {
             socket.setSoTimeout(5000);
-            socket.getOutputStream().write(("GET " + PUBLIC_PATH + " HTTP/1.1\r\nHost: x\r\nConnection: close\r\n" + twice + "\r\n")
+            socket.getOutputStream().write(("GET " + PUBLIC_PATH + " HTTP/1.1\r\nHost: x\r\nConnection: close\r\nAuthorization: " + TestApi.AUTHORIZATION + "\r\n" + twice + "\r\n")
                     .getBytes(StandardCharsets.ISO_8859_1));
             assertThat(new String(socket.getInputStream().readAllBytes(), StandardCharsets.ISO_8859_1)).startsWith("HTTP/1.1 400");
         }
@@ -125,7 +126,7 @@ class EngineVersionTest {
     void anEmptyVersionIsRefused() throws IOException {
         try (Socket socket = new Socket("127.0.0.1", port)) {
             socket.setSoTimeout(5000);
-            socket.getOutputStream().write(("GET " + PUBLIC_PATH + " HTTP/1.1\r\nHost: x\r\nConnection: close\r\n" + HEADER + ":\r\n\r\n")
+            socket.getOutputStream().write(("GET " + PUBLIC_PATH + " HTTP/1.1\r\nHost: x\r\nConnection: close\r\nAuthorization: " + TestApi.AUTHORIZATION + "\r\n" + HEADER + ":\r\n\r\n")
                     .getBytes(StandardCharsets.ISO_8859_1));
             assertThat(new String(socket.getInputStream().readAllBytes(), StandardCharsets.ISO_8859_1)).startsWith("HTTP/1.1 400");
         }

@@ -32,11 +32,16 @@ final class Problems {
         return known == null ? "Error" : known.getReasonPhrase();
     }
 
-    /** The codes a request can earn before any business logic runs. The modules bring the rest of blueprint 6.10. */
+    /**
+     * The codes a request can earn before any business logic runs. Blueprint 6.10 gives 401, 403 and 404 a code of
+     * their own; the modules bring the rest.
+     */
     private static String code(int status) {
-        if (status == HttpStatus.NOT_FOUND.value()) {
-            return "not_found";
-        }
-        return status < HttpStatus.INTERNAL_SERVER_ERROR.value() ? "invalid_request" : "internal_error";
+        return switch (status) {
+            case 401 -> "unauthorized";
+            case 403 -> "forbidden";
+            case 404 -> "not_found";
+            default -> status < HttpStatus.INTERNAL_SERVER_ERROR.value() ? "invalid_request" : "internal_error";
+        };
     }
 }

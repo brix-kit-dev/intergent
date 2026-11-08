@@ -2,7 +2,10 @@ package aie.app;
 
 import aie.adapters.storepg.PgPool;
 import aie.adapters.storepg.PgRuntime;
+import aie.core.tenancy.api.ApiKeyLookup;
+import aie.core.tenancy.internal.DatabaseApiKeyLookup;
 import aie.ports.DatabaseException;
+import java.util.function.Consumer;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.builder.SpringApplicationBuilder;
@@ -36,13 +39,21 @@ class ApiRole {
         PgPool database = PgRuntime.pool(
                 settings.required(RoleSettings.DATABASE_URL), settings.required(RoleSettings.APP_PASSWORD), POOL_SIZE);
         try {
-            return new SpringApplicationBuilder(ApiRole.class)
-                    .web(WebApplicationType.SERVLET)
-                    .initializers(context -> ((GenericApplicationContext) context).registerBean(PgPool.class, () -> database))
-                    .run(args);
+            return serve(context -> {
+                context.registerBean(PgPool.class, () -> database);
+                context.registerBean(ApiKeyLookup.class, () -> new DatabaseApiKeyLookup(database));
+            }, args);
         } catch (RuntimeException e) {
             database.close();
             throw e;
         }
+    }
+
+    /** The web layer, with the beans that connect it to the rest of the engine. Tests pass stand-ins for them. */
+    static ConfigurableApplicationContext serve(Consumer<GenericApplicationContext> beans, String... args) {
+        return new SpringApplicationBuilder(ApiRole.class)
+                .web(WebApplicationType.SERVLET)
+                .initializers(context -> beans.accept((GenericApplicationContext) context))
+                .run(args);
     }
 }

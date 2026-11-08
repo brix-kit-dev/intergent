@@ -22,11 +22,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
-import org.springframework.boot.WebApplicationType;
-import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
-import org.springframework.boot.web.server.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.context.ConfigurableApplicationContext;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -44,8 +41,8 @@ class ProblemJsonTest {
 
     @BeforeAll
     static void start() {
-        context = new SpringApplicationBuilder(ApiRole.class).web(WebApplicationType.SERVLET).run("--server.port=0");
-        port = ((ServletWebServerApplicationContext) context).getWebServer().getPort();
+        context = TestApi.start("--server.port=0");
+        port = TestApi.port(context);
     }
 
     @AfterAll

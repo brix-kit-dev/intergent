@@ -12,6 +12,8 @@ class ProblemsTest {
     @ParameterizedTest
     @CsvSource({
         "400, invalid_request, Bad Request",
+        "401, unauthorized, Unauthorized",
+        "403, forbidden, Forbidden",
         "404, not_found, Not Found",
         "405, invalid_request, Method Not Allowed",
         "406, invalid_request, Not Acceptable",

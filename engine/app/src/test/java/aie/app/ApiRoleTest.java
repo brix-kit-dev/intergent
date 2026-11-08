@@ -5,7 +5,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 
 import aie.adapters.storepg.PgPool;
+import aie.adapters.storepg.PgRuntime;
 import aie.adapters.storepg.TestDatabase;
+import aie.core.tenancy.api.ApiKeys;
+import aie.core.tenancy.api.Provisioning;
+import aie.core.tenancy.internal.DatabaseProvisioning;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -49,6 +53,7 @@ class ApiRoleTest {
         assertThat(TestDatabase.createRoles(
                         DATABASE, "owner_password=" + TestDatabase.OWNER_PASSWORD, "app_password=" + TestDatabase.APP_PASSWORD)
                 .getExitCode()).isZero();
+        assertThat(MigrateRole.run(address(), "--engine.owner.password=" + TestDatabase.OWNER_PASSWORD)).isZero();
         context = ApiRole.start("--server.port=0", address(), password(TestDatabase.APP_PASSWORD));
         port = ((ServletWebServerApplicationContext) context).getWebServer().getPort();
     }
@@ -69,6 +74,13 @@ class ApiRoleTest {
     private static HttpResponse<String> get(String path) throws Exception {
         HttpRequest request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path)).build();
         return HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
+    }
+
+    private static int status(String path, String key) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
+                .header("Authorization", "Bearer " + key)
+                .build();
+        return HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString()).statusCode();
     }
 
     private static boolean accepts(InetAddress address) {
@@ -192,6 +204,17 @@ class ApiRoleTest {
                 .hasStackTraceContaining("not-a-port");
 
         awaitOnlyTheClassPool();
+    }
+
+    /** The filter on the real lookup: the pool, the system function, and a key issued the way admin issues it. */
+    @Test
+    void anIssuedKeyPassesAndAnyOtherIsRefused() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String key = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "internal")).key();
+
+        assertThat(status("/v1/nothing-here", key)).isEqualTo(404);
+        assertThat(status("/v1/nothing-here", ApiKeys.issue("test", "jp1"))).isEqualTo(401);
     }
 
     @Test

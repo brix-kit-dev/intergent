@@ -16,11 +16,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
-import org.springframework.boot.WebApplicationType;
-import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
-import org.springframework.boot.web.server.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.context.ConfigurableApplicationContext;
 
 /** A caller's trace on the real web stack. The logs are what a host lines up with its own. */
@@ -35,8 +32,8 @@ class TraceparentLogTest {
 
     @BeforeAll
     static void start() {
-        context = new SpringApplicationBuilder(ApiRole.class).web(WebApplicationType.SERVLET).run("--server.port=0");
-        port = ((ServletWebServerApplicationContext) context).getWebServer().getPort();
+        context = TestApi.start("--server.port=0");
+        port = TestApi.port(context);
     }
 
     @AfterAll

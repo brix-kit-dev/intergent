@@ -16,21 +16,19 @@ import org.springframework.web.filter.OncePerRequestFilter;
 /**
  * The version header of blueprint 6.2. There is one version so far, so this refuses any other: answering a caller in a
  * version it did not ask for would break it quietly. Without the header, the version locked on the application applies,
- * and with only one version nothing needs converting yet.
+ * and with only one version nothing needs converting yet. It runs after {@link ApiKeyFilter}, which finds that
+ * application.
  */
 @Component
-@Order(Ordered.HIGHEST_PRECEDENCE + 2)
+@Order(Ordered.HIGHEST_PRECEDENCE + 3)
 class EngineVersionFilter extends OncePerRequestFilter {
 
     static final String CURRENT = ApiVersion.CURRENT;
     private static final String HEADER = "Engine-Version";
-    private static final String PUBLIC_API = "/v1";
 
-    /** The servlet path is decoded, so an escaped path cannot slip past this check. */
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-        String path = request.getServletPath();
-        return !path.equals(PUBLIC_API) && !path.startsWith(PUBLIC_API + "/");
+        return !PublicApi.contains(request);
     }
 
     @Override

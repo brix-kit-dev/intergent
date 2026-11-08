@@ -289,6 +289,21 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 - **响应不返回：** 响应只带 `Request-Id`。
 - **传给外部调用：** 现在引擎还没有外部调用，等 M3 接 OpenTelemetry 时做。
 
+**认证：** `/v1` 下的请求都要带 API 密钥，写法是 `Authorization: Bearer aie_test_dev_...`，这是 RFC 6750 的格式。密钥用 `admin` 发放，见[开通租户](#开通租户)。认证排在版本检查前面，因为以后版本要按调用方的应用决定：
+
+| 情况 | HTTP | `code` |
+| --- | --- | --- |
+| 没带密钥，或用的不是 `Bearer` | 401，带 `WWW-Authenticate: Bearer` | `unauthorized` |
+| 密钥格式不对，或查不到 | 401，带 `WWW-Authenticate: Bearer error="invalid_token"` | `unauthorized` |
+| 带了两个 `Authorization` 头 | 400 | `invalid_request` |
+| 密钥有效，但带了 `On-Behalf-Of` | 403 | `forbidden`，第 10-6 小点之前一律拒绝 |
+| 查找时数据库出错 | 500 | `internal_error`，不会放行 |
+
+- **怎么查：** 先看格式，格式不对就不查数据库。格式对的，按 SHA-256 哈希调用系统函数 `tenancy_find_api_key`，找到租户和应用。之后的处理都在这个租户的事务里做。
+- **调用方：** `/v1` 的处理代码从请求属性 `aie.http.caller` 读调用方，里面有密钥号、租户号和应用号。
+- **密钥不进日志：** 不管密钥对不对，请求成功还是失败，日志里都没有它。
+- **不需要密钥：** `/healthz` 和 `/v1` 以外的路径。
+
 **`Engine-Version`：** `/v1` 下的请求可以传日期版本，如 `Engine-Version: 2026-11-05`。现在只有这一个版本，不传时也用它；以后按应用锁定的版本走。传别的版本返回 400 `invalid_request`，不会悄悄用另一个版本回答。版本写在 `EngineVersionFilter` 和契约的 `info.version`，测试保证两边一致。
 
 **`Idempotency-Key`：** 判断已经写好，在 `aie.core.tenancy.api.IdempotencyKeys`，还没接到 HTTP。接 HTTP 要先知道调用方是谁，所以排在第 10 小点的身份认证之后。键按租户和应用隔离，保留 24 小时：
@@ -312,6 +327,8 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 
 | 情况 | HTTP | `code` |
 | --- | --- | --- |
+| 没带密钥，或密钥无效 | 401 | `unauthorized` |
+| 没有权限，比如现在的 `On-Behalf-Of` | 403 | `forbidden` |
 | 路径不存在 | 404 | `not_found` |
 | 请求格式不对：参数、JSON、方法、媒体类型 | 400、405、406、415 | `invalid_request` |
 | Tomcat 自己拒绝：路径非法、请求行错误、缺 `Host`、请求头过大 | 400 | `invalid_request` |

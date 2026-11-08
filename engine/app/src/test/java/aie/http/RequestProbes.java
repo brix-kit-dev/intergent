@@ -1,5 +1,6 @@
 package aie.http;
 
+import aie.core.tenancy.api.ApiKeyLookup.Owner;
 import jakarta.servlet.Filter;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -86,6 +87,13 @@ final class RequestProbes {
         @GetMapping("/test/number/{number}")
         Map<String, Long> number(@PathVariable("number") long number) {
             return Map.of("number", number);
+        }
+
+        /** What a /v1 handler reads to learn who is calling. */
+        @GetMapping("/v1/test/caller")
+        Map<String, String> caller(HttpServletRequest request) {
+            Owner owner = (Owner) request.getAttribute(ApiKeyFilter.CALLER);
+            return Map.of("keyId", owner.keyId(), "tenantId", owner.tenantId(), "applicationId", owner.applicationId());
         }
 
         @GetMapping("/test/param")
