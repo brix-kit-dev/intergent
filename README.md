@@ -29,7 +29,7 @@ engine/verify.sh
 deploy/dev/up.sh
 ```
 
-这条命令启动引擎自己的 PostgreSQL，端口是 `127.0.0.1:15432`，容器名 `aie-postgres`，都和 Brix 分开。第一次运行会生成随机密码，写在 `deploy/dev/.env`，这个文件不进仓库。
+这条命令启动引擎自己的 PostgreSQL，端口是 `127.0.0.1:15432`，容器名 `aie-postgres`，都和 Brix 分开。第一次运行会生成随机密码和会话签名密钥，写在 `deploy/dev/.env`，这个文件不进仓库。以前生成的 `.env` 里没有签名密钥，再运行一次就会补上；已经有的密钥不会被换掉，否则已经发出去的令牌会全部失效。
 
 角色和 schema 来自 [create-roles.sql](deploy/db/create-roles.sql)，按蓝图 7.6 建 `engine_owner`、`engine_app`、`engine_system`。真实单元也用这个脚本。
 
@@ -141,10 +141,30 @@ curl http://127.0.0.1:18080/healthz
 真实单元这样运行：
 
 ```bash
-ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD=... java -jar engine.jar --role=api
+ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD=... ENGINE_SESSION_KEY=... java -jar engine.jar --role=api
 ```
 
 `api` 总是用 `engine_app` 连接，地址里写的用户和会话参数都不起作用。
+
+**会话签名密钥：** `ENGINE_SESSION_KEY` 是必填项，用来签发会话令牌。它至少要有 256 位随机数，写成 base64，可以用 `openssl rand -base64 32` 生成。开发环境里，这把密钥由 `up.sh` 生成，`api.sh` 读出来交给 `api`。
+
+`api` 在连数据库之前就检查这把密钥。下面任何一种情况都会拒绝启动，退出码 1：
+
+- 没给密钥；
+- 不是 base64；
+- 不到 256 位；
+- 旧密钥和新密钥相同。
+
+报错里会写出变量名和实际位数，但不会写出密钥本身。
+
+**换签名密钥：** 一个 `api` 时按这几步换：
+
+1. 把现在的密钥挪到 `ENGINE_SESSION_PREVIOUS_KEY`，再给 `ENGINE_SESSION_KEY` 生成一把新的，然后重启 `api`。从这时起，新令牌用新密钥签发；旧密钥只用来校验，所以之前发出去的令牌照样能用。
+2. 等满 1 小时，旧令牌就都过期了。这时去掉 `ENGINE_SESSION_PREVIOUS_KEY`，再重启一次。
+
+开发环境里，这两个值都写在 `deploy/dev/.env`。
+
+有多个 `api` 时，滚动重启的那段时间里，还没重启的实例不认新密钥。要避免这一点，就多加一步：先把新密钥作为 `ENGINE_SESSION_PREVIOUS_KEY` 发给所有实例，等它们都认得以后，再按上面两步切换。
 
 **连接池：** `api` 持有一个连接池，最多 10 条连接。请求跑在虚拟线程上，同时进来的请求再多，数据库连接也不会超过 10 条，多出来的请求排队等空闲连接。租户号只在一个事务里有效，同一条连接上的下一个事务不带租户。`api` 停止时关掉所有连接；启动失败时也一样，比如端口被占用。
 
@@ -161,7 +181,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 
 | 角色 | 现状 |
 | --- | --- |
-| `api` | 先过启动自检，再建连接池，然后提供 HTTP 服务，目前有 `/healthz`、新建和吊销密钥 |
+| `api` | 先检查会话签名密钥，再过启动自检、建连接池，然后提供 HTTP 服务，目前有 `/healthz`、新建和吊销密钥 |
 | `migrate` | 运行数据库迁移，完成后退出 |
 | `admin` | 开通租户和应用，完成后退出，见[开通租户](#开通租户) |
 | `worker` | 还没实现，打印提示后退出 |
@@ -173,7 +193,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 | 退出码 | 含义 |
 | --- | --- |
 | 0 | 正常结束 |
-| 1 | 启动失败，如端口被占用；启动自检不通过；迁移失败 |
+| 1 | 启动失败，如端口被占用；会话签名密钥不合格；启动自检不通过；迁移失败 |
 | 2 | 角色参数不对：没给、给了多个或不认识；`admin` 的命令或选项不对 |
 | 3 | 角色还没实现 |
 | 143 | 收到 SIGTERM，处理完请求后退出 |
@@ -205,7 +225,8 @@ read -r KEY_ID API_KEY <<< "$(deploy/dev/admin.sh create-key --tenant="$TENANT" 
   - **校验：** 只看签名和过期时间，不查表（蓝图 7.6）。只认 HS256。头部写了别的算法（包括 `none`）、内容被改过、密钥不认识或令牌已过期，一律当作无效，而且不说明原因。
   - **轮换：** 头部的 `kid` 是签名密钥 SHA-256 的前 8 字节。轮换时用新密钥签发，旧密钥签的令牌在过期前照样能验过。
   - **机密：** 浏览器能读出令牌的内容，所以上下文里不放机密。
-  - **还没做完：** 签名密钥的配置和 `POST /v1/sessions` 还没接上。
+  - **签名密钥：** 由环境变量给出，见[启动](#启动)。
+  - **还没做完：** `POST /v1/sessions` 还没接上。
 - **密钥：** 形如 `aie_test_dev_` 加 40 位随机字母和数字。前面是应用的环境和租户的单元码，不查库就能看出来。数据库只存 SHA-256 哈希，检查约束挡住任何不像哈希的值。明文只在发放时打印这一次，丢了只能再发一把。一个应用可以有多把密钥，不用的可以吊销，见[接口约定](#接口约定)。
 
 真实单元这样运行：

@@ -1,6 +1,7 @@
 package aie.app;
 
 import java.util.Locale;
+import java.util.Optional;
 import org.springframework.boot.SpringBootConfiguration;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.builder.SpringApplicationBuilder;
@@ -12,6 +13,10 @@ final class RoleSettings {
 
     static final String DATABASE_URL = "engine.database.url";
     static final String APP_PASSWORD = "engine.app.password";
+    /** Signs every new session token. */
+    static final String SESSION_KEY = "engine.session.key";
+    /** Only checks session tokens. It keeps the tokens already out working while the key changes. */
+    static final String SESSION_PREVIOUS_KEY = "engine.session.previous.key";
 
     private final Environment environment;
 
@@ -30,11 +35,18 @@ final class RoleSettings {
 
     /** Fails with the name of the environment variable, because that is where an operator sets it. */
     String required(String name) {
+        return optional(name).orElseThrow(() -> new IllegalArgumentException(variable(name) + " is required"));
+    }
+
+    /** The setting, or empty when it is missing or blank. */
+    Optional<String> optional(String name) {
         String value = environment.getProperty(name);
-        if (value == null || value.isBlank()) {
-            throw new IllegalArgumentException(name.toUpperCase(Locale.ROOT).replace('.', '_') + " is required");
-        }
-        return value;
+        return value == null || value.isBlank() ? Optional.empty() : Optional.of(value);
+    }
+
+    /** The environment variable an operator sets for a setting, such as ENGINE_SESSION_KEY for engine.session.key. */
+    static String variable(String name) {
+        return name.toUpperCase(Locale.ROOT).replace('.', '_');
     }
 
     @SpringBootConfiguration(proxyBeanMethods = false)

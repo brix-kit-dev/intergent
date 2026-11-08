@@ -6,11 +6,13 @@ import aie.core.tenancy.api.ApiKeyLookup;
 import aie.core.tenancy.api.ApiKeyManagement;
 import aie.core.tenancy.api.IdempotencyKeys;
 import aie.core.tenancy.api.LowerTenants;
+import aie.core.tenancy.api.SessionTokens;
 import aie.core.tenancy.internal.DatabaseApiKeyLookup;
 import aie.core.tenancy.internal.DatabaseApiKeyManagement;
 import aie.core.tenancy.internal.DatabaseIdempotencyKeys;
 import aie.core.tenancy.internal.DatabaseLowerTenants;
 import aie.ports.DatabaseException;
+import java.time.Clock;
 import java.util.function.Consumer;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -36,14 +38,17 @@ class ApiRole {
     }
 
     /**
+     * The session keys are checked before the pool opens, so a missing or weak key never gets as far as the database.
      * The pool runs the self-check of blueprint 7.6 before its first connection, so a role that may not serve traffic
      * never opens a port. The context closes the pool as it closes, because the pool is AutoCloseable. A context that
      * fails before it has made its beans would not, so the role closes the pool itself then.
      */
     static ConfigurableApplicationContext start(String... args) {
         RoleSettings settings = RoleSettings.read(args);
-        PgPool database = PgRuntime.pool(
-                settings.required(RoleSettings.DATABASE_URL), settings.required(RoleSettings.APP_PASSWORD), POOL_SIZE);
+        String address = settings.required(RoleSettings.DATABASE_URL);
+        String password = settings.required(RoleSettings.APP_PASSWORD);
+        SessionTokens sessionTokens = SessionKeys.tokens(settings, Clock.systemUTC());
+        PgPool database = PgRuntime.pool(address, password, POOL_SIZE);
         try {
             return serve(context -> {
                 context.registerBean(PgPool.class, () -> database);
@@ -51,6 +56,7 @@ class ApiRole {
                 context.registerBean(ApiKeyManagement.class, () -> new DatabaseApiKeyManagement(database));
                 context.registerBean(IdempotencyKeys.class, () -> new DatabaseIdempotencyKeys(database));
                 context.registerBean(LowerTenants.class, () -> new DatabaseLowerTenants(database));
+                context.registerBean(SessionTokens.class, () -> sessionTokens);
             }, args);
         } catch (RuntimeException e) {
             database.close();

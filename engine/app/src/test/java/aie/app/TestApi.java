@@ -8,6 +8,8 @@ import aie.core.tenancy.api.IdempotencyKeys;
 import aie.core.tenancy.api.LowerTenants;
 import aie.core.tenancy.api.LowerTenants.Acting;
 import java.time.Instant;
+import java.util.Arrays;
+import java.util.Base64;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -23,6 +25,9 @@ final class TestApi {
     static final String KEY = "aie_test_dev_" + "0123456789".repeat(4);
     static final Owner OWNER = new Owner("key_test", "ten_test", "app_test");
     static final String AUTHORIZATION = "Bearer " + KEY;
+    /** 256 bits for tests that start the real api role, so its tokens are test tokens. */
+    static final byte[] SESSION_KEY = sessionKey(7);
+    static final String SESSION_KEY_SETTING = "--engine.session.key=" + Base64.getEncoder().encodeToString(SESSION_KEY);
     /** Knows {@link #KEY} and nothing else. */
     static final ApiKeyLookup LOOKUP = key -> KEY.equals(key) ? Optional.of(OWNER) : Optional.empty();
     /** ten_lower is a lower tenant with one application of each environment, ten_empty one without any. */
@@ -92,5 +97,16 @@ final class TestApi {
             calls.add(caller.keyId() + " of " + caller.tenantId() + "/" + caller.applicationId() + " revokes " + keyId);
             return revocable.remove(keyId);
         }
+    }
+
+    /** A key of the given length, filled with one byte, so each test can tell its keys apart. */
+    static byte[] sessionKey(int seed, int length) {
+        byte[] key = new byte[length];
+        Arrays.fill(key, (byte) seed);
+        return key;
+    }
+
+    static byte[] sessionKey(int seed) {
+        return sessionKey(seed, 32);
     }
 }

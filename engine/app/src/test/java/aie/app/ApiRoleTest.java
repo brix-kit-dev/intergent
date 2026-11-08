@@ -10,7 +10,11 @@ import aie.adapters.storepg.TestDatabase;
 import aie.core.tenancy.api.ApiKeys;
 import aie.core.tenancy.api.Provisioning;
 import aie.core.tenancy.api.Provisioning.IssuedKey;
+import aie.core.tenancy.api.SessionTokens;
+import aie.core.tenancy.api.SessionTokens.IdentityLevel;
+import aie.core.tenancy.api.SessionTokens.Session;
 import aie.core.tenancy.internal.DatabaseProvisioning;
+import aie.core.tenancy.internal.SignedSessionTokens;
 import aie.http.api.model.CreatedApiKey;
 import java.io.IOException;
 import java.net.InetAddress;
@@ -24,9 +28,12 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpRequest.BodyPublishers;
 import java.net.http.HttpResponse;
 import java.sql.SQLException;
+import java.time.Clock;
 import java.time.Duration;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -59,7 +66,7 @@ class ApiRoleTest {
                         DATABASE, "owner_password=" + TestDatabase.OWNER_PASSWORD, "app_password=" + TestDatabase.APP_PASSWORD)
                 .getExitCode()).isZero();
         assertThat(MigrateRole.run(address(), "--engine.owner.password=" + TestDatabase.OWNER_PASSWORD)).isZero();
-        context = ApiRole.start("--server.port=0", address(), password(TestDatabase.APP_PASSWORD));
+        context = ApiRole.start("--server.port=0", address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING);
         port = ((ServletWebServerApplicationContext) context).getWebServer().getPort();
     }
 
@@ -186,7 +193,8 @@ class ApiRoleTest {
         TestDatabase.asAdmin(DATABASE, "ALTER ROLE engine_app BYPASSRLS");
         try {
             assertThat(EngineApplication.launch(new String[] {
-                            "--role=api", "--server.port=" + unused, address(), password(TestDatabase.APP_PASSWORD)}))
+                            "--role=api", "--server.port=" + unused, address(), password(TestDatabase.APP_PASSWORD),
+                            TestApi.SESSION_KEY_SETTING}))
                     .isEqualTo(EngineApplication.EXIT_FAILED);
         } finally {
             TestDatabase.asAdmin(DATABASE, "ALTER ROLE engine_app NOBYPASSRLS");
@@ -208,7 +216,8 @@ class ApiRoleTest {
     @Test
     void stoppingTheApiClosesItsConnections() {
         awaitOnlyTheClassPool();
-        ConfigurableApplicationContext second = ApiRole.start("--server.port=0", address(), password(TestDatabase.APP_PASSWORD));
+        ConfigurableApplicationContext second =
+                ApiRole.start("--server.port=0", address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING);
         await().atMost(SETTLES).until(() -> engineAppHolds(2L * ApiRole.POOL_SIZE));
 
         second.close();
@@ -221,7 +230,8 @@ class ApiRoleTest {
     void anApiThatCannotStartClosesItsPool() throws IOException {
         awaitOnlyTheClassPool();
         try (ServerSocket taken = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
-            assertThatThrownBy(() -> ApiRole.start("--server.port=" + taken.getLocalPort(), address(), password(TestDatabase.APP_PASSWORD)))
+            assertThatThrownBy(() -> ApiRole.start(
+                            "--server.port=" + taken.getLocalPort(), address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING))
                     .hasStackTraceContaining("already in use");
         }
 
@@ -233,7 +243,7 @@ class ApiRoleTest {
     void anApiWithABadSettingClosesItsPool() {
         awaitOnlyTheClassPool();
 
-        assertThatThrownBy(() -> ApiRole.start("--server.port=not-a-port", address(), password(TestDatabase.APP_PASSWORD)))
+        assertThatThrownBy(() -> ApiRole.start("--server.port=not-a-port", address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING))
                 .hasStackTraceContaining("not-a-port");
 
         awaitOnlyTheClassPool();
@@ -357,7 +367,7 @@ class ApiRoleTest {
 
     @Test
     void aWrongPasswordIsRefusedWithoutPrintingIt(CapturedOutput output) {
-        assertThat(ApiRole.run(address(), password("wrong-secret-value"))).isEqualTo(EngineApplication.EXIT_FAILED);
+        assertThat(ApiRole.run(address(), password("wrong-secret-value"), TestApi.SESSION_KEY_SETTING)).isEqualTo(EngineApplication.EXIT_FAILED);
 
         assertThat(output.getErr()).contains("password authentication failed");
         assertThat(output.toString()).doesNotContain("wrong-secret-value");
@@ -365,10 +375,95 @@ class ApiRoleTest {
 
     @Test
     void aBadAddressIsRefusedWithoutPrintingIt(CapturedOutput output) {
-        assertThat(ApiRole.run("--engine.database.url=mysql://secret-host/engine", password("x")))
+        assertThat(ApiRole.run("--engine.database.url=mysql://secret-host/engine", password("x"), TestApi.SESSION_KEY_SETTING))
                 .isEqualTo(EngineApplication.EXIT_FAILED);
 
         assertThat(output.getErr()).contains("The database address is not a PostgreSQL JDBC URL");
         assertThat(output.toString()).doesNotContain("secret-host");
+    }
+
+    private static final Session SESSION =
+            new Session("ten_A", "app_A", "eu_A", IdentityLevel.VERIFIED, List.of("orders.read"), Map.of());
+
+    private static String base64(byte[] key) {
+        return Base64.getEncoder().encodeToString(key);
+    }
+
+    /** Tokens from the api check out under the key it was given, and under no other. */
+    @Test
+    void theApiSignsSessionTokensWithItsKey() {
+        String token = context.getBean(SessionTokens.class).issue(SESSION).token();
+
+        assertThat(new SignedSessionTokens(Clock.systemUTC(), TestApi.SESSION_KEY, List.of()).verify(token)).isPresent();
+        assertThat(new SignedSessionTokens(Clock.systemUTC(), TestApi.sessionKey(8), List.of()).verify(token)).isEmpty();
+    }
+
+    /** While the key changes, the api signs with the new key and still accepts the tokens of the old one. */
+    @Test
+    void anApiWithAPreviousKeyStillAcceptsItsTokens() {
+        awaitOnlyTheClassPool();
+        byte[] next = TestApi.sessionKey(9);
+        String before = context.getBean(SessionTokens.class).issue(SESSION).token();
+        ConfigurableApplicationContext rotated = ApiRole.start("--server.port=0", address(), password(TestDatabase.APP_PASSWORD),
+                "--engine.session.key=" + base64(next), "--engine.session.previous.key=" + base64(TestApi.SESSION_KEY));
+        try {
+            SessionTokens tokens = rotated.getBean(SessionTokens.class);
+
+            assertThat(tokens.verify(before)).isPresent();
+            assertThat(new SignedSessionTokens(Clock.systemUTC(), next, List.of()).verify(tokens.issue(SESSION).token())).isPresent();
+        } finally {
+            rotated.close();
+        }
+        awaitOnlyTheClassPool();
+    }
+
+    /** The key is checked before the pool opens: with a wrong password too, the api names the missing key. */
+    @Test
+    void missingTheSessionKeyIsRefusedBeforeTheDatabase(CapturedOutput output) {
+        assertThat(ApiRole.run(address(), password("wrong-secret-value"))).isEqualTo(EngineApplication.EXIT_FAILED);
+
+        assertThat(output.getErr()).contains("Startup refused: ENGINE_SESSION_KEY is required")
+                .doesNotContain("password authentication failed");
+    }
+
+    @Test
+    void aSessionKeyThatIsNotBase64IsRefusedWithoutPrintingIt(CapturedOutput output) {
+        assertThat(ApiRole.run(address(), password(TestDatabase.APP_PASSWORD), "--engine.session.key=not*base64*secret"))
+                .isEqualTo(EngineApplication.EXIT_FAILED);
+
+        assertThat(output.getErr())
+                .contains("Startup refused: ENGINE_SESSION_KEY is not base64. Make one with: openssl rand -base64 32");
+        assertThat(output.toString()).doesNotContain("not*base64*secret");
+    }
+
+    @Test
+    void aShortSessionKeyIsRefusedWithoutPrintingIt(CapturedOutput output) {
+        String shortKey = base64(TestApi.sessionKey(10, 16));
+
+        assertThat(ApiRole.run(address(), password(TestDatabase.APP_PASSWORD), "--engine.session.key=" + shortKey))
+                .isEqualTo(EngineApplication.EXIT_FAILED);
+
+        assertThat(output.getErr()).contains("Startup refused: ENGINE_SESSION_KEY needs at least 256 bits, and this one has 128. "
+                + "Make one with: openssl rand -base64 32");
+        assertThat(output.toString()).doesNotContain(shortKey);
+    }
+
+    @Test
+    void aShortPreviousKeyIsRefusedByName(CapturedOutput output) {
+        assertThat(ApiRole.run(address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING,
+                        "--engine.session.previous.key=" + base64(TestApi.sessionKey(11, 31))))
+                .isEqualTo(EngineApplication.EXIT_FAILED);
+
+        assertThat(output.getErr())
+                .contains("Startup refused: ENGINE_SESSION_PREVIOUS_KEY needs at least 256 bits, and this one has 248");
+    }
+
+    @Test
+    void aPreviousKeyThatIsTheKeyIsRefused(CapturedOutput output) {
+        assertThat(ApiRole.run(address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING,
+                        "--engine.session.previous.key=" + base64(TestApi.SESSION_KEY)))
+                .isEqualTo(EngineApplication.EXIT_FAILED);
+
+        assertThat(output.getErr()).contains("Startup refused: ENGINE_SESSION_PREVIOUS_KEY is the same as ENGINE_SESSION_KEY");
     }
 }
