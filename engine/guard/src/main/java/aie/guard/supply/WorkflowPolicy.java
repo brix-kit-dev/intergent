@@ -13,6 +13,9 @@ import java.util.regex.Pattern;
  * holds no write access, no secrets and no way to skip a check.
  *
  * <p>The release date comes from the comment on the pin. Whoever bumps a pin writes it, so it is not checked online.
+ *
+ * <p>Every download also retries, so a brief outage of GitHub or Maven Central does not fail the run (code point 18).
+ * Downloads use curl, whose {@code --retry} the check can see. A command continued with a backslash counts as one.
  */
 public final class WorkflowPolicy {
 
@@ -26,6 +29,10 @@ public final class WorkflowPolicy {
     private static final Pattern READ_ONLY = Pattern.compile("(?m)^permissions:\\s*\\n\\s+contents: read\\s*$");
     private static final Pattern DOWNLOAD = Pattern.compile("\\b(curl|wget)\\b");
     private static final Pattern LOCAL_PORT = Pattern.compile("- \"?127\\.0\\.0\\.1:\\d+:\\d+\"?");
+    private static final Pattern CURL = Pattern.compile("\\bcurl\\b");
+    private static final Pattern WGET = Pattern.compile("\\bwget\\b");
+    private static final Pattern RETRIES = Pattern.compile("(^|\\s)--retry\\s+[1-9]\\d*(\\s|$)");
+    private static final Pattern COMMAND_SEPARATOR = Pattern.compile("&&|\\|\\||[;|]");
 
     private static final Map<Pattern, String> FORBIDDEN = Map.ofEntries(
             Map.entry(Pattern.compile("pull_request_target"), "pull_request_target runs with write access"),
@@ -70,7 +77,33 @@ public final class WorkflowPolicy {
         if (DOWNLOAD.matcher(text).find() && !text.contains("sha256sum -c")) {
             problems.add("S-8: " + name + ": a download must be checked with sha256sum -c");
         }
+        checkRetries(name, lines, problems);
         return problems;
+    }
+
+    /** Each command that runs curl needs {@code --retry} with a count of at least 1; wget is not used. */
+    private static void checkRetries(String name, String[] lines, List<String> problems) {
+        for (int number = 0; number < lines.length; number++) {
+            if (lines[number].strip().startsWith("#")) {
+                continue; // a backslash at the end of a comment does not continue it
+            }
+            int first = number;
+            StringBuilder command = new StringBuilder();
+            String line = lines[number].stripTrailing();
+            while (line.endsWith("\\") && number + 1 < lines.length) {
+                command.append(line, 0, line.length() - 1).append(' ');
+                line = lines[++number].stripTrailing();
+            }
+            command.append(line);
+            String where = name + ":" + (first + 1);
+            for (String part : COMMAND_SEPARATOR.split(command)) {
+                if (WGET.matcher(part).find()) {
+                    problems.add("CI: " + where + ": download with curl, so the retry rule sees it");
+                } else if (CURL.matcher(part).find() && !RETRIES.matcher(part).find()) {
+                    problems.add("CI: " + where + ": a download must retry, for example curl --retry 20 --retry-delay 30");
+                }
+            }
+        }
     }
 
     /** A Compose file: images are pinned like a workflow's (S-8) and ports stay on localhost (blueprint 12.6). */

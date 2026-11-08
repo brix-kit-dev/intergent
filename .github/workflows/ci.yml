@@ -27,9 +27,13 @@ jobs:
         with:
           persist-credentials: false
 
+      # GitHub and Maven Central sometimes answer 5xx or time out for a few minutes. So a download retries
+      # every 30 seconds for up to 10 minutes, and one try takes at most 5 minutes. A longer outage still fails the run.
       - name: Install JDK
         run: |
-          curl -fsSL -o "$RUNNER_TEMP/jdk.tar.gz" "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_x64_linux_hotspot_21.0.12.1_1.tar.gz"
+          curl -fSL --no-progress-meter --retry 20 --retry-delay 30 --retry-max-time 600 --retry-all-errors \
+            --connect-timeout 20 --max-time 300 -o "$RUNNER_TEMP/jdk.tar.gz" \
+            "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_x64_linux_hotspot_21.0.12.1_1.tar.gz"
           echo "${JDK_SHA256}  $RUNNER_TEMP/jdk.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/jdk.tar.gz" -C "$RUNNER_TEMP"
           echo "JAVA_HOME=$RUNNER_TEMP/jdk-21.0.12.1+1" >> "$GITHUB_ENV"
@@ -37,7 +41,9 @@ jobs:
 
       - name: Install Maven
         run: |
-          curl -fsSL -o "$RUNNER_TEMP/maven.tar.gz" "https://repo1.maven.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          curl -fSL --no-progress-meter --retry 20 --retry-delay 30 --retry-max-time 600 --retry-all-errors \
+            --connect-timeout 20 --max-time 300 -o "$RUNNER_TEMP/maven.tar.gz" \
+            "https://repo1.maven.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
           echo "${MAVEN_SHA256}  $RUNNER_TEMP/maven.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/maven.tar.gz" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/apache-maven-${MAVEN_VERSION}/bin" >> "$GITHUB_PATH"

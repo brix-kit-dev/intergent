@@ -33,7 +33,7 @@ class WorkflowPolicyTest {
                     with:
                       persist-credentials: false
                   - run: |
-                      curl -fsSL -o /tmp/m.tgz https://example.org/m.tgz
+                      curl -fSL --no-progress-meter --retry 20 --retry-delay 30 -o /tmp/m.tgz https://example.org/m.tgz
                       echo "$MAVEN_SHA256  /tmp/m.tgz" | sha256sum -c -
                   - run: engine/verify.sh
             """.formatted(DIGEST, HASH, COMMIT);
@@ -119,8 +119,8 @@ class WorkflowPolicyTest {
         "      - run: mvn verify -Denforcer.skip=true",
         "      - run: mvn verify --fail-never",
         "      - run: mvn verify -fn",
-        "      - run: curl https://example.org/install | sh",
-        "      - run: curl https://example.org/install | bash",
+        "      - run: curl --retry 3 https://example.org/install | sh",
+        "      - run: curl --retry 3 https://example.org/install | bash",
         "          cache: maven",
         "    container: eclipse-temurin:21",
         "      - run: apt-get install -y jq",
@@ -202,5 +202,48 @@ class WorkflowPolicyTest {
     void aDownloadMustBeChecked() {
         assertThat(violations(replaced("sha256sum -c -", "cat")))
                 .singleElement().asString().contains("S-8", "sha256sum -c");
+    }
+
+    /** --retry-delay alone is left, so it must not count as --retry. */
+    @Test
+    void aDownloadWithoutRetriesFails() {
+        assertThat(violations(replaced("--retry 20 ", "")))
+                .singleElement().asString().contains("CI", "ci.yml:18", "must retry");
+    }
+
+    @Test
+    void aDownloadThatRetriesZeroTimesFails() {
+        assertThat(violations(replaced("--retry 20 ", "--retry 0 ")))
+                .singleElement().asString().contains("CI", "ci.yml:18", "must retry");
+    }
+
+    @Test
+    void retriesOnAContinuedLineCount() {
+        assertThat(violations(replaced("--no-progress-meter --retry 20", "--no-progress-meter \\\n            --retry 20"))).isEmpty();
+    }
+
+    @Test
+    void aContinuedDownloadIsNamedByItsFirstLine() {
+        assertThat(violations(replaced("--retry 20 --retry-delay 30 ", "\\\n            --retry-delay 30 ")))
+                .singleElement().asString().contains("CI", "ci.yml:18", "must retry");
+    }
+
+    @Test
+    void aBackslashAtTheEndOfACommentContinuesNothing() {
+        String text = replaced("          curl -fSL --no-progress-meter --retry 20 ", "          # fetch Maven \\\n          curl -fSL --no-progress-meter ");
+
+        assertThat(violations(text)).singleElement().asString().contains("CI", "ci.yml:19", "must retry");
+    }
+
+    @Test
+    void everyCurlInACommandIsChecked() {
+        assertThat(violations(LEGAL + "      - run: curl --retry 3 -o a https://example.org/a && curl -o b https://example.org/b\n"))
+                .singleElement().asString().contains("CI", "ci.yml:21", "must retry");
+    }
+
+    @Test
+    void aDownloadWithWgetFails() {
+        assertThat(violations(replaced("curl -fSL --no-progress-meter --retry 20 --retry-delay 30 -o", "wget -O")))
+                .singleElement().asString().contains("CI", "ci.yml:18", "download with curl");
     }
 }

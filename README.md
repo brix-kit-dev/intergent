@@ -393,6 +393,8 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 
 `verify.sh` 从空的 Maven 仓库开始构建，再检查这次构建实际下载了什么，所以 CI 不用缓存。
 
+GitHub 和 Maven Central 偶尔会有几分钟返回 5xx 或超时，所以下载 JDK 和 Maven 时会自动重试：出错后每 30 秒重试一次，最多重试 10 分钟，每次下载最长 5 分钟。工作流里的下载都必须用 curl 并带 `--retry`，由 `mvn verify` 检查，以后新加的下载也不会漏掉重试。
+
 | 红线 | 规则 | 什么时候检查 |
 | --- | --- | --- |
 | S-8 | 依赖和插件都写死版本，传递依赖也算；只从 Maven Central 下载 | `mvn verify`，由 Maven Enforcer 检查 |
@@ -426,5 +428,8 @@ engine/verify.sh --update-lock
 **已知限制：**
 
 - `runs-on: ubuntu-24.04` 的宿主镜像由 GitHub 更新，固定不了。JDK 和 Maven 按哈希下载，不用它自带的。任务不放在容器里跑，因为数据库测试的端口只绑定本机，容器里访问不到。
+- 下载故障超过 10 分钟时，重试也救不回来，要等恢复后重新运行。没有用另外两种办法兜底：
+  - 缓存：会掩盖干净构建到底下载了什么；而且缓存在校验之前就会解压，构建一旦被攻破，缓存就可能被投毒。
+  - 带令牌下载：Actions 的令牌能读这个私有仓库的代码。
 - 许可检查读的是 POM 里写的许可，不分析 jar 里的代码。
 - 引擎镜像还没有，S-9 现在检查的是 `engine.jar`。写镜像时要把基础镜像一起考虑。
