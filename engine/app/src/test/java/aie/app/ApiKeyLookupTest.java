@@ -220,7 +220,12 @@ class ApiKeyLookupTest {
                 "tenancy_api_keys.key_hash SELECT",
                 "tenancy_api_keys.key_id SELECT",
                 "tenancy_api_keys.revoked_at SELECT",
-                "tenancy_api_keys.tenant_id SELECT");
+                "tenancy_api_keys.tenant_id SELECT",
+                "tenancy_applications.application_id SELECT",
+                "tenancy_applications.environment SELECT",
+                "tenancy_applications.tenant_id SELECT",
+                "tenancy_tenants.parent_tenant_id SELECT",
+                "tenancy_tenants.tenant_id SELECT");
     }
 
     private static void onThisDatabase(String grant) throws SQLException {

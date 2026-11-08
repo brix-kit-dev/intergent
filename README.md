@@ -87,7 +87,13 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_OWNER_PASSWO
 
 **改已有的系统函数：** 函数归 `engine_system` 所有，`engine_owner` 改不了它。照 [V6__revoke_api_keys.sql](engine/core/src/main/resources/db/migration/tenancy/V6__revoke_api_keys.sql) 写：先临时授予 schema 的 `CREATE`，`SET ROLE engine_system` 后用 `CREATE OR REPLACE` 改写，再 `RESET ROLE`，收回授权。`CREATE OR REPLACE` 保留所有者和 `EXECUTE` 授权，但 `SECURITY DEFINER` 和 `search_path` 要重新写上，漏了目录检查会失败。函数读到新列时，记得给 `engine_system` 加这一列的读权限。
 
-现有的系统函数只有 `tenancy_find_api_key`：按哈希找到正在使用的密钥属于哪个租户和应用，已吊销和已过期的都找不到。`engine_system` 只能读密钥表里它用到的六列，而且只能读不能写。测试函数自己固定的 `search_path` 时，要先给 `engine_app` 临时放开建临时表的权限。[create-roles.sql](deploy/db/create-roles.sql) 已经收回了这个权限，这是第一层防护；不放开的话，测到的只是这一层。
+现有两个系统函数，`engine_system` 只能读它们用到的列，而且只能读不能写：
+
+| 函数 | 做什么 | 读哪些列 |
+| --- | --- | --- |
+| `tenancy_find_api_key` | 按哈希找到正在使用的密钥属于哪个租户和应用，已吊销和已过期的都找不到 | 密钥表六列 |
+| `tenancy_find_lower_applications` | 判断一个租户是不是调用方的直接下级，并列出它在某个环境的应用，给 `On-Behalf-Of` 用 | 租户表两列、应用表三列 |
+测试函数自己固定的 `search_path` 时，要先给 `engine_app` 临时放开建临时表的权限。[create-roles.sql](deploy/db/create-roles.sql) 已经收回了这个权限，这是第一层防护；不放开的话，测到的只是这一层。
 
 **改租户表的数据：** 表所有者也受 `FORCE` 限制，所以 `migrate` 连接设了 `row_security = off`，忘了解除时直接报错，不会静默更新 0 行。在同一个脚本里先 `NO FORCE`，改完再 `FORCE`。
 
