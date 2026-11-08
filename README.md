@@ -85,7 +85,9 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_OWNER_PASSWO
 - **移交时临时授权：** 新所有者要有 schema 的 `CREATE` 权限才能移交，移交后马上收回，否则目录检查失败。
 - **输出列和表里的列同名时写上表名：** `RETURNS TABLE` 的列在函数体里也是变量，不写表名，调用时会报列名有歧义。
 
-现有的系统函数只有 `tenancy_find_api_key`：按哈希找到密钥属于哪个租户和应用。`engine_system` 只能读密钥表里它用到的四列，而且只能读不能写。测试函数自己固定的 `search_path` 时，要先给 `engine_app` 临时放开建临时表的权限。[create-roles.sql](deploy/db/create-roles.sql) 已经收回了这个权限，这是第一层防护；不放开的话，测到的只是这一层。
+**改已有的系统函数：** 函数归 `engine_system` 所有，`engine_owner` 改不了它。照 [V6__revoke_api_keys.sql](engine/core/src/main/resources/db/migration/tenancy/V6__revoke_api_keys.sql) 写：先临时授予 schema 的 `CREATE`，`SET ROLE engine_system` 后用 `CREATE OR REPLACE` 改写，再 `RESET ROLE`，收回授权。`CREATE OR REPLACE` 保留所有者和 `EXECUTE` 授权，但 `SECURITY DEFINER` 和 `search_path` 要重新写上，漏了目录检查会失败。函数读到新列时，记得给 `engine_system` 加这一列的读权限。
+
+现有的系统函数只有 `tenancy_find_api_key`：按哈希找到正在使用的密钥属于哪个租户和应用，已吊销的找不到。`engine_system` 只能读密钥表里它用到的五列，而且只能读不能写。测试函数自己固定的 `search_path` 时，要先给 `engine_app` 临时放开建临时表的权限。[create-roles.sql](deploy/db/create-roles.sql) 已经收回了这个权限，这是第一层防护；不放开的话，测到的只是这一层。
 
 **改租户表的数据：** 表所有者也受 `FORCE` 限制，所以 `migrate` 连接设了 `row_security = off`，忘了解除时直接报错，不会静默更新 0 行。在同一个脚本里先 `NO FORCE`，改完再 `FORCE`。
 
@@ -153,7 +155,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 
 | 角色 | 现状 |
 | --- | --- |
-| `api` | 先过启动自检，再建连接池，然后提供 HTTP 服务，目前只有 `/healthz` |
+| `api` | 先过启动自检，再建连接池，然后提供 HTTP 服务，目前有 `/healthz` 和吊销密钥 |
 | `migrate` | 运行数据库迁移，完成后退出 |
 | `admin` | 开通租户和应用，完成后退出，见[开通租户](#开通租户) |
 | `worker` | 还没实现，打印提示后退出 |
@@ -190,7 +192,7 @@ read -r KEY_ID API_KEY <<< "$(deploy/dev/admin.sh create-key --tenant="$TENANT" 
 - **连接：** 和 `api` 一样先过启动自检，再用 `engine_app` 连接。地址里写的用户和会话参数都不起作用。
 - **单元码：** 新租户的单元码取自 `ENGINE_CELL_CODE`，必须是 1 到 8 位小写字母和数字，因为它会写进密钥。开发服务器不是单元，用 `dev`。
 - **API 版本：** 新应用锁定当前版本 `2026-11-05`。
-- **密钥：** 形如 `aie_test_dev_` 加 40 位随机字母和数字。前面是应用的环境和租户的单元码，不查库就能看出来。数据库只存 SHA-256 哈希，检查约束挡住任何不像哈希的值。明文只在发放时打印这一次，丢了只能再发一把。一个应用可以有多把密钥。
+- **密钥：** 形如 `aie_test_dev_` 加 40 位随机字母和数字。前面是应用的环境和租户的单元码，不查库就能看出来。数据库只存 SHA-256 哈希，检查约束挡住任何不像哈希的值。明文只在发放时打印这一次，丢了只能再发一把。一个应用可以有多把密钥，不用的可以吊销，见[接口约定](#接口约定)。
 
 真实单元这样运行：
 
@@ -243,7 +245,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 
 ## 对外契约
 
-[contracts/openapi.yaml](contracts/openapi.yaml) 是公开 API 的唯一源头，用 OpenAPI 3.1 写。现在有公共约定、身份和对话，其他资源做到时再加。接口还没有实现，`/v1` 下的路径目前都返回 404。
+[contracts/openapi.yaml](contracts/openapi.yaml) 是公开 API 的唯一源头，用 OpenAPI 3.1 写。现在有公共约定、身份和对话，其他资源做到时再加。目前只实现了 `DELETE /v1/api-keys/{key_id}`。身份类的其他三个操作先返回 404，等各自的小点实现；其他 `/v1` 路径带有效密钥时也返回 404。
 
 改接口时先改这个文件。`engine/http` 构建时从它生成 Java 接口和数据类型，包名是 `aie.http.api`。实现类写成生成接口的实现，契约一变，对不上的代码就编译不过。
 
@@ -303,6 +305,13 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 - **调用方：** `/v1` 的处理代码从请求属性 `aie.http.caller` 读调用方，里面有密钥号、租户号和应用号。
 - **密钥不进日志：** 不管密钥对不对，请求成功还是失败，日志里都没有它。
 - **不需要密钥：** `/healthz` 和 `/v1` 以外的路径。
+
+**吊销密钥：** `DELETE /v1/api-keys/{key_id}` 吊销同一个应用的密钥，成功返回 204，吊销后马上失效，再用就是 401：
+
+- **能吊销哪些：** 同一个应用的密钥，包括这次请求用的这把，最后一把也行。密钥泄露时必须能马上停掉；之后要用，再让 `admin` 发一把。
+- **读作不存在：** 别的应用或别的租户的密钥、不存在的、已经吊销的，都返回 404 `not_found`。
+- **记录保留：** 密钥那一行不删，记下吊销时间，以后能追查。
+- **新建密钥：** `POST /v1/api-keys` 在第 10-5 小点实现，现在返回 404。
 
 **`Engine-Version`：** `/v1` 下的请求可以传日期版本，如 `Engine-Version: 2026-11-05`。现在只有这一个版本，不传时也用它；以后按应用锁定的版本走。传别的版本返回 400 `invalid_request`，不会悄悄用另一个版本回答。版本写在 `EngineVersionFilter` 和契约的 `info.version`，测试保证两边一致。
 

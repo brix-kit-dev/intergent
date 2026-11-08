@@ -148,6 +148,16 @@ class ApiKeyLookupTest {
         assertThat(lookup.find(changed)).isEmpty();
     }
 
+    /** The function asks for keys in use only, so a revoked key leads nowhere, whoever revoked it. */
+    @Test
+    void aRevokedKeyFindsNothing() throws SQLException {
+        Issued issued = issue();
+        TestDatabase.asAdmin(DATABASE,
+                "UPDATE engine.tenancy_api_keys SET revoked_at = now() WHERE key_id = '" + issued.key().keyId() + "'");
+
+        assertThat(lookup.find(issued.key().key())).isEmpty();
+    }
+
     @ParameterizedTest
     @NullAndEmptySource
     @MethodSource("malformedKeys")
@@ -187,6 +197,7 @@ class ApiKeyLookupTest {
                 "tenancy_api_keys.application_id SELECT",
                 "tenancy_api_keys.key_hash SELECT",
                 "tenancy_api_keys.key_id SELECT",
+                "tenancy_api_keys.revoked_at SELECT",
                 "tenancy_api_keys.tenant_id SELECT");
     }
 

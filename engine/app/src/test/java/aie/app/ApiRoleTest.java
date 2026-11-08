@@ -9,6 +9,7 @@ import aie.adapters.storepg.PgRuntime;
 import aie.adapters.storepg.TestDatabase;
 import aie.core.tenancy.api.ApiKeys;
 import aie.core.tenancy.api.Provisioning;
+import aie.core.tenancy.api.Provisioning.IssuedKey;
 import aie.core.tenancy.internal.DatabaseProvisioning;
 import java.io.IOException;
 import java.net.InetAddress;
@@ -74,6 +75,14 @@ class ApiRoleTest {
     private static HttpResponse<String> get(String path) throws Exception {
         HttpRequest request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path)).build();
         return HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
+    }
+
+    private static int revoke(String keyId, String key) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/v1/api-keys/" + keyId))
+                .header("Authorization", "Bearer " + key)
+                .DELETE()
+                .build();
+        return HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString()).statusCode();
     }
 
     private static int status(String path, String key) throws Exception {
@@ -215,6 +224,28 @@ class ApiRoleTest {
 
         assertThat(status("/v1/nothing-here", key)).isEqualTo(404);
         assertThat(status("/v1/nothing-here", ApiKeys.issue("test", "jp1"))).isEqualTo(401);
+    }
+
+    /** DELETE /v1/api-keys/{key_id} on the real database: another key of the application, then the caller's own. */
+    @Test
+    void aKeyRevokesAnotherKeyOfItsApplicationAndThenItself() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String application = provisioning.createApplication(tenant, "test", "internal");
+        IssuedKey first = provisioning.createKey(tenant, application);
+        IssuedKey second = provisioning.createKey(tenant, application);
+        IssuedKey third = provisioning.createKey(tenant, application);
+        String elsewhere = provisioning.createTenant("jp1", null);
+        IssuedKey foreign = provisioning.createKey(elsewhere, provisioning.createApplication(elsewhere, "test", "internal"));
+
+        assertThat(revoke(second.keyId(), first.key())).isEqualTo(204);
+        assertThat(status("/v1/nothing-here", second.key())).isEqualTo(401);
+        assertThat(status("/v1/nothing-here", first.key())).isEqualTo(404);
+        assertThat(revoke(foreign.keyId(), first.key())).isEqualTo(404);
+        assertThat(status("/v1/nothing-here", foreign.key())).isEqualTo(404);
+        assertThat(revoke(first.keyId(), first.key())).isEqualTo(204);
+        assertThat(status("/v1/nothing-here", first.key())).isEqualTo(401);
+        assertThat(revoke(first.keyId(), third.key())).isEqualTo(404);
     }
 
     @Test
