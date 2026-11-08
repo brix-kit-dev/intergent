@@ -1,7 +1,10 @@
 package aie.app;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.awaitility.Awaitility.await;
 
+import aie.adapters.storepg.PgPool;
 import aie.adapters.storepg.TestDatabase;
 import java.io.IOException;
 import java.net.InetAddress;
@@ -13,6 +16,8 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.sql.SQLException;
+import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
 import org.junit.jupiter.api.AfterAll;
@@ -33,6 +38,8 @@ class ApiRoleTest {
 
     @Container
     private static final PostgreSQLContainer DATABASE = TestDatabase.container();
+
+    private static final Duration SETTLES = Duration.ofSeconds(10);
 
     private static ConfigurableApplicationContext context;
     private static int port;
@@ -75,6 +82,23 @@ class ApiRoleTest {
         } catch (IOException e) {
             return false;
         }
+    }
+
+    /** Connections the server holds for engine_app right now. The api started for this class holds a full pool. */
+    private static long engineAppConnections() throws SQLException {
+        return Long.parseLong(TestDatabase.firstColumn(DATABASE, "SELECT count(*) FROM pg_stat_activity WHERE usename = 'engine_app'").get(0));
+    }
+
+    private static boolean engineAppHolds(long connections) throws SQLException {
+        return engineAppConnections() == connections;
+    }
+
+    private static String currentUserOf(PgPool pool) {
+        return pool.inSystemTx(tx -> tx.query("SELECT current_user AS who", row -> row.string("who")).get(0));
+    }
+
+    private static void awaitOnlyTheClassPool() {
+        await().during(Duration.ofSeconds(1)).atMost(SETTLES).until(() -> engineAppHolds(ApiRole.POOL_SIZE));
     }
 
     private static int freePort() throws IOException {
@@ -125,6 +149,49 @@ class ApiRoleTest {
 
         assertThat(output.getErr()).contains("Startup refused: engine_app may not serve traffic: it has BYPASSRLS");
         assertThat(accepts(InetAddress.getByName("127.0.0.1"), unused)).isFalse();
+        awaitOnlyTheClassPool();
+    }
+
+    /** The pool fills up to its size and keeps those connections, all of them as engine_app. */
+    @Test
+    void theApiHoldsAPoolOfEngineAppConnections() {
+        awaitOnlyTheClassPool();
+
+        assertThat(currentUserOf(context.getBean(PgPool.class))).isEqualTo("engine_app");
+    }
+
+    @Test
+    void stoppingTheApiClosesItsConnections() {
+        awaitOnlyTheClassPool();
+        ConfigurableApplicationContext second = ApiRole.start("--server.port=0", address(), password(TestDatabase.APP_PASSWORD));
+        await().atMost(SETTLES).until(() -> engineAppHolds(2L * ApiRole.POOL_SIZE));
+
+        second.close();
+
+        awaitOnlyTheClassPool();
+    }
+
+    /** The port fails as the context starts, after it has made its beans, so the context closes the pool. */
+    @Test
+    void anApiThatCannotStartClosesItsPool() throws IOException {
+        awaitOnlyTheClassPool();
+        try (ServerSocket taken = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
+            assertThatThrownBy(() -> ApiRole.start("--server.port=" + taken.getLocalPort(), address(), password(TestDatabase.APP_PASSWORD)))
+                    .hasStackTraceContaining("already in use");
+        }
+
+        awaitOnlyTheClassPool();
+    }
+
+    /** A bad setting fails the context before it has made its beans, so only the role can close the pool. */
+    @Test
+    void anApiWithABadSettingClosesItsPool() {
+        awaitOnlyTheClassPool();
+
+        assertThatThrownBy(() -> ApiRole.start("--server.port=not-a-port", address(), password(TestDatabase.APP_PASSWORD)))
+                .hasStackTraceContaining("not-a-port");
+
+        awaitOnlyTheClassPool();
     }
 
     @Test

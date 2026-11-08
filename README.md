@@ -136,7 +136,9 @@ curl http://127.0.0.1:18080/healthz
 ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD=... java -jar engine.jar --role=api
 ```
 
-`api` 总是用 `engine_app` 连接，地址里写别的用户也不起作用。
+`api` 总是用 `engine_app` 连接，地址里写的用户和会话参数都不起作用。
+
+**连接池：** `api` 持有一个连接池，最多 10 条连接。请求跑在虚拟线程上，同时进来的请求再多，数据库连接也不会超过 10 条，多出来的请求排队等空闲连接。租户号只在一个事务里有效，同一条连接上的下一个事务不带租户。`api` 停止时关掉所有连接；启动失败时也一样，比如端口被占用。
 
 **启动自检：** `api` 先检查 `engine_app`，通过了才打开端口，这是蓝图 7.6 和红线 T-5 的要求。用错角色时程序照常运行，只是隔离悄悄失效，所以下面任何一条成立都拒绝启动，退出码 1：
 
@@ -151,7 +153,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 
 | 角色 | 现状 |
 | --- | --- |
-| `api` | 先过启动自检，再提供 HTTP 服务，目前只有 `/healthz` |
+| `api` | 先过启动自检，再建连接池，然后提供 HTTP 服务，目前只有 `/healthz` |
 | `migrate` | 运行数据库迁移，完成后退出 |
 | `admin` | 开通租户和应用，完成后退出，见[开通租户](#开通租户) |
 | `worker` | 还没实现，打印提示后退出 |
