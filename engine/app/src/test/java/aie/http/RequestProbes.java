@@ -10,9 +10,13 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.annotation.Order;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -22,9 +26,14 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /** Test-only stand-ins for the code that later points add behind RequestIdFilter. */
-final class RequestProbes {
+public final class RequestProbes {
 
     private static final Logger LOG = LoggerFactory.getLogger(RequestProbes.class);
+
+    /** How often the /v1/test/run routes really ran, so a test can tell a replay from a second run. */
+    public static final AtomicInteger RUNS = new AtomicInteger();
+    /** Holds /v1/test/run-slowly inside its controller until a test counts it down. */
+    public static volatile CountDownLatch hold = new CountDownLatch(0);
 
     private RequestProbes() {
     }
@@ -94,6 +103,31 @@ final class RequestProbes {
         Map<String, String> caller(HttpServletRequest request) {
             Owner owner = (Owner) request.getAttribute(ApiKeyFilter.CALLER);
             return Map.of("keyId", owner.keyId(), "tenantId", owner.tenantId(), "applicationId", owner.applicationId());
+        }
+
+        /** Work that must run once per Idempotency-Key. The body only changes the fingerprint. */
+        @PostMapping("/v1/test/run")
+        ResponseEntity<Map<String, Integer>> run(@RequestBody(required = false) Map<String, Object> body) {
+            return ResponseEntity.status(201).body(Map.of("run", RUNS.incrementAndGet()));
+        }
+
+        /** Shows what the controller got, after the idempotency filter has read the body for its fingerprint. */
+        @PostMapping("/v1/test/echo")
+        Map<String, Object> echo(@RequestBody Map<String, Object> body) {
+            return body;
+        }
+
+        @PostMapping("/v1/test/run-and-fail")
+        Map<String, Integer> runAndFail() {
+            RUNS.incrementAndGet();
+            throw new IllegalStateException("a failure after the work");
+        }
+
+        @PostMapping("/v1/test/run-slowly")
+        Map<String, Integer> runSlowly() throws InterruptedException {
+            int run = RUNS.incrementAndGet();
+            hold.await(30, TimeUnit.SECONDS);
+            return Map.of("run", run);
         }
 
         @GetMapping("/test/param")

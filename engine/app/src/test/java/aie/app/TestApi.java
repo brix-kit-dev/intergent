@@ -3,6 +3,7 @@ package aie.app;
 import aie.core.tenancy.api.ApiKeyLookup;
 import aie.core.tenancy.api.ApiKeyLookup.Owner;
 import aie.core.tenancy.api.ApiKeyManagement;
+import aie.core.tenancy.api.IdempotencyKeys;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -20,6 +21,18 @@ final class TestApi {
     static final String AUTHORIZATION = "Bearer " + KEY;
     /** Knows {@link #KEY} and nothing else. */
     static final ApiKeyLookup LOOKUP = key -> KEY.equals(key) ? Optional.of(OWNER) : Optional.empty();
+    /** Lets every request run and remembers nothing. IdempotencyTest checks the real keys on a database. */
+    static final IdempotencyKeys NO_REPLAYS = new IdempotencyKeys() {
+
+        @Override
+        public Claim claim(Key key, String fingerprint) {
+            return new Claim.Acquired();
+        }
+
+        @Override
+        public void finish(Key key, int status, String body) {
+        }
+    };
 
     private TestApi() {
     }
@@ -36,6 +49,7 @@ final class TestApi {
         return ApiRole.serve(context -> {
             context.registerBean(ApiKeyLookup.class, () -> keys);
             context.registerBean(ApiKeyManagement.class, () -> management);
+            context.registerBean(IdempotencyKeys.class, () -> NO_REPLAYS);
         }, args);
     }
 

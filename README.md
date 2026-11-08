@@ -315,7 +315,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 
 **`Engine-Version`：** `/v1` 下的请求可以传日期版本，如 `Engine-Version: 2026-11-05`。现在只有这一个版本，不传时也用它；以后按应用锁定的版本走。传别的版本返回 400 `invalid_request`，不会悄悄用另一个版本回答。版本写在 `EngineVersionFilter` 和契约的 `info.version`，测试保证两边一致。
 
-**`Idempotency-Key`：** 判断已经写好，在 `aie.core.tenancy.api.IdempotencyKeys`，还没接到 HTTP。接 HTTP 要先知道调用方是谁，所以排在第 10 小点的身份认证之后。键按租户和应用隔离，保留 24 小时：
+**`Idempotency-Key`：** `/v1` 下的 POST 可以带这个头，重试时同一件事不会做两遍。它排在认证和版本检查之后，所以知道调用方的租户和应用；键按租户和应用隔离，保留 24 小时。判断写在 `aie.core.tenancy.api.IdempotencyKeys`，HTTP 这一层是 `IdempotencyFilter`：
 
 | 同一个键再来一次 | 结果 |
 | --- | --- |
@@ -326,7 +326,13 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 | 上一次的进程中途死了，5 分钟没有完成 | 这一次接管，重新执行 |
 | 超过 24 小时 | 当作新键 |
 
-结果和业务数据不在同一个事务里，因为事务不跨模块。进程刚做完业务、还没存结果就死了的话，接管的那次会再执行一遍。
+- **算不算同一个请求：** 比较方法、路径和请求体的 SHA-256。同一个键用在别的接口上，也算请求不同。
+- **重放：** 状态码和正文都原样返回，`Request-Id` 是这次请求自己的。
+- **哪些不管：** 没带这个头的 POST 照常执行；别的方法带了这个头也不理会。在认证、版本检查这些地方就被拒的请求，不占用这个键，改好以后可以用同一个键再发。
+- **头和请求体的限制：** 头为空、超过 255 个字符或带了两个，返回 400 `invalid_request`。带这个头的请求体最多 1 MiB，超过返回 413，因为算指纹要把整个请求体读进内存。
+- **还没做：** 过期记录的清理是第 20 点，在那之前表只增不减；`POST /v1/api-keys` 重放时怎么处理明文密钥，在 10-5 之前定；流式请求在 M2 做。
+
+结果和业务数据不在同一个事务里，因为事务不跨模块。进程刚做完业务、还没存结果就死了的话，接管的那次会再执行一遍。 存结果的那一步失败时，回答照样发给调用方，并记一条错误日志；5 分钟后的重试会再执行一遍。
 
 **错误格式：** 所有错误都是 `application/problem+json`，带稳定的 `code`。客户端看 `code`，不要解析 `title` 和 `detail`：
 
@@ -339,7 +345,9 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 | 没带密钥，或密钥无效 | 401 | `unauthorized` |
 | 没有权限，比如现在的 `On-Behalf-Of` | 403 | `forbidden` |
 | 路径不存在 | 404 | `not_found` |
-| 请求格式不对：参数、JSON、方法、媒体类型 | 400、405、406、415 | `invalid_request` |
+| 请求格式不对：参数、JSON、方法、媒体类型、请求体太大 | 400、405、406、413、415 | `invalid_request` |
+| 同一个 `Idempotency-Key` 的请求还在处理 | 409 | `idempotency_key_in_use` |
+| 同一个 `Idempotency-Key` 配了不同的请求 | 422 | `idempotency_key_reused` |
 | Tomcat 自己拒绝：路径非法、请求行错误、缺 `Host`、请求头过大 | 400 | `invalid_request` |
 | 引擎内部出错 | 500 | `internal_error` |
 

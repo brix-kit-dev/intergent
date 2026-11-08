@@ -4,8 +4,10 @@ import aie.adapters.storepg.PgPool;
 import aie.adapters.storepg.PgRuntime;
 import aie.core.tenancy.api.ApiKeyLookup;
 import aie.core.tenancy.api.ApiKeyManagement;
+import aie.core.tenancy.api.IdempotencyKeys;
 import aie.core.tenancy.internal.DatabaseApiKeyLookup;
 import aie.core.tenancy.internal.DatabaseApiKeyManagement;
+import aie.core.tenancy.internal.DatabaseIdempotencyKeys;
 import aie.ports.DatabaseException;
 import java.util.function.Consumer;
 import org.springframework.boot.WebApplicationType;
@@ -45,6 +47,7 @@ class ApiRole {
                 context.registerBean(PgPool.class, () -> database);
                 context.registerBean(ApiKeyLookup.class, () -> new DatabaseApiKeyLookup(database));
                 context.registerBean(ApiKeyManagement.class, () -> new DatabaseApiKeyManagement(database));
+                context.registerBean(IdempotencyKeys.class, () -> new DatabaseIdempotencyKeys(database));
             }, args);
         } catch (RuntimeException e) {
             database.close();

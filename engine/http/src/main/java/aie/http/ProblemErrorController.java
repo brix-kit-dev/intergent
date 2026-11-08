@@ -37,7 +37,8 @@ class ProblemErrorController implements ErrorController {
                 MDC.remove(RequestIdFilter.LOG_KEY);
             }
         }
-        return Problems.response(status, detail(request, status), HttpHeaders.EMPTY);
+        String code = request.getAttribute(Problems.CODE) instanceof String given ? given : null;
+        return Problems.response(status, code, detail(request, status), HttpHeaders.EMPTY);
     }
 
     /** A refusal may say why. What the engine got wrong itself stays in the logs. */

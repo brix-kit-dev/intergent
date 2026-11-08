@@ -31,6 +31,14 @@ class ProblemsTest {
         assertThat(problem.getType()).isEqualTo("about:blank");
     }
 
+    /** Idempotency has two codes that its statuses alone do not say, so a refusal can name its own. */
+    @Test
+    void aCodeGivenWinsOverTheStatus() {
+        assertThat(Problems.of(409, "idempotency_key_in_use", null).getCode()).isEqualTo("idempotency_key_in_use");
+        assertThat(Problems.of(422, "idempotency_key_reused", "why").getCode()).isEqualTo("idempotency_key_reused");
+        assertThat(Problems.of(422, null, null).getCode()).isEqualTo("invalid_request");
+    }
+
     @Test
     void aStatusHttpDoesNotNameStillGetsATitle() {
         assertThat(Problems.of(599, null).getTitle()).isEqualTo("Error");
