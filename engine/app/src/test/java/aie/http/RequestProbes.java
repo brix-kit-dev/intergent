@@ -10,6 +10,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -115,6 +116,22 @@ public final class RequestProbes {
         @PostMapping("/v1/test/echo")
         Map<String, Object> echo(@RequestBody Map<String, Object> body) {
             return body;
+        }
+
+        /** An answer with a secret, the way creating a key gives one: the stored copy must leave it out. */
+        @PostMapping("/v1/test/secret")
+        Map<String, Object> secret(HttpServletRequest request) {
+            int run = RUNS.incrementAndGet();
+            request.setAttribute(IdempotencyFilter.NOT_STORED, Set.of("secret"));
+            return Map.of("run", run, "secret", "s3cret-" + run);
+        }
+
+        /** A secret in an answer that is not a JSON object, so the fields cannot be taken out and nothing is kept. */
+        @PostMapping(path = "/v1/test/secret-text", produces = "text/plain")
+        String secretText(HttpServletRequest request) {
+            int run = RUNS.incrementAndGet();
+            request.setAttribute(IdempotencyFilter.NOT_STORED, Set.of("secret"));
+            return "s3cret-" + run;
         }
 
         @PostMapping("/v1/test/run-and-fail")

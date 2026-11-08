@@ -3,7 +3,9 @@ package aie.app;
 import aie.core.tenancy.api.ApiKeyLookup;
 import aie.core.tenancy.api.ApiKeyLookup.Owner;
 import aie.core.tenancy.api.ApiKeyManagement;
+import aie.core.tenancy.api.ApiKeyManagement.CreatedKey;
 import aie.core.tenancy.api.IdempotencyKeys;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -57,14 +59,22 @@ final class TestApi {
         return ((ServletWebServerApplicationContext) context).getWebServer().getPort();
     }
 
-    /** Revokes only the keys it was told about, each once, and remembers every call. */
+    /** Creates keys it makes up, revokes only the keys it was told about, each once, and remembers every call. */
     static final class StandInKeys implements ApiKeyManagement {
+
+        static final Instant CREATED_AT = Instant.parse("2026-11-08T00:00:00Z");
 
         final List<String> calls = new CopyOnWriteArrayList<>();
         private final Set<String> revocable = ConcurrentHashMap.newKeySet();
 
         void allow(String... keyIds) {
             revocable.addAll(List.of(keyIds));
+        }
+
+        @Override
+        public CreatedKey create(Owner caller, String name) {
+            calls.add(caller.keyId() + " of " + caller.tenantId() + "/" + caller.applicationId() + " creates " + name);
+            return new CreatedKey("key_created" + calls.size(), "aie_test_dev_" + "5".repeat(40), name, CREATED_AT);
         }
 
         @Override

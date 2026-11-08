@@ -1,17 +1,20 @@
 package aie.app;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import aie.adapters.storepg.PgDatabase;
 import aie.adapters.storepg.TestDatabase;
 import aie.core.tenancy.api.ApiKeyLookup;
 import aie.core.tenancy.api.ApiKeyLookup.Owner;
 import aie.core.tenancy.api.ApiKeyManagement;
+import aie.core.tenancy.api.ApiKeyManagement.CreatedKey;
 import aie.core.tenancy.api.Provisioning;
 import aie.core.tenancy.api.Provisioning.IssuedKey;
 import aie.core.tenancy.internal.DatabaseApiKeyLookup;
 import aie.core.tenancy.internal.DatabaseApiKeyManagement;
 import aie.core.tenancy.internal.DatabaseProvisioning;
+import aie.ports.DatabaseException;
 import java.io.IOException;
 import java.sql.SQLException;
 import java.time.Duration;
@@ -80,6 +83,71 @@ class ApiKeyManagementTest {
     private static String revokedAt(Held held) throws SQLException {
         return TestDatabase.firstColumn(DATABASE,
                 "SELECT revoked_at::text FROM engine.tenancy_api_keys WHERE key_id = '" + held.owner().keyId() + "'").get(0);
+    }
+
+    private static String keyColumn(String column, String keyId) throws SQLException {
+        return TestDatabase.firstColumn(DATABASE, "SELECT " + column + " FROM engine.tenancy_api_keys WHERE key_id = '" + keyId + "'").get(0);
+    }
+
+    /** Old and new keys work side by side, which is how a key is rotated. */
+    @Test
+    void aCreatedKeyWorksForTheCallersApplicationNextToTheOldOne() {
+        Held held = newKeyOfANewTenant();
+
+        CreatedKey created = management.create(held.owner(), "second");
+
+        assertThat(lookup.find(created.key()))
+                .contains(new Owner(created.keyId(), held.owner().tenantId(), held.owner().applicationId()));
+        assertThat(works(held)).isTrue();
+    }
+
+    @Test
+    void aCreatedKeyTakesTheEnvironmentOfTheApplicationAndTheCellOfTheTenant() {
+        String tenant = provisioning.createTenant("jp2", null);
+        Held held = newKey(tenant, provisioning.createApplication(tenant, "live", "internal"));
+
+        assertThat(management.create(held.owner(), null).key()).startsWith("aie_live_jp2_");
+    }
+
+    @Test
+    void theNameAndTheTimeOfCreationAreKept() throws SQLException {
+        Held held = newKeyOfANewTenant();
+        Instant before = Instant.now();
+
+        CreatedKey created = management.create(held.owner(), "ci");
+
+        assertThat(created.name()).isEqualTo("ci");
+        assertThat(keyColumn("name", created.keyId())).isEqualTo("ci");
+        assertThat(created.createdAt()).isBetween(before.minusSeconds(5), Instant.now().plusSeconds(5));
+    }
+
+    @Test
+    void aKeyWithoutANameHasNone() throws SQLException {
+        CreatedKey created = management.create(newKeyOfANewTenant().owner(), null);
+
+        assertThat(created.name()).isNull();
+        assertThat(keyColumn("name", created.keyId())).isNull();
+    }
+
+    /** The API checks the length first; the database keeps the contract's limit even if a caller does not. */
+    @Test
+    void theDatabaseRefusesANameOverOneHundredCharacters() {
+        Owner owner = newKeyOfANewTenant().owner();
+
+        assertThat(management.create(owner, "n".repeat(100)).name()).hasSize(100);
+        assertThatThrownBy(() -> management.create(owner, "n".repeat(101))).isInstanceOf(DatabaseException.class);
+    }
+
+    /** Row-level security hides another tenant's application, so a forged caller gets no key there. */
+    @Test
+    void aCallerNamingAnotherTenantsApplicationGetsNoKey() throws SQLException {
+        Held mine = newKeyOfANewTenant();
+        Held theirs = newKeyOfANewTenant();
+        Owner forged = new Owner(mine.owner().keyId(), mine.owner().tenantId(), theirs.owner().applicationId());
+
+        assertThatThrownBy(() -> management.create(forged, null)).isInstanceOf(IllegalStateException.class);
+
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT count(*) FROM engine.tenancy_api_keys")).containsExactly("2");
     }
 
     @Test

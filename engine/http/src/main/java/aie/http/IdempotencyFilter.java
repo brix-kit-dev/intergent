@@ -16,6 +16,7 @@ import java.util.Collections;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -26,6 +27,9 @@ import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 import org.springframework.web.util.ContentCachingResponseWrapper;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.json.JsonMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 /**
  * The Idempotency-Key of blueprint 6.2 on every POST of the public API. The same key with the same request gets the
@@ -46,6 +50,13 @@ class IdempotencyFilter extends OncePerRequestFilter {
     static final int MAX_KEY = 255;
     /** The fingerprint covers the whole body, so the body is read into memory, and only this much of it. */
     static final int MAX_BODY = 1024 * 1024;
+    /**
+     * A request attribute a controller sets to the top-level fields of its JSON answer that must not be stored, such as
+     * a new key's secret. A replay then leaves them out, so no secret is kept for the 24 hours of a key.
+     */
+    static final String NOT_STORED = "aie.http.idempotency.not-stored";
+
+    private static final JsonMapper JSON = JsonMapper.builder().build();
 
     private static final Logger LOG = LoggerFactory.getLogger(IdempotencyFilter.class);
 
@@ -92,11 +103,28 @@ class IdempotencyFilter extends OncePerRequestFilter {
         ContentCachingResponseWrapper answer = new ContentCachingResponseWrapper(response);
         chain.doFilter(request, answer);
         try {
-            keys.finish(key, answer.getStatus(), new String(answer.getContentAsByteArray(), StandardCharsets.UTF_8));
+            keys.finish(key, answer.getStatus(), storable(request, answer.getContentAsByteArray()));
         } catch (RuntimeException e) {
             LOG.error("The answer to an {} could not be stored, so a retry after the lease runs the request again", HEADER, e);
         }
         answer.copyBodyToResponse();
+    }
+
+    /** The answer as it may be kept. When fields must go and they cannot be taken out, nothing of the body is kept. */
+    private static String storable(HttpServletRequest request, byte[] answer) {
+        if (!(request.getAttribute(NOT_STORED) instanceof Set<?> fields) || fields.isEmpty()) {
+            return new String(answer, StandardCharsets.UTF_8);
+        }
+        try {
+            if (JSON.readTree(answer) instanceof ObjectNode object) {
+                fields.forEach(field -> object.remove(String.valueOf(field)));
+                return JSON.writeValueAsString(object);
+            }
+        } catch (JacksonException e) {
+            LOG.warn("An answer with fields that must not be stored was not a JSON object, so its body was not kept");
+            return "";
+        }
+        return "";
     }
 
     /** The first answer again. Only this request's own Request-Id differs. */

@@ -247,6 +247,36 @@ class IdempotencyTest {
         assertThat(RequestProbes.RUNS).hasValue(1);
     }
 
+    /** A field marked as not stored is in the first answer only, and nowhere in the database. */
+    @Test
+    void aFieldThatMustNotBeStoredIsLeftOutOfTheReplay() throws Exception {
+        String once = newKey();
+
+        HttpResponse<String> first = post("/v1/test/secret", key, once, "{}");
+        HttpResponse<String> retry = post("/v1/test/secret", key, once, "{}");
+
+        assertThat(first.body()).contains("\"secret\":\"s3cret-1\"").contains("\"run\":1");
+        assertThat(retry.statusCode()).isEqualTo(200);
+        assertThat(retry.body()).isEqualTo("{\"run\":1}");
+        assertThat(rowsFor(once).getFirst()).doesNotContain("s3cret");
+        assertThat(RequestProbes.RUNS).hasValue(1);
+    }
+
+    /** When the marked fields cannot be taken out, the body is not kept at all, so the secret is not either. */
+    @Test
+    void aSecretThatCannotBeTakenOutKeepsNoBody() throws Exception {
+        String once = newKey();
+
+        HttpResponse<String> first = post("/v1/test/secret-text", key, once, "{}");
+        HttpResponse<String> retry = post("/v1/test/secret-text", key, once, "{}");
+
+        assertThat(first.body()).isEqualTo("s3cret-1");
+        assertThat(retry.statusCode()).isEqualTo(200);
+        assertThat(retry.body()).isEmpty();
+        assertThat(rowsFor(once)).containsExactly(tenant + " " + application + " 200 ");
+        assertThat(RequestProbes.RUNS).hasValue(1);
+    }
+
     /** The filter reads the body for its fingerprint, and the controller still gets all of it. */
     @Test
     void theControllerStillReadsTheWholeBody() throws Exception {

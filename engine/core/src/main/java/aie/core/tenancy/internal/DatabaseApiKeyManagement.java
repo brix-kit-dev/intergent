@@ -22,6 +22,16 @@ public final class DatabaseApiKeyManagement implements ApiKeyManagement {
         this.database = database;
     }
 
+    /** The caller's application exists, since its key just passed; an application that is gone fails loudly. */
+    @Override
+    public CreatedKey create(Owner caller, String name) {
+        KeyIssuing.Issued issued = database.inTenantTx(caller.tenantId(), tx ->
+                        KeyIssuing.issue(tx, caller.tenantId(), caller.applicationId(), name))
+                .orElseThrow(() -> new IllegalStateException(
+                        "Application " + caller.applicationId() + " does not exist in tenant " + caller.tenantId()));
+        return new CreatedKey(issued.keyId(), issued.key(), name, issued.createdAt());
+    }
+
     @Override
     public boolean revoke(Owner caller, String keyId) {
         return database.inTenantTx(caller.tenantId(), tx -> tx.update(REVOKE, caller.applicationId(), keyId)) == 1;

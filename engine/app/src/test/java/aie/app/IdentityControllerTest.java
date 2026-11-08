@@ -2,6 +2,7 @@ package aie.app;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import aie.http.api.model.CreatedApiKey;
 import aie.http.api.model.Problem;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -53,6 +54,15 @@ class IdentityControllerTest {
 
     private static HttpResponse<String> revoke(String keyId) throws Exception {
         return send(request("/v1/api-keys/" + keyId).header("Authorization", TestApi.AUTHORIZATION).DELETE());
+    }
+
+    private static HttpResponse<String> create(String body) throws Exception {
+        return send(request("/v1/api-keys").header("Authorization", TestApi.AUTHORIZATION)
+                .header("Content-Type", "application/json").POST(BodyPublishers.ofString(body)));
+    }
+
+    private static String detail(HttpResponse<String> response) {
+        return JSON.readValue(response.body(), Problem.class).getDetail();
     }
 
     private static void assertProblem(HttpResponse<String> response, int status, String code) {
@@ -107,9 +117,62 @@ class IdentityControllerTest {
         assertProblem(send(request("/v1/api-keys/key_other").header("Authorization", TestApi.AUTHORIZATION)), 405, "invalid_request");
     }
 
+    @Test
+    void creatingAKeyAnswersCreatedWithTheKeyOnce() throws Exception {
+        HttpResponse<String> response = create("{\"name\":\"rotation\"}");
+
+        assertThat(response.statusCode()).isEqualTo(201);
+        assertThat(response.headers().firstValue("Request-Id")).isPresent();
+        CreatedApiKey created = JSON.readValue(response.body(), CreatedApiKey.class);
+        assertThat(created.getId()).isEqualTo("key_created1");
+        assertThat(created.getKey()).isEqualTo("aie_test_dev_" + "5".repeat(40));
+        assertThat(created.getName()).isEqualTo("rotation");
+        assertThat(response.body()).contains("\"created_at\":\"2026-11-08T00:00:00Z\"").doesNotContain("expires_at");
+        assertThat(KEYS.calls).containsExactly(CALLER + " creates rotation");
+    }
+
+    @Test
+    void aKeyNeedsNoName() throws Exception {
+        HttpResponse<String> response = create("{}");
+
+        assertThat(response.statusCode()).isEqualTo(201);
+        assertThat(response.body()).doesNotContain("\"name\"");
+        assertThat(KEYS.calls).containsExactly(CALLER + " creates null");
+    }
+
+    /** Expiry comes with 10-5-2. Until then a key that would quietly never expire is refused. */
+    @Test
+    void anExpiryIsRefusedForNow() throws Exception {
+        HttpResponse<String> response = create("{\"expires_at\":\"2027-01-01T00:00:00Z\"}");
+
+        assertProblem(response, 400, "invalid_request");
+        assertThat(detail(response)).isEqualTo("expires_at is not supported yet");
+        assertThat(KEYS.calls).isEmpty();
+    }
+
+    /** The contract counts characters, so a name of 100 symbols outside the basic plane passes too. */
+    @Test
+    void aNameMayHaveOneHundredCharactersAndNoMore() throws Exception {
+        assertThat(create("{\"name\":\"" + "n".repeat(100) + "\"}").statusCode()).isEqualTo(201);
+        assertThat(create("{\"name\":\"" + "\uD83D\uDD11".repeat(100) + "\"}").statusCode()).isEqualTo(201);
+
+        HttpResponse<String> tooLong = create("{\"name\":\"" + "n".repeat(101) + "\"}");
+
+        assertProblem(tooLong, 400, "invalid_request");
+        assertThat(detail(tooLong)).isEqualTo("name may be at most 100 characters");
+        assertThat(KEYS.calls).hasSize(2);
+    }
+
+    @Test
+    void creatingNeedsAKey() throws Exception {
+        assertProblem(send(request("/v1/api-keys").header("Content-Type", "application/json").POST(BodyPublishers.ofString("{}"))),
+                401, "unauthorized");
+        assertThat(KEYS.calls).isEmpty();
+    }
+
     /** These answer as their paths did before the controller existed, until their own points implement them. */
     @ParameterizedTest
-    @ValueSource(strings = {"/v1/api-keys", "/v1/sessions", "/v1/anonymous-sessions"})
+    @ValueSource(strings = {"/v1/sessions", "/v1/anonymous-sessions"})
     void theOperationsOfLaterPointsAreNotFoundYet(String path) throws Exception {
         HttpResponse<String> response = send(request(path).header("Authorization", TestApi.AUTHORIZATION)
                 .header("Content-Type", "application/json").POST(BodyPublishers.ofString("{}")));

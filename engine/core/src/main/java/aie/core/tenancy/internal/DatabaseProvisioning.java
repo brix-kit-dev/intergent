@@ -1,11 +1,9 @@
 package aie.core.tenancy.internal;
 
 import aie.core.Ids;
-import aie.core.tenancy.api.ApiKeys;
 import aie.core.tenancy.api.ApiVersion;
 import aie.core.tenancy.api.Provisioning;
 import aie.ports.DatabasePort;
-import java.util.List;
 
 /** {@link Provisioning} on the database. Each new row goes in as its own tenant, as row-level security requires. */
 public final class DatabaseProvisioning implements Provisioning {
@@ -17,14 +15,6 @@ public final class DatabaseProvisioning implements Provisioning {
             VALUES (?, ?, ?, ?, ?)
             """;
 
-    /** The key takes the application's environment and the tenant's cell, so it can be routed without the database. */
-    private static final String KEY_PARTS = """
-            SELECT a.environment, t.cell_id
-            FROM tenancy_applications a
-            JOIN tenancy_tenants t ON t.tenant_id = a.tenant_id
-            WHERE a.application_id = ?
-            """;
-    private static final String ADD_KEY = "INSERT INTO tenancy_api_keys (key_id, tenant_id, application_id, key_hash) VALUES (?, ?, ?, ?)";
 
     private final DatabasePort database;
 
@@ -55,15 +45,8 @@ public final class DatabaseProvisioning implements Provisioning {
     /** Row-level security hides the applications of other tenants, so one of them reads as missing. */
     @Override
     public IssuedKey createKey(String tenantId, String applicationId) {
-        String keyId = Ids.next("key");
-        String key = database.inTenantTx(tenantId, tx -> {
-            List<String> issued = tx.query(KEY_PARTS, row -> ApiKeys.issue(row.string("environment"), row.string("cell_id")), applicationId);
-            if (issued.isEmpty()) {
-                throw new IllegalArgumentException("Application " + applicationId + " does not exist in tenant " + tenantId);
-            }
-            tx.update(ADD_KEY, keyId, tenantId, applicationId, ApiKeys.hash(issued.getFirst()));
-            return issued.getFirst();
-        });
-        return new IssuedKey(keyId, key);
+        KeyIssuing.Issued issued = database.inTenantTx(tenantId, tx -> KeyIssuing.issue(tx, tenantId, applicationId, null))
+                .orElseThrow(() -> new IllegalArgumentException("Application " + applicationId + " does not exist in tenant " + tenantId));
+        return new IssuedKey(issued.keyId(), issued.key());
     }
 }

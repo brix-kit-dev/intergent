@@ -128,7 +128,7 @@ paths:
               $ref: "#/components/schemas/CreateApiKeyRequest"
       responses:
         "201":
-          description: The key. This is the only time it is shown.
+          description: The key. Its secret is in this first answer only; a replay leaves it out.
           headers:
             Request-Id:
               $ref: "#/components/headers/RequestId"
@@ -833,13 +833,16 @@ components:
 
     CreatedApiKey:
       type: object
-      required: [id, key, created_at]
+      required: [id, created_at]
       properties:
         id:
           $ref: "#/components/schemas/KeyId"
         key:
           type: string
-          description: The secret. Treat it as opaque. It is shown once and stored only as a hash.
+          description: |
+            The secret, in the first answer only. Treat it as opaque. Only its hash is stored, so a
+            replay of the same Idempotency-Key leaves it out: if the first answer was lost, revoke this
+            key and create another.
         name:
           type: string
         created_at:

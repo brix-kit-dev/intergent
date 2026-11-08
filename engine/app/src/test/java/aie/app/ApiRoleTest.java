@@ -11,6 +11,7 @@ import aie.core.tenancy.api.ApiKeys;
 import aie.core.tenancy.api.Provisioning;
 import aie.core.tenancy.api.Provisioning.IssuedKey;
 import aie.core.tenancy.internal.DatabaseProvisioning;
+import aie.http.api.model.CreatedApiKey;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -20,6 +21,7 @@ import java.net.Socket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
+import java.net.http.HttpRequest.BodyPublishers;
 import java.net.http.HttpResponse;
 import java.sql.SQLException;
 import java.time.Duration;
@@ -36,6 +38,7 @@ import org.springframework.context.ConfigurableApplicationContext;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
+import tools.jackson.databind.json.JsonMapper;
 
 @Testcontainers
 @ExtendWith(OutputCaptureExtension.class)
@@ -45,6 +48,7 @@ class ApiRoleTest {
     private static final PostgreSQLContainer DATABASE = TestDatabase.container();
 
     private static final Duration SETTLES = Duration.ofSeconds(10);
+    private static final JsonMapper JSON = JsonMapper.builder().build();
 
     private static ConfigurableApplicationContext context;
     private static int port;
@@ -83,6 +87,16 @@ class ApiRoleTest {
                 .DELETE()
                 .build();
         return HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString()).statusCode();
+    }
+
+    private static HttpResponse<String> createKey(String key, String idempotencyKey, String body) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/v1/api-keys"))
+                .header("Authorization", "Bearer " + key)
+                .header("Idempotency-Key", idempotencyKey)
+                .header("Content-Type", "application/json")
+                .POST(BodyPublishers.ofString(body))
+                .build();
+        return HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
     }
 
     private static int status(String path, String key) throws Exception {
@@ -246,6 +260,30 @@ class ApiRoleTest {
         assertThat(revoke(first.keyId(), first.key())).isEqualTo(204);
         assertThat(status("/v1/nothing-here", first.key())).isEqualTo(401);
         assertThat(revoke(first.keyId(), third.key())).isEqualTo(404);
+    }
+
+    /** POST /v1/api-keys on the real database, retried with its Idempotency-Key: the retry never sees the key. */
+    @Test
+    void aKeyCreatesAnotherKeyAndARetryGetsItWithoutTheSecret() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String first = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "internal")).key();
+
+        HttpResponse<String> created = createKey(first, "rotate-1", "{\"name\":\"second\"}");
+        HttpResponse<String> retry = createKey(first, "rotate-1", "{\"name\":\"second\"}");
+
+        assertThat(created.statusCode()).isEqualTo(201);
+        CreatedApiKey second = JSON.readValue(created.body(), CreatedApiKey.class);
+        assertThat(second.getKey()).startsWith("aie_test_jp1_");
+        assertThat(status("/v1/nothing-here", second.getKey())).isEqualTo(404);
+        assertThat(status("/v1/nothing-here", first)).isEqualTo(404);
+        assertThat(retry.statusCode()).isEqualTo(201);
+        CreatedApiKey replayed = JSON.readValue(retry.body(), CreatedApiKey.class);
+        assertThat(replayed.getId()).isEqualTo(second.getId());
+        assertThat(replayed.getKey()).isNull();
+        assertThat(TestDatabase.firstColumn(DATABASE,
+                        "SELECT response_body FROM engine.tenancy_idempotency_keys WHERE idempotency_key = 'rotate-1'"))
+                .singleElement().asString().contains(second.getId()).doesNotContain(second.getKey());
     }
 
     @Test

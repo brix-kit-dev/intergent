@@ -827,7 +827,7 @@ components:
 
     CreatedApiKey:
       type: object
-      required: [id, key, created_at]
+      required: [id, created_at]
       properties:
         id:
           $ref: "#/components/schemas/KeyId"
