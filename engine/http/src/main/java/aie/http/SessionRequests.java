@@ -56,8 +56,7 @@ final class SessionRequests {
         if (!context.values().stream().allMatch(SessionRequests::isContextValue)) {
             throw refused("each context value must be a string of at most " + MAX_CONTEXT_VALUE + " characters");
         }
-        String locale = body.getLocale() == null ? null : SessionTokens.standardLocale(body.getLocale()).orElseThrow(() ->
-                refused("locale must be a BCP 47 language tag of at most " + SessionTokens.MAX_LOCALE + " characters, such as ja-JP"));
+        String locale = locale(body.getLocale());
         int bytes = tokens.claimsBytes(scopes, context);
         if (bytes > SessionTokens.MAX_CLAIMS_BYTES) {
             throw refused("scopes and context may take at most " + SessionTokens.MAX_CLAIMS_BYTES
@@ -67,6 +66,12 @@ final class SessionRequests {
                 ? IdentityLevel.VERIFIED
                 : IdentityLevel.fromWireName(body.getIdentityLevel().getValue()).orElseThrow();
         return new Checked(externalId, level, List.copyOf(scopes), Map.copyOf(context), locale);
+    }
+
+    /** The locale in standard form, or null without one. Anonymous sessions take it the same way. */
+    static String locale(String value) {
+        return value == null ? null : SessionTokens.standardLocale(value).orElseThrow(() ->
+                refused("locale must be a BCP 47 language tag of at most " + SessionTokens.MAX_LOCALE + " characters, such as ja-JP"));
     }
 
     private static boolean isName(String name, int maxLength) {

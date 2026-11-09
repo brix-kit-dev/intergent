@@ -237,16 +237,6 @@ class IdentityControllerTest {
         assertThat(KEYS.calls).isEmpty();
     }
 
-    /** It answers as its path did before the controller existed, until point 12 implements it. */
-    @Test
-    void anonymousSessionsAreNotFoundYet() throws Exception {
-        HttpResponse<String> response = send(request("/v1/anonymous-sessions").header("Authorization", TestApi.AUTHORIZATION)
-                .header("Content-Type", "application/json").POST(BodyPublishers.ofString("{}")));
-
-        assertProblem(response, 404, "not_found");
-        assertThat(KEYS.calls).isEmpty();
-    }
-
     @Test
     void aSessionAnswersCreatedWithATokenForTheEndUser() throws Exception {
         Instant before = Instant.now().truncatedTo(ChronoUnit.SECONDS);

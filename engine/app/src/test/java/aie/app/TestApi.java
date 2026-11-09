@@ -9,6 +9,7 @@ import aie.core.tenancy.api.IdempotencyKeys;
 import aie.core.tenancy.api.LowerTenants;
 import aie.core.tenancy.api.LowerTenants.Acting;
 import aie.core.tenancy.api.SessionTokens;
+import aie.core.tenancy.api.SiteKeyLookup;
 import aie.core.tenancy.internal.SignedSessionTokens;
 import java.time.Clock;
 import java.time.Instant;
@@ -36,6 +37,15 @@ final class TestApi {
     static final String SESSION_KEY_SETTING = "--engine.session.key=" + Base64.getEncoder().encodeToString(SESSION_KEY);
     /** Real tokens signed with {@link #SESSION_KEY}, which need no database, so a test can check what the api issued. */
     static final SessionTokens SESSION_TOKENS = new SignedSessionTokens(Clock.systemUTC(), SESSION_KEY, List.of());
+    /** Well formed, so it passes the format check of a real lookup too. Public, as every site key is. */
+    static final String SITE_KEY = "aie_site_test_dev_" + "0123456789".repeat(4);
+    static final Owner SITE_KEY_OWNER = new Owner("site_test", "ten_test", "app_test");
+    /** Knows {@link #SITE_KEY} for https://shop.example.com and http://localhost:3000, and no other key. */
+    static final SiteKeyLookup SITE_KEYS = (siteKey, origin) -> !SITE_KEY.equals(siteKey)
+            ? new SiteKeyLookup.Checked.Unknown()
+            : origin != null && Set.of("https://shop.example.com", "http://localhost:3000").contains(origin)
+                    ? new SiteKeyLookup.Checked.Allowed(SITE_KEY_OWNER)
+                    : new SiteKeyLookup.Checked.OtherOrigin();
     /** Knows {@link #KEY} and nothing else. */
     static final ApiKeyLookup LOOKUP = key -> KEY.equals(key) ? Optional.of(OWNER) : Optional.empty();
     /**
@@ -83,6 +93,7 @@ final class TestApi {
             context.registerBean(IdempotencyKeys.class, () -> NO_REPLAYS);
             context.registerBean(LowerTenants.class, () -> LOWER_TENANTS);
             context.registerBean(EndUsers.class, () -> endUsers);
+            context.registerBean(SiteKeyLookup.class, () -> SITE_KEYS);
             context.registerBean(SessionTokens.class, () -> SESSION_TOKENS);
         }, args);
     }

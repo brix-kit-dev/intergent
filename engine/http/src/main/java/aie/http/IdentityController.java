@@ -5,6 +5,7 @@ import aie.core.tenancy.api.ApiKeyManagement;
 import aie.core.tenancy.api.ApiKeyManagement.CreatedKey;
 import aie.core.tenancy.api.EndUsers;
 import aie.core.tenancy.api.SessionTokens;
+import aie.core.tenancy.api.SessionTokens.IdentityLevel;
 import aie.core.tenancy.api.SessionTokens.Issued;
 import aie.http.api.IdentityApi;
 import aie.http.api.model.CreateAnonymousSessionRequest;
@@ -16,6 +17,8 @@ import jakarta.servlet.http.HttpServletRequest;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import org.jspecify.annotations.Nullable;
@@ -25,9 +28,8 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
 /**
- * The identity operations of the contract. Creating and revoking keys and creating sessions work. Anonymous sessions
- * answer 404, as their path did before this class existed, until point 12 replaces it. The generated interface has no
- * defaults, so every operation has to be here.
+ * The identity operations of the contract: creating and revoking keys, and creating sessions and anonymous sessions.
+ * The generated interface has no defaults, so every operation has to be here.
  */
 @RestController
 class IdentityController implements IdentityApi {
@@ -101,10 +103,24 @@ class IdentityController implements IdentityApi {
         return ResponseEntity.status(HttpStatus.CREATED).body(answer);
     }
 
+    /**
+     * A token with the lowest rights for a visitor of the host's site (blueprint 6.5): no scopes, no context, and an end
+     * user of its own for this session. SiteKeyFilter has checked the site key and the origin, so the caller is the
+     * key's application. The token is never stored, so a replay leaves it out, as it does for sessions.
+     */
     @Override
     public ResponseEntity<Session> createAnonymousSession(CreateAnonymousSessionRequest body,
             @Nullable String idempotencyKey, @Nullable String engineVersion, @Nullable String traceparent) {
-        throw notYet();
+        String locale = SessionRequests.locale(body.getLocale());
+        Owner caller = caller();
+        String endUserId = endUsers.anonymous(caller);
+        Issued issued = sessionTokens.issue(new SessionTokens.Session(caller.tenantId(), caller.applicationId(), endUserId,
+                IdentityLevel.ANONYMOUS, List.of(), Map.of(), locale));
+        request.setAttribute(IdempotencyFilter.NOT_STORED, Set.of("token"));
+        Session answer = new Session(issued.expiresAt().atOffset(ZoneOffset.UTC), endUserId, IdentityLevel.ANONYMOUS.wireName())
+                .token(issued.token())
+                .scopes(List.of());
+        return ResponseEntity.status(HttpStatus.CREATED).body(answer);
     }
 
     /** ApiKeyFilter has put the caller here before any /v1 request reaches a controller. */
@@ -112,7 +128,4 @@ class IdentityController implements IdentityApi {
         return Objects.requireNonNull((Owner) request.getAttribute(ApiKeyFilter.CALLER), "No caller on a /v1 request");
     }
 
-    private static ResponseStatusException notYet() {
-        return new ResponseStatusException(HttpStatus.NOT_FOUND);
-    }
 }

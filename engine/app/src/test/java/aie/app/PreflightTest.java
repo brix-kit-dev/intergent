@@ -5,11 +5,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import aie.http.api.model.Problem;
 import java.io.IOException;
 import java.net.Socket;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpRequest.BodyPublishers;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -43,8 +38,8 @@ class PreflightTest {
     }
 
     /**
-     * The HTTP client keeps Origin and the Access-Control headers for itself, so a preflight is written by hand, as a
-     * browser sends it. The answer comes back whole, headers and body, with a line break of {@code \n}.
+     * A request written by hand over a socket, so the test sees the answer exactly as the server sends it: the status
+     * line, every header, and the body. It comes back whole, with a line break of {@code \n}.
      */
     private static String send(String request) throws IOException {
         try (Socket socket = new Socket("127.0.0.1", port)) {
@@ -149,14 +144,4 @@ class PreflightTest {
         assertThat(header(answer, "Access-Control-Allow-Origin")).isNull();
     }
 
-    /** The POST itself is not answered to any origin yet; 12-5 answers it only to the origins of its site key. */
-    @Test
-    void thePostItselfGetsNoCorsYet() throws Exception {
-        HttpResponse<String> response = HttpClient.newHttpClient().send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + PATH))
-                .header("Authorization", TestApi.AUTHORIZATION).header("Content-Type", "application/json")
-                .POST(BodyPublishers.ofString("{\"site_key\":\"x\"}")).build(), HttpResponse.BodyHandlers.ofString());
-
-        assertThat(response.statusCode()).isEqualTo(404);
-        assertThat(response.headers().firstValue("Access-Control-Allow-Origin")).isEmpty();
-    }
 }

@@ -29,6 +29,9 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * <p>With On-Behalf-Of, a platform host's key acts for one of its lower tenants (blueprint 6.5): the request then
  * carries that tenant and its application of the key's environment, as {@link LowerTenants} decides, and keeps the
  * platform's key ID, so that it shows who acted.
+ *
+ * <p>The one exception is {@code POST /v1/anonymous-sessions}, which a browser calls with a site key instead:
+ * {@link SiteKeyFilter} checks it, in the same place in the chain.
  */
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE + 3)
@@ -54,7 +57,7 @@ class ApiKeyFilter extends OncePerRequestFilter {
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-        return !PublicApi.contains(request);
+        return !PublicApi.contains(request) || SiteKeyFilter.handles(request);
     }
 
     @Override

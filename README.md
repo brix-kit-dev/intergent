@@ -241,11 +241,11 @@ read -r KEY_ID API_KEY <<< "$(deploy/dev/admin.sh create-key --tenant="$TENANT" 
     这样令牌最大约 3.1 KB。A-7 拦住这些限制被收紧，`SessionLimitsTest` 拦住它们被放宽。
   - **换令牌：** 用 `POST /v1/sessions`，见[接口约定](#接口约定)。超过上面大小的请求返回 400；签发时还会再查一遍，所以哪条路径都签不出更大的令牌。
 - **密钥：** 形如 `aie_test_dev_` 加 40 位随机字母和数字。前面是应用的环境和租户的单元码，不查库就能看出来。数据库只存 SHA-256 哈希，检查约束挡住任何不像哈希的值。明文只在发放时打印这一次，丢了只能再发一把。一个应用可以有多把密钥，不用的可以吊销，见[接口约定](#接口约定)。
-- **站点键：** 放在宿主网页里，浏览器用它换匿名令牌（蓝图 6.5）。它是公开的，但和密钥一样只存哈希，因为蓝图 7.6 规定按哈希查找。用它换令牌的 `POST /v1/anonymous-sessions` 还没接上，在第 12 点后面几步做。这些规则 2026-11-09 获批：
+- **站点键：** 放在宿主网页里，浏览器用它换匿名令牌（蓝图 6.5）。它是公开的，但和密钥一样只存哈希，因为蓝图 7.6 规定按哈希查找。浏览器用 `POST /v1/anonymous-sessions` 拿它换令牌，见[接口约定](#接口约定)。这些规则 2026-11-09 获批：
   - **格式：** 形如 `aie_site_test_dev_` 加 40 位随机字母和数字，前面是应用的环境和租户的单元码。它和服务端密钥的格式不会互相混淆。明文只在发放时打印这一次，丢了就再发一把。
   - **来源：** 每把站点键列出 1 到 10 个确切的来源，比如 `https://shop.example.com`，只有从这些网站来的请求才能换令牌。来源必须是 https，只有开发用的 `http://localhost` 和 `http://127.0.0.1` 例外。不支持通配符和路径；国际化域名要写成 punycode。来源按浏览器发送的写法保存：小写，去掉默认端口和末尾的斜杠，重复的只留一个。数据库的检查约束也会拦住不像来源的值。
   - **吊销：** 用 `revoke-site-key` 吊销。那一行保留，记下吊销时间；已经吊销的不能再吊销一次。
-  - **查找：** 先看格式，格式不对就不查数据库。格式对的，按哈希调用系统函数 `tenancy_find_site_key`，同时带上请求的来源，来源按浏览器的写法读。结果有三种：允许，就是来源在名单里；来源不对，包括请求没有来源或来源是 `null`；不认识，就是没发过或已吊销。等匿名会话接口接上（12-5），这三种分别是签发令牌、回 403、回 401。
+  - **查找：** 先看格式，格式不对就不查数据库。格式对的，按哈希调用系统函数 `tenancy_find_site_key`，同时带上请求的来源，来源按浏览器的写法读。结果有三种：允许，就是来源在名单里；来源不对，包括请求没有来源或来源是 `null`；不认识，就是没发过或已吊销。匿名会话接口对这三种分别是签发令牌、回 403、回 401。
   - **防护的边界：** 来源校验只能防别的网站嵌入这把站点键，防不了脚本伪造来源，所以匿名令牌的权限最低。按站点键限流是第 26 点，引擎对外公开前必须做完。
 
 真实单元这样运行：
@@ -299,7 +299,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 
 ## 对外契约
 
-[contracts/openapi.yaml](contracts/openapi.yaml) 是公开 API 的唯一源头，用 OpenAPI 3.1 写。现在有公共约定、身份和对话，其他资源做到时再加。目前实现了 `POST /v1/api-keys`、`DELETE /v1/api-keys/{key_id}` 和 `POST /v1/sessions`。建匿名会话先返回 404，等第 12 小点实现；其他 `/v1` 路径带有效密钥时也返回 404。
+[contracts/openapi.yaml](contracts/openapi.yaml) 是公开 API 的唯一源头，用 OpenAPI 3.1 写。现在有公共约定、身份和对话，其他资源做到时再加。目前实现了 `POST /v1/api-keys`、`DELETE /v1/api-keys/{key_id}`、`POST /v1/sessions` 和 `POST /v1/anonymous-sessions`；其他 `/v1` 路径带有效密钥时返回 404。
 
 改接口时先改这个文件。`engine/http` 构建时从它生成 Java 接口和数据类型，包名是 `aie.http.api`。实现类写成生成接口的实现，契约一变，对不上的代码就编译不过。
 
@@ -349,11 +349,11 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 
 **跨域预检：** 浏览器从宿主的网页调用引擎时，要先发 `OPTIONS` 预检请求，问能不能跨域。现在只有 `/v1/anonymous-sessions` 回答预检，因为浏览器在还没有令牌时只调用这一个接口。其他浏览器接口的规则到 M2 再定，它们的预检和普通请求一样要密钥，得到 401。
 
-- **放行：** 来源只要是站点键可能列出的那种，就回 204，并带上 `Access-Control-Allow-Origin`（原样返回请求的来源）、`Access-Control-Allow-Methods: POST`、`Access-Control-Allow-Headers: Content-Type, Idempotency-Key, Engine-Version, traceparent`，缓存 600 秒。预检请求没有正文，看不到站点键，所以这一步对哪个网站都放行；真正的 POST 只对它那把站点键列出的来源放行，这在第 12 点后面一步接上。
+- **放行：** 来源只要是站点键可能列出的那种，就回 204，并带上 `Access-Control-Allow-Origin`（原样返回请求的来源）、`Access-Control-Allow-Methods: POST`、`Access-Control-Allow-Headers: Content-Type, Idempotency-Key, Engine-Version, traceparent`，缓存 600 秒。预检请求没有正文，看不到站点键，所以这一步对哪个网站都放行；真正的 POST 只对它那把站点键列出的来源放行，见下面的“换匿名令牌”。
 - **拒绝：** 来源不合格（比如 `null`、http 的正式域名、带路径），或者问的不是 POST，回 403 `forbidden`，不带跨域头。
 - **顺序：** 预检排在认证前面，因为预检请求不带凭证。过滤器的顺序是：`Request-Id`、`traceparent`、预检、认证、版本、幂等。
 
-**认证：** `/v1` 下的请求都要带 API 密钥，写法是 `Authorization: Bearer aie_test_dev_...`，这是 RFC 6750 的格式。密钥用 `admin` 发放，见[开通租户](#开通租户)。认证排在版本检查前面，因为以后版本要按调用方的应用决定：
+**认证：** `/v1` 下的请求都要带 API 密钥，只有 `POST /v1/anonymous-sessions` 例外，它用站点键。写法是 `Authorization: Bearer aie_test_dev_...`，这是 RFC 6750 的格式。密钥用 `admin` 发放，见[开通租户](#开通租户)。认证排在版本检查前面，因为以后版本要按调用方的应用决定：
 
 | 情况 | HTTP | `code` |
 | --- | --- | --- |
@@ -405,6 +405,22 @@ curl -s -X POST http://127.0.0.1:18080/v1/sessions -H "Authorization: Bearer $AP
 - **语言：** 按标准写法写进令牌，比如 `ja-jp` 写成 `ja-JP`。
 - **代下级租户：** 带 `On-Behalf-Of` 时，终端用户和令牌都属于下级租户的那个应用。
 - **重试：** 带同一个 `Idempotency-Key` 重试，拿回同样的回答，只是没有令牌，因为令牌从不保存。第一次的回答丢了的话，换一个新的 `Idempotency-Key` 再换一个。
+
+**换匿名令牌：** 宿主网页里的组件用 `POST /v1/anonymous-sessions` 给还没登录的访客换一个令牌。它不带 API 密钥，带的是站点键，见[开通租户](#开通租户)一节的“站点键”。成功返回 201，回答的格式和换会话令牌一样，身份等级是 `anonymous`。
+
+```js
+const answer = await fetch("https://引擎地址/v1/anonymous-sessions", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ site_key: "aie_site_live_jp1_...", locale: "ja-JP" }),
+});
+```
+
+- **检查：** 引擎先读请求体里的 `site_key`，再对照浏览器发来的 `Origin`，都在 API 密钥检查的位置上做。没有 `site_key` 回 400；站点键不认识或已吊销回 401；站点键认识但名单里没有这个来源，或者请求没带来源，回 403。这三种回答都不带跨域头，网页读不到。
+- **令牌：** 每次都新建一个匿名终端用户。令牌没有权限范围和上下文，同样 1 小时过期；`locale` 照换会话令牌的规矩写进去。
+- **跨域：** 通过检查的请求，回答里带 `Access-Control-Allow-Origin`（原样返回来源）、`Vary: Origin` 和 `Access-Control-Expose-Headers: Request-Id`，所以之后哪怕是 400，网页也能读到原因。不带 cookie。
+- **重试：** 带同一个 `Idempotency-Key` 重试，按站点键所属的应用隔离，拿回同样的回答，只是没有令牌。
+- **限流：** 还没有，见第 26 点。
 
 **`Engine-Version`：** `/v1` 下的请求可以传日期版本，如 `Engine-Version: 2026-11-05`。现在只有这一个版本，不传时也用它；以后按应用锁定的版本走。传别的版本返回 400 `invalid_request`，不会悄悄用另一个版本回答。版本写在 `EngineVersionFilter` 和契约的 `info.version`，测试保证两边一致。
 

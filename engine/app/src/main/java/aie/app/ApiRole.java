@@ -8,11 +8,13 @@ import aie.core.tenancy.api.EndUsers;
 import aie.core.tenancy.api.IdempotencyKeys;
 import aie.core.tenancy.api.LowerTenants;
 import aie.core.tenancy.api.SessionTokens;
+import aie.core.tenancy.api.SiteKeyLookup;
 import aie.core.tenancy.internal.DatabaseApiKeyLookup;
 import aie.core.tenancy.internal.DatabaseApiKeyManagement;
 import aie.core.tenancy.internal.DatabaseEndUsers;
 import aie.core.tenancy.internal.DatabaseIdempotencyKeys;
 import aie.core.tenancy.internal.DatabaseLowerTenants;
+import aie.core.tenancy.internal.DatabaseSiteKeyLookup;
 import aie.ports.DatabaseException;
 import java.time.Clock;
 import java.util.function.Consumer;
@@ -59,6 +61,7 @@ class ApiRole {
                 context.registerBean(IdempotencyKeys.class, () -> new DatabaseIdempotencyKeys(database));
                 context.registerBean(LowerTenants.class, () -> new DatabaseLowerTenants(database));
                 context.registerBean(EndUsers.class, () -> new DatabaseEndUsers(database));
+                context.registerBean(SiteKeyLookup.class, () -> new DatabaseSiteKeyLookup(database));
                 context.registerBean(SessionTokens.class, () -> sessionTokens);
             }, args);
         } catch (RuntimeException e) {
