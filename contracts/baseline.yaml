@@ -770,19 +770,25 @@ components:
         scopes:
           type: array
           description: What this token may do. Host actions compare these names.
-          maxItems: 50
+          maxItems: 20
           items:
             type: string
-            maxLength: 100
+            minLength: 1
+            maxLength: 64
+            pattern: "^[A-Za-z0-9_.:-]+$"
         context:
           type: object
           description: |
             Business identifiers the host binds to this session, such as an order number. The
             model cannot change them. They travel with the token to the browser, so no secrets.
-          maxProperties: 50
+          maxProperties: 10
+          propertyNames:
+            minLength: 1
+            maxLength: 40
+            pattern: "^[A-Za-z0-9_.:-]+$"
           additionalProperties:
             type: string
-            maxLength: 1000
+            maxLength: 200
         locale:
           $ref: "#/components/schemas/Locale"
 
@@ -799,7 +805,7 @@ components:
 
     Session:
       type: object
-      required: [token, expires_at, end_user_id, identity_level]
+      required: [expires_at, end_user_id, identity_level]
       properties:
         token:
           type: string
