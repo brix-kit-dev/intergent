@@ -101,6 +101,19 @@ class RepositoryFilesTest {
                 .contains("<requireNoRepositories>");
     }
 
+    /**
+     * The packaged jar's tests run after package, in their own execution; the default one leaves them out. Without
+     * that execution they would run nowhere, and nothing would fail.
+     */
+    @Test
+    void thePackagedJarRunsInTheBuild() throws IOException {
+        assertThat(Files.readString(engine.resolve("app/pom.xml")))
+                .contains("<id>packaged-jar</id>")
+                .contains("<phase>integration-test</phase>")
+                .contains("<groups>packaged-jar</groups>")
+                .contains("<excludedGroups>packaged-jar</excludedGroups>");
+    }
+
     /** A flag in a POM or in .mvn would switch a check off everywhere, with no change to CI. */
     @Test
     void nothingSwitchesACheckOff() throws IOException {

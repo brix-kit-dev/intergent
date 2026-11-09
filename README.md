@@ -17,6 +17,18 @@ mvn verify
 
 产物是 `engine/app/target/engine.jar`。
 
+**打包后的 jar：** `mvn verify` 打包之后，`PackagedJarIT` 会像运维那样用 `java -jar` 真的运行这个 jar，连一个全新的 PostgreSQL：
+- `migrate` 应用的脚本数，每个模块都和源码里一样多；再跑一次，一个也不应用。
+- `admin create-tenant` 在标准输出只打印新租户号。
+- `api` 通过启动自检，`/healthz` 返回 200，没带密钥的调用得到 401；收到 SIGTERM 后退出，退出码 143。
+
+其他测试用的是 Maven 的类路径，看不出 jar 里缺了什么，比如 Flyway 在嵌套 jar 里找不到脚本。所以它排在打包之后的 integration-test 阶段，`mvn test` 不跑它。它用 JUnit 标签 `packaged-jar` 和打包前的测试分开，守卫会检查这个执行项还在。单独跑：
+
+```bash
+cd engine
+mvn verify -pl app -am -Dtest=PackagedJarIT -Dsurefire.failIfNoSpecifiedTests=false
+```
+
 推送前运行完整检查，约 4 分钟。GitHub Actions 运行的是同一个脚本：
 
 ```bash

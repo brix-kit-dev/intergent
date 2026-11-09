@@ -79,6 +79,35 @@
                     </execution>
                 </executions>
             </plugin>
+            <!--
+                Tests tagged packaged-jar run the packaged engine.jar, so they run after package, in integration-test.
+                The default execution runs before package and leaves them out, even when -Dtest names one.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>default-test</id>
+                        <configuration>
+                            <excludedGroups>packaged-jar</excludedGroups>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>packaged-jar</id>
+                        <phase>integration-test</phase>
+                        <goals>
+                            <goal>test</goal>
+                        </goals>
+                        <configuration>
+                            <groups>packaged-jar</groups>
+                            <includes>
+                                <include>**/*IT.java</include>
+                            </includes>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
         </plugins>
     </build>
 </project>
