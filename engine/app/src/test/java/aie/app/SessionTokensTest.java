@@ -11,8 +11,10 @@ import aie.core.tenancy.api.SessionTokens.Issued;
 import aie.core.tenancy.api.SessionTokens.Session;
 import aie.core.tenancy.api.SessionTokens.Verified;
 import aie.core.tenancy.internal.SignedSessionTokens;
+import aie.http.api.model.CreateSessionRequest;
 import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jwt.SignedJWT;
+import jakarta.validation.constraints.Size;
 import java.security.MessageDigest;
 import java.time.Clock;
 import java.time.Duration;
@@ -27,6 +29,7 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 /**
@@ -42,8 +45,11 @@ class SessionTokensTest {
     private static final long IAT = NOW.getEpochSecond();
     private static final long EXP = IAT + 3600;
     private static final Session SESSION = new Session(
-            "ten_A", "app_A", "eu_A", IdentityLevel.VERIFIED, List.of("orders.read"), Map.of("order", "A-1001"));
+            "ten_A", "app_A", "eu_A", IdentityLevel.VERIFIED, List.of("orders.read"), Map.of("order", "A-1001"), "ja-JP");
     private static final Base64.Encoder URL = Base64.getUrlEncoder().withoutPadding();
+    /** A well-formed tag of exactly {@link SessionTokens#MAX_LOCALE} characters, and one a character longer. */
+    private static final String LONGEST_LOCALE = "en-US-x-aaaaaaa-bbbbbbbb-cccccccc-d";
+    private static final String TOO_LONG_LOCALE = "en-US-x-aaaaaaaa-bbbbbbbb-cccccccc-d";
 
     private static byte[] key(int seed, int length) {
         byte[] key = new byte[length];
@@ -88,11 +94,22 @@ class SessionTokensTest {
     }
 
     @Test
-    void aSessionWithoutScopesOrContextComesBackEmpty() {
-        Session bare = new Session("ten_A", "app_A", "eu_A", IdentityLevel.UNVERIFIED, List.of(), Map.of());
+    void aSessionWithoutScopesContextOrLocaleComesBackEmpty() {
+        Session bare = new Session("ten_A", "app_A", "eu_A", IdentityLevel.UNVERIFIED, List.of(), Map.of(), null);
 
         assertThat(tokens(NOW, KEY).verify(tokens(NOW, KEY).issue(bare).token()))
                 .hasValueSatisfying(verified -> assertThat(verified.session()).isEqualTo(bare));
+    }
+
+    /** The locale travels as the claim {@code loc}, and only when the host gave one. */
+    @Test
+    void theLocaleTravelsAsLocOnlyWhenTheHostGaveOne() throws Exception {
+        Session without = new Session("ten_A", "app_A", "eu_A", IdentityLevel.VERIFIED, List.of(), Map.of(), null);
+
+        assertThat(SignedJWT.parse(tokens(NOW, KEY).issue(SESSION).token()).getJWTClaimsSet().getClaims())
+                .containsEntry("loc", "ja-JP");
+        assertThat(SignedJWT.parse(tokens(NOW, KEY).issue(without).token()).getJWTClaimsSet().getClaims())
+                .doesNotContainKey("loc");
     }
 
     @Test
@@ -122,7 +139,15 @@ class SessionTokensTest {
         String token = handMade(header("HS256", KEY), claims(""), KEY, "HmacSHA256");
 
         assertThat(tokens(NOW, KEY).verify(token)).contains(new Verified(
-                new Session("ten_A", "app_A", "eu_A", IdentityLevel.VERIFIED, List.of(), Map.of()), Instant.ofEpochSecond(EXP)));
+                new Session("ten_A", "app_A", "eu_A", IdentityLevel.VERIFIED, List.of(), Map.of(), null), Instant.ofEpochSecond(EXP)));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"ja-JP", "en", "zh-Hans-CN", "en-US-x-twain", LONGEST_LOCALE})
+    void aHandMadeTokenWithALocaleInStandardFormWorks(String locale) throws Exception {
+        String token = handMade(header("HS256", KEY), claims(",\"loc\":\"" + locale + "\""), KEY, "HmacSHA256");
+
+        assertThat(tokens(NOW, KEY).verify(token)).hasValueSatisfying(verified -> assertThat(verified.session().locale()).isEqualTo(locale));
     }
 
     @Test
@@ -209,7 +234,13 @@ class SessionTokensTest {
         "{\"sub\":\"eu_A\",\"ten\":\"ten_A\",\"app\":\"app_A\",\"lvl\":\"verified\",\"exp\":EXP,\"scp\":[\"a\",null]}",
         "{\"sub\":\"eu_A\",\"ten\":\"ten_A\",\"app\":\"app_A\",\"lvl\":\"verified\",\"exp\":EXP,\"ctx\":{\"order\":1001}}",
         "{\"sub\":\"eu_A\",\"ten\":\"ten_A\",\"app\":\"app_A\",\"lvl\":\"verified\",\"exp\":EXP,\"ctx\":\"order=1001\"}",
-        "{\"sub\":\"eu_A\",\"ten\":7,\"app\":\"app_A\",\"lvl\":\"verified\",\"exp\":EXP}"
+        "{\"sub\":\"eu_A\",\"ten\":7,\"app\":\"app_A\",\"lvl\":\"verified\",\"exp\":EXP}",
+        "{\"sub\":\"eu_A\",\"ten\":\"ten_A\",\"app\":\"app_A\",\"lvl\":\"verified\",\"exp\":EXP,\"loc\":\"ja-jp\"}",
+        "{\"sub\":\"eu_A\",\"ten\":\"ten_A\",\"app\":\"app_A\",\"lvl\":\"verified\",\"exp\":EXP,\"loc\":\"ja_JP\"}",
+        "{\"sub\":\"eu_A\",\"ten\":\"ten_A\",\"app\":\"app_A\",\"lvl\":\"verified\",\"exp\":EXP,\"loc\":\"\"}",
+        "{\"sub\":\"eu_A\",\"ten\":\"ten_A\",\"app\":\"app_A\",\"lvl\":\"verified\",\"exp\":EXP,\"loc\":7}",
+        "{\"sub\":\"eu_A\",\"ten\":\"ten_A\",\"app\":\"app_A\",\"lvl\":\"verified\",\"exp\":EXP,\"loc\":[\"ja-JP\"]}",
+        "{\"sub\":\"eu_A\",\"ten\":\"ten_A\",\"app\":\"app_A\",\"lvl\":\"verified\",\"exp\":EXP,\"loc\":\"" + TOO_LONG_LOCALE + "\"}"
     })
     void aTokenWithBadClaimsFails(String claims) throws Exception {
         String token = handMade(header("HS256", KEY), claims.replace("EXP", Long.toString(EXP)), KEY, "HmacSHA256");
@@ -264,5 +295,48 @@ class SessionTokensTest {
         assertThat(IdentityLevel.fromWireName("verified")).contains(IdentityLevel.VERIFIED);
         assertThat(IdentityLevel.fromWireName("VERIFIED")).isEmpty();
         assertThat(IdentityLevel.fromWireName(null)).isEmpty();
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "ja-JP, ja-JP", "ja-jp, ja-JP", "JA-jp, ja-JP", "zh-hans-cn, zh-Hans-CN", "en-us-x-twain, en-US-x-twain",
+        "iw, he", "i-klingon, tlh", "es-419, es-419"
+    })
+    void aLocaleIsWrittenInStandardForm(String tag, String standard) {
+        assertThat(SessionTokens.standardLocale(tag)).contains(standard);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", " ", "ja_JP", " ja-JP", "ja-JP ", "ja-", "-ja", "ja--JP", "a", "toolongtag", "日本", "ja-JP\n",
+        "ja-JP-\u0000", TOO_LONG_LOCALE})
+    void aTagThatIsNotWellFormedHasNoStandardForm(String tag) {
+        assertThat(SessionTokens.standardLocale(tag)).isEmpty();
+    }
+
+    /** The model generated from the contract carries its Locale.maxLength, so this holds the two limits together. */
+    @Test
+    void theLocaleLimitIsTheContracts() throws Exception {
+        Size size = CreateSessionRequest.class.getMethod("getLocale").getAnnotation(Size.class);
+
+        assertThat(size.max()).isEqualTo(SessionTokens.MAX_LOCALE);
+    }
+
+    @Test
+    void aLocaleMayHaveThirtyFiveCharacters() {
+        assertThat(LONGEST_LOCALE).hasSize(SessionTokens.MAX_LOCALE);
+        assertThat(TOO_LONG_LOCALE).hasSize(SessionTokens.MAX_LOCALE + 1);
+
+        assertThat(SessionTokens.standardLocale(LONGEST_LOCALE)).contains(LONGEST_LOCALE);
+        assertThat(SessionTokens.standardLocale(TOO_LONG_LOCALE)).isEmpty();
+        assertThat(SessionTokens.standardLocale(null)).isEmpty();
+    }
+
+    /** A session holds a locale only in standard form, so every token writes a tag the check below accepts. */
+    @ParameterizedTest
+    @ValueSource(strings = {"ja-jp", "iw", "", "ja_JP", " ja-JP", TOO_LONG_LOCALE})
+    void aSessionRefusesALocaleThatIsNotInStandardForm(String locale) {
+        assertThatThrownBy(() -> new Session("ten_A", "app_A", "eu_A", IdentityLevel.VERIFIED, List.of(), Map.of(), locale))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("A session locale must be a BCP 47 tag in standard form, such as ja-JP");
     }
 }

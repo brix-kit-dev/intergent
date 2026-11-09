@@ -15,7 +15,7 @@ import org.junit.jupiter.api.Test;
 /** The session key settings on their own, without starting the api. ApiRoleTest covers the refusals. */
 class SessionKeysTest {
 
-    private static final Session SESSION = new Session("ten_A", "app_A", "eu_A", IdentityLevel.VERIFIED, List.of(), Map.of());
+    private static final Session SESSION = new Session("ten_A", "app_A", "eu_A", IdentityLevel.VERIFIED, List.of(), Map.of(), null);
 
     /** A key pasted with a space or a line break around it still works, instead of failing as "not base64". */
     @Test

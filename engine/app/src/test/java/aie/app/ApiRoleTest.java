@@ -383,7 +383,7 @@ class ApiRoleTest {
     }
 
     private static final Session SESSION =
-            new Session("ten_A", "app_A", "eu_A", IdentityLevel.VERIFIED, List.of("orders.read"), Map.of());
+            new Session("ten_A", "app_A", "eu_A", IdentityLevel.VERIFIED, List.of("orders.read"), Map.of(), null);
 
     private static String base64(byte[] key) {
         return Base64.getEncoder().encodeToString(key);
