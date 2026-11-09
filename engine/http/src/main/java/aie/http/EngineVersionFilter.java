@@ -20,7 +20,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * application.
  */
 @Component
-@Order(Ordered.HIGHEST_PRECEDENCE + 3)
+@Order(Ordered.HIGHEST_PRECEDENCE + 4)
 class EngineVersionFilter extends OncePerRequestFilter {
 
     static final String CURRENT = ApiVersion.CURRENT;

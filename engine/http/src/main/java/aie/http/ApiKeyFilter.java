@@ -31,7 +31,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * platform's key ID, so that it shows who acted.
  */
 @Component
-@Order(Ordered.HIGHEST_PRECEDENCE + 2)
+@Order(Ordered.HIGHEST_PRECEDENCE + 3)
 class ApiKeyFilter extends OncePerRequestFilter {
 
     /** The request attribute that holds the caller's {@link Owner} once the key has passed. */

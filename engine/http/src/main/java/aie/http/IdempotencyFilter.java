@@ -42,7 +42,7 @@ import tools.jackson.databind.node.ObjectNode;
  * runs the request again (see {@link IdempotencyKeys}).
  */
 @Component
-@Order(Ordered.HIGHEST_PRECEDENCE + 4)
+@Order(Ordered.HIGHEST_PRECEDENCE + 5)
 class IdempotencyFilter extends OncePerRequestFilter {
 
     static final String HEADER = "Idempotency-Key";

@@ -347,6 +347,12 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 - **响应不返回：** 响应只带 `Request-Id`。
 - **传给外部调用：** 现在引擎还没有外部调用，等 M3 接 OpenTelemetry 时做。
 
+**跨域预检：** 浏览器从宿主的网页调用引擎时，要先发 `OPTIONS` 预检请求，问能不能跨域。现在只有 `/v1/anonymous-sessions` 回答预检，因为浏览器在还没有令牌时只调用这一个接口。其他浏览器接口的规则到 M2 再定，它们的预检和普通请求一样要密钥，得到 401。
+
+- **放行：** 来源只要是站点键可能列出的那种，就回 204，并带上 `Access-Control-Allow-Origin`（原样返回请求的来源）、`Access-Control-Allow-Methods: POST`、`Access-Control-Allow-Headers: Content-Type, Idempotency-Key, Engine-Version, traceparent`，缓存 600 秒。预检请求没有正文，看不到站点键，所以这一步对哪个网站都放行；真正的 POST 只对它那把站点键列出的来源放行，这在第 12 点后面一步接上。
+- **拒绝：** 来源不合格（比如 `null`、http 的正式域名、带路径），或者问的不是 POST，回 403 `forbidden`，不带跨域头。
+- **顺序：** 预检排在认证前面，因为预检请求不带凭证。过滤器的顺序是：`Request-Id`、`traceparent`、预检、认证、版本、幂等。
+
 **认证：** `/v1` 下的请求都要带 API 密钥，写法是 `Authorization: Bearer aie_test_dev_...`，这是 RFC 6750 的格式。密钥用 `admin` 发放，见[开通租户](#开通租户)。认证排在版本检查前面，因为以后版本要按调用方的应用决定：
 
 | 情况 | HTTP | `code` |
