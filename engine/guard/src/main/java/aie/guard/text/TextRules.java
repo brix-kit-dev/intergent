@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -17,8 +18,8 @@ import java.util.stream.Stream;
  * The red lines a class graph cannot see, checked on the text of the engine's main sources (blueprint 16.1): every
  * Java file under {@code src/main/java} and every SQL file under {@code src/main/resources}, in every module but the
  * guard, which names what it forbids. Only identifiers and string literals count; comments, tests and docs are not
- * read. A-3 and A-6 leave adapters out, and A-5 reads them too. The owner approved the scope and the lists on
- * 2026-11-09, and the lists grow as models and needs do.
+ * read. A-3 and A-6 leave adapters out, A-5 reads them too, and A-4's table rules read a module's own migrations and
+ * code. The owner approved the scope and the lists on 2026-11-09, and the lists grow as models and needs do.
  */
 public final class TextRules {
 
@@ -52,16 +53,38 @@ public final class TextRules {
     static final Set<String> LOCALE_COUNTRIES = Set.of(
             "CHINA", "PRC", "TAIWAN", "JAPAN", "KOREA", "US", "UK", "CANADA", "CANADA_FRENCH", "FRANCE", "GERMANY", "ITALY");
 
+    /**
+     * A-4: what a module's migration creates under its own name carries the module's prefix, such as tenancy_tenants.
+     * Policies and triggers are named within their table, so they are left out.
+     */
+    static final Set<String> PREFIXED_KINDS = Set.of("TABLE", "VIEW", "SEQUENCE", "FUNCTION", "PROCEDURE", "INDEX", "TYPE", "DOMAIN");
+    /** Words that may stand between CREATE and the kind, or between the kind and the name. */
+    private static final Set<String> CREATE_WORDS = Set.of(
+            "OR", "REPLACE", "UNIQUE", "UNLOGGED", "TEMP", "TEMPORARY", "MATERIALIZED", "CONCURRENTLY", "IF", "NOT", "EXISTS");
+    /** A module's migrations live in a folder named after it, and Flyway keeps a history per folder. */
+    private static final Pattern MIGRATION = Pattern.compile(".*/src/main/resources/db/migration/([a-z0-9]+)/[^/]+\\.sql");
+    /** A module's code lives in a package named after it (blueprint 5.2). */
+    private static final Pattern MODULE_CODE = Pattern.compile(".*/src/main/java/aie/(?:core|modules)/([a-z0-9]+)/.+\\.java");
+    private static final Pattern SQL_WORD = Pattern.compile("[A-Za-z0-9_]+");
+
+    /** An object a migration creates under a name of its own. */
+    record Created(String kind, String name, int line) {
+    }
+
     private TextRules() {
     }
 
     /** Every problem in the engine at this root, as one line each, naming the red line, the file and the line. */
     public static List<String> violations(Path engine) throws IOException {
+        List<Path> files = sources(engine);
+        Set<String> modules = new TreeSet<>();
+        files.forEach(file -> moduleOf(relative(engine, file)).ifPresent(modules::add));
         List<String> problems = new ArrayList<>();
-        for (Path file : sources(engine)) {
-            String path = engine.relativize(file).toString().replace('\\', '/');
+        for (Path file : files) {
+            String path = relative(engine, file);
             String text = Files.readString(file);
             List<Token> tokens = path.endsWith(".sql") ? SourceText.sql(text) : SourceText.java(text);
+            moduleOf(path).ifPresent(module -> problems.addAll(tableRules(path, module, modules, tokens)));
             for (int i = 0; i < tokens.size(); i++) {
                 Token token = tokens.get(i);
                 String where = path + ":" + token.line() + ": ";
@@ -80,7 +103,7 @@ public final class TextRules {
         try (Stream<Path> files = Files.walk(engine)) {
             return files.filter(Files::isRegularFile)
                     .filter(file -> {
-                        String path = engine.relativize(file).toString().replace('\\', '/');
+                        String path = relative(engine, file);
                         return !path.startsWith("guard/") && !path.contains("/target/") && !path.contains("/node_modules/")
                                 && (path.contains("/src/main/java/") && path.endsWith(".java")
                                         || path.contains("/src/main/resources/") && path.endsWith(".sql"));
@@ -135,5 +158,82 @@ public final class TextRules {
     /** A name split where its camel case changes, so each word starts as a word; a string as it is. */
     private static String words(Token token) {
         return token.kind() == SourceText.Kind.IDENTIFIER ? token.text().replaceAll("(?<=[a-z0-9])(?=[A-Z])", " ") : token.text();
+    }
+
+    /**
+     * A-4's table rules for one file of a module. A migration names what it creates with the module's prefix, and no
+     * SQL of the module, in a migration or in a Java string, reaches a name with another module's prefix: no read,
+     * no write and no foreign key across modules. Java names are code, not SQL, so only its strings count.
+     */
+    static List<String> tableRules(String path, String module, Set<String> modules, List<Token> tokens) {
+        List<String> problems = new ArrayList<>();
+        boolean sql = path.endsWith(".sql");
+        for (int i = 0; sql && i < tokens.size(); i++) {
+            created(tokens, i).filter(object -> !object.name().toLowerCase(Locale.ROOT).startsWith(module + "_"))
+                    .ifPresent(object -> problems.add("A-4: " + path + ":" + object.line() + ": " + object.kind() + " "
+                            + object.name() + " has no " + module + "_ prefix"));
+        }
+        for (Token token : tokens) {
+            if (!sql && token.kind() != SourceText.Kind.STRING) {
+                continue;
+            }
+            Matcher words = SQL_WORD.matcher(token.text());
+            while (words.find()) {
+                String word = words.group().toLowerCase(Locale.ROOT);
+                for (String other : modules) {
+                    if (!other.equals(module) && word.startsWith(other + "_")) {
+                        problems.add("A-4: " + path + ":" + token.line() + ": reaches " + words.group() + " of module " + other);
+                    }
+                }
+            }
+        }
+        return problems;
+    }
+
+    /** The object a CREATE at this token makes under a name of its own, or empty for anything else. */
+    static Optional<Created> created(List<Token> tokens, int at) {
+        if (!isWord(tokens, at, "CREATE")) {
+            return Optional.empty();
+        }
+        int next = skipCreateWords(tokens, at + 1);
+        if (next >= tokens.size() || tokens.get(next).kind() != SourceText.Kind.IDENTIFIER) {
+            return Optional.empty();
+        }
+        String kind = tokens.get(next).text().toUpperCase(Locale.ROOT);
+        if (!PREFIXED_KINDS.contains(kind)) {
+            return Optional.empty();
+        }
+        int name = skipCreateWords(tokens, next + 1);
+        if (name >= tokens.size() || tokens.get(name).kind() != SourceText.Kind.IDENTIFIER || isWord(tokens, name, "ON")) {
+            return Optional.empty();
+        }
+        return Optional.of(new Created(kind.toLowerCase(Locale.ROOT), tokens.get(name).text(), tokens.get(name).line()));
+    }
+
+    private static int skipCreateWords(List<Token> tokens, int at) {
+        while (at < tokens.size() && tokens.get(at).kind() == SourceText.Kind.IDENTIFIER
+                && CREATE_WORDS.contains(tokens.get(at).text().toUpperCase(Locale.ROOT))) {
+            at++;
+        }
+        return at;
+    }
+
+    private static boolean isWord(List<Token> tokens, int at, String word) {
+        return at < tokens.size() && tokens.get(at).kind() == SourceText.Kind.IDENTIFIER && tokens.get(at).text().equalsIgnoreCase(word);
+    }
+
+    /** The module a file belongs to: its migration folder, or its package under aie.core or aie.modules. */
+    static Optional<String> moduleOf(String path) {
+        for (Pattern pattern : List.of(MIGRATION, MODULE_CODE)) {
+            Matcher matcher = pattern.matcher(path);
+            if (matcher.matches()) {
+                return Optional.of(matcher.group(1));
+            }
+        }
+        return Optional.empty();
+    }
+
+    private static String relative(Path engine, Path file) {
+        return engine.relativize(file).toString().replace('\\', '/');
     }
 }

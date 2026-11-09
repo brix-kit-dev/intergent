@@ -156,7 +156,7 @@ class TextRulesTest {
                     String region;
                 }
                 """);
-        write("core/src/main/resources/db/migration/tenancy/V1__a.sql", "-- region is fine here\nCREATE TABLE t (region text, c text DEFAULT 'cn');\n");
+        write("core/src/main/resources/db/migration/tenancy/V1__a.sql", "-- region is fine here\nCREATE TABLE tenancy_t (region text, c text DEFAULT 'cn');\n");
 
         assertThat(TextRules.violations(engine)).containsExactly(
                 "A-5: core/src/main/java/aie/core/Route.java:2: region code \"jp\"",
@@ -201,17 +201,105 @@ class TextRulesTest {
     @Test
     void aHostOrIndustryWordInMainCodeIsAViolation() throws IOException {
         write("core/src/main/java/aie/core/Basket.java", "class Basket {\n    String cartId;\n}\n");
-        write("core/src/main/resources/db/migration/tenancy/V1__a.sql", "-- hotel is fine here\nCREATE TABLE hotel_rooms (n int);\n");
+        write("core/src/main/resources/db/migration/tenancy/V1__a.sql", "-- hotel is fine here\nCREATE TABLE tenancy_hotel_rooms (n int);\n");
 
         assertThat(TextRules.violations(engine)).containsExactly(
                 "A-6: core/src/main/java/aie/core/Basket.java:2: host or industry word cart in the name cartId",
-                "A-6: core/src/main/resources/db/migration/tenancy/V1__a.sql:2: host or industry word hotel in the name hotel_rooms");
+                "A-6: core/src/main/resources/db/migration/tenancy/V1__a.sql:2: host or industry word hotel in the name tenancy_hotel_rooms");
     }
 
     /** An adapter to an outside system may speak its words. */
     @Test
     void anAdapterMaySpeakAnOutsideSystemsWords() throws IOException {
         write("adapters/shop/src/main/java/aie/adapters/shop/Carts.java", "class Carts { String checkoutUrl; }");
+
+        assertThat(TextRules.violations(engine)).isEmpty();
+    }
+
+    private static final String TENANCY = "core/src/main/resources/db/migration/tenancy/";
+    private static final String EVENTS = "core/src/main/resources/db/migration/events/";
+
+    @Test
+    void aModuleIsItsMigrationFolderOrItsPackage() {
+        assertThat(TextRules.moduleOf(TENANCY + "V1__a.sql")).contains("tenancy");
+        assertThat(TextRules.moduleOf("core/src/main/java/aie/core/tenancy/internal/Keys.java")).contains("tenancy");
+        assertThat(TextRules.moduleOf("modules/src/main/java/aie/modules/knowledge/api/Search.java")).contains("knowledge");
+        assertThat(TextRules.moduleOf("core/src/main/java/aie/core/Ids.java")).isEmpty();
+        assertThat(TextRules.moduleOf("http/src/main/java/aie/http/Filter.java")).isEmpty();
+        assertThat(TextRules.moduleOf("core/src/main/resources/db/migration/V1__loose.sql")).isEmpty();
+    }
+
+    /** Everything a module creates under a name of its own carries its prefix; policies and triggers belong to a table. */
+    @Test
+    void whatAModuleCreatesCarriesItsPrefix() throws IOException {
+        write(TENANCY + "V1__a.sql", """
+                CREATE TABLE tenancy_tenants (tenant_id text);
+                CREATE TABLE orders (n int);
+                CREATE UNLOGGED TABLE IF NOT EXISTS scratch (n int);
+                CREATE OR REPLACE FUNCTION find_order() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;
+                CREATE UNIQUE INDEX IF NOT EXISTS orders_idx ON orders (n);
+                CREATE INDEX ON tenancy_tenants (tenant_id);
+                CREATE INDEX tenancy_tenants_idx ON tenancy_tenants (tenant_id);
+                CREATE POLICY tenant_isolation ON tenancy_tenants USING (true);
+                CREATE TRIGGER touch BEFORE UPDATE ON tenancy_tenants FOR EACH ROW EXECUTE FUNCTION tenancy_touch();
+                CREATE VIEW Active AS SELECT 1;
+                CREATE SEQUENCE numbers;
+                CREATE TYPE mood AS ENUM ('ok');
+                CREATE TABLE tenancyfoo (n int);
+                """);
+
+        assertThat(TextRules.violations(engine)).containsExactly(
+                "A-4: " + TENANCY + "V1__a.sql:2: table orders has no tenancy_ prefix",
+                "A-4: " + TENANCY + "V1__a.sql:3: table scratch has no tenancy_ prefix",
+                "A-4: " + TENANCY + "V1__a.sql:4: function find_order has no tenancy_ prefix",
+                "A-4: " + TENANCY + "V1__a.sql:5: index orders_idx has no tenancy_ prefix",
+                "A-4: " + TENANCY + "V1__a.sql:10: view Active has no tenancy_ prefix",
+                "A-4: " + TENANCY + "V1__a.sql:11: sequence numbers has no tenancy_ prefix",
+                "A-4: " + TENANCY + "V1__a.sql:12: type mood has no tenancy_ prefix",
+                "A-4: " + TENANCY + "V1__a.sql:13: table tenancyfoo has no tenancy_ prefix");
+    }
+
+    /** No read, no write and no foreign key across modules, in a migration or in a function body. */
+    @Test
+    void aMigrationDoesNotReachAnotherModule() throws IOException {
+        write(EVENTS + "V1__outbox.sql", "CREATE TABLE events_outbox (id text);\n");
+        write(TENANCY + "V2__b.sql", """
+                CREATE TABLE tenancy_notes (outbox_id text REFERENCES events_outbox (id), eventsful text);
+                CREATE FUNCTION tenancy_count() RETURNS bigint LANGUAGE plpgsql AS $$
+                BEGIN RETURN (SELECT count(*) FROM Events_Outbox); END
+                $$;
+                -- events_outbox in a comment is fine
+                """);
+
+        assertThat(TextRules.violations(engine)).containsExactly(
+                "A-4: " + TENANCY + "V2__b.sql:1: reaches events_outbox of module events",
+                "A-4: " + TENANCY + "V2__b.sql:3: reaches Events_Outbox of module events");
+    }
+
+    /** A module's Java reaches the database through SQL strings, so those count; its names are code and do not. */
+    @Test
+    void aModulesSqlStringsDoNotReachAnotherModule() throws IOException {
+        write(EVENTS + "V1__outbox.sql", "CREATE TABLE events_outbox (id text);\n");
+        write("core/src/main/java/aie/core/tenancy/internal/Notes.java", """
+                class Notes {
+                    String sql = "SELECT id FROM events_outbox WHERE id = ?";
+                    String events_outbox_name;
+                    String own = "SELECT * FROM tenancy_tenants";
+                }
+                """);
+        write("core/src/main/java/aie/core/events/internal/Feed.java", "class Feed { String sql = \"UPDATE tenancy_tenants SET x = 1\"; }");
+
+        assertThat(TextRules.violations(engine)).containsExactly(
+                "A-4: core/src/main/java/aie/core/events/internal/Feed.java:1: reaches tenancy_tenants of module tenancy",
+                "A-4: core/src/main/java/aie/core/tenancy/internal/Notes.java:2: reaches events_outbox of module events");
+    }
+
+    /** Code outside any module, such as the startup entry, is not a module reaching across. */
+    @Test
+    void codeOutsideTheModulesIsNotChecked() throws IOException {
+        write(TENANCY + "V1__a.sql", "CREATE TABLE tenancy_tenants (tenant_id text);\n");
+        write(EVENTS + "V1__outbox.sql", "CREATE TABLE events_outbox (id text);\n");
+        write("app/src/main/java/aie/app/Check.java", "class Check { String sql = \"SELECT 1 FROM tenancy_tenants, events_outbox\"; }");
 
         assertThat(TextRules.violations(engine)).isEmpty();
     }
