@@ -17,8 +17,8 @@ import java.util.stream.Stream;
  * The red lines a class graph cannot see, checked on the text of the engine's main sources (blueprint 16.1): every
  * Java file under {@code src/main/java} and every SQL file under {@code src/main/resources}, in every module but the
  * guard, which names what it forbids. Only identifiers and string literals count; comments, tests and docs are not
- * read. A-3 leaves adapters out, and A-5 reads them too. The owner approved the scope and the lists on 2026-11-09, and
- * the lists grow as models and needs do.
+ * read. A-3 and A-6 leave adapters out, and A-5 reads them too. The owner approved the scope and the lists on
+ * 2026-11-09, and the lists grow as models and needs do.
  */
 public final class TextRules {
 
@@ -40,6 +40,14 @@ public final class TextRules {
     static final Set<String> REGION_CODES = Set.of("cn", "jp", "us");
     /** A-5: a name or a text with region as a word, such as getRegion or REGION_PACK. Only a region pack loader may. */
     static final Pattern REGION_WORD = Pattern.compile("(?i)(?<![a-z0-9])region");
+    /**
+     * A-6: the engine knows no host and no industry; a host's world reaches it only as data, such as a session's
+     * context. These are the host's own name and words that belong to one industry. A word counts with its plural and
+     * only as a whole word, so cartridge is not cart. "order" is left out, because Spring and plain English use it
+     * everywhere. Adapters may speak an outside system's words.
+     */
+    static final Pattern HOST_WORD = Pattern.compile("(?i)(?<![a-z0-9])(brix|cart|checkout|sku|invoice|shipment|booking"
+            + "|reservation|hotel|patient|student|loan)(?:e?s)?(?![a-z])");
     /** A-5: the country constants of java.util.Locale. Its language constants, such as JAPANESE, name no region. */
     static final Set<String> LOCALE_COUNTRIES = Set.of(
             "CHINA", "PRC", "TAIWAN", "JAPAN", "KOREA", "US", "UK", "CANADA", "CANADA_FRENCH", "FRANCE", "GERMANY", "ITALY");
@@ -59,6 +67,7 @@ public final class TextRules {
                 String where = path + ":" + token.line() + ": ";
                 if (!path.startsWith(ADAPTERS)) {
                     modelName(token).ifPresent(name -> problems.add("A-3: " + where + "model name " + name));
+                    hostWord(token).ifPresent(found -> problems.add("A-6: " + where + found));
                 }
                 region(token, i == 0 ? null : tokens.get(i - 1)).ifPresent(found -> problems.add("A-5: " + where + found));
             }
@@ -111,6 +120,16 @@ public final class TextRules {
             return Optional.of("region in " + (token.kind() == SourceText.Kind.IDENTIFIER ? "the name " : "the text ") + token.text());
         }
         return Optional.empty();
+    }
+
+    /** The host or industry word in the token and where it was, or empty. A camel-case name is read word by word. */
+    static Optional<String> hostWord(Token token) {
+        Matcher matcher = HOST_WORD.matcher(words(token));
+        if (!matcher.find()) {
+            return Optional.empty();
+        }
+        return Optional.of("host or industry word " + matcher.group(1) + " in "
+                + (token.kind() == SourceText.Kind.IDENTIFIER ? "the name " : "the text ") + token.text());
     }
 
     /** A name split where its camel case changes, so each word starts as a word; a string as it is. */

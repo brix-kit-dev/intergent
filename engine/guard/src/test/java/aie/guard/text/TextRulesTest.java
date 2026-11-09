@@ -173,4 +173,46 @@ class TextRulesTest {
 
         assertThat(TextRules.violations(engine)).containsExactly("A-5: adapters/openai/src/main/java/aie/adapters/openai/Pick.java:1: region code \"us\"");
     }
+
+    /** Names a host's own world would bring. The word reported is the one on the list, also for a plural. */
+    @ParameterizedTest
+    @CsvSource({
+        "ShoppingCart, Cart", "cartId, cart", "CHECKOUT_URL, CHECKOUT", "skuCode, sku", "InvoiceService, Invoice",
+        "shipments, shipment", "BookingStatus, Booking", "reservations, reservation", "hotelName, hotel",
+        "patientId, patient", "students, student", "loanAmount, loan", "BrixClient, Brix", "skus, sku", "invoices, invoice"
+    })
+    void aHostOrIndustryWordInANameIsFound(String name, String word) {
+        assertThat(TextRules.hostWord(identifier(name))).contains("host or industry word " + word + " in the name " + name);
+    }
+
+    @Test
+    void aHostOrIndustryWordInATextIsFound() {
+        assertThat(TextRules.hostWord(string("brix.sync"))).contains("host or industry word brix in the text brix.sync");
+        assertThat(TextRules.hostWord(string("invoice-123"))).contains("host or industry word invoice in the text invoice-123");
+    }
+
+    /** Only the whole word counts, and order is left out on purpose. */
+    @ParameterizedTest
+    @ValueSource(strings = {"cartridge", "skull", "loaned", "Brixton", "hotelier", "order", "orders", "OrderedList", "scarted", "subookings"})
+    void aWordThatOnlyContainsOneIsNot(String name) {
+        assertThat(TextRules.hostWord(identifier(name))).isEmpty();
+    }
+
+    @Test
+    void aHostOrIndustryWordInMainCodeIsAViolation() throws IOException {
+        write("core/src/main/java/aie/core/Basket.java", "class Basket {\n    String cartId;\n}\n");
+        write("core/src/main/resources/db/migration/tenancy/V1__a.sql", "-- hotel is fine here\nCREATE TABLE hotel_rooms (n int);\n");
+
+        assertThat(TextRules.violations(engine)).containsExactly(
+                "A-6: core/src/main/java/aie/core/Basket.java:2: host or industry word cart in the name cartId",
+                "A-6: core/src/main/resources/db/migration/tenancy/V1__a.sql:2: host or industry word hotel in the name hotel_rooms");
+    }
+
+    /** An adapter to an outside system may speak its words. */
+    @Test
+    void anAdapterMaySpeakAnOutsideSystemsWords() throws IOException {
+        write("adapters/shop/src/main/java/aie/adapters/shop/Carts.java", "class Carts { String checkoutUrl; }");
+
+        assertThat(TextRules.violations(engine)).isEmpty();
+    }
 }
