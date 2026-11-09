@@ -297,6 +297,17 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 - **规则依赖的名字：** `A-4-tx`、`T-5` 按名字匹配 `aie.ports.Tx` 和 `inSystemTx`，改名时有测试失败。
 - **SDK 和产品：** 它们还没有代码，`A-18-outside`、`A-18-sdk` 目前只在样例上运行。
 
+**文本扫描：** 有些红线从类的依赖关系上看不出来，守卫就直接读源码的文字来查（蓝图 16.1）。范围和名单在 2026-11-09 获批，写在 [TextRules.java](engine/guard/src/main/java/aie/guard/text/TextRules.java)，名单以后随需要增删。
+
+| 规则 | 禁止什么 |
+| --- | --- |
+| `A-3` | 适配器以外的正式代码里出现模型名，比如 `gpt-4o`、`claude-sonnet-4-5`。换模型应当只改网关的配置 |
+
+- **读什么：** 引擎每个模块 `src/main/java` 下的 Java 和 `src/main/resources` 下的 SQL，只看名字和字符串。注释、测试、文档、配置文件和对外契约都不读，所以注释里可以举例。守卫自己也不读，因为名单就写在它里面。
+- **模型名怎么认：** 按常见模型家族的开头认，不分大小写：`gpt-`、`chatgpt`、`o1-`/`o3-`/`o4-`、`claude-`、`gemini-`、`gemma`、`llama`、`mistral`、`mixtral`、`codestral`、`qwen`、`deepseek`、`command-r`、`text-embedding-`。家族名必须在词首，所以 `ollama` 不算；驼峰写法的名字逐个词看，所以 `QwenClient` 也算。
+- **报什么：** 每处一行，写明文件、行号和认出的模型名，比如 `A-3: core/src/main/java/aie/core/Pick.java:2: model name gpt-4o`。
+- **测试：** `TextRulesTest` 在临时目录里摆出样例文件，逐条看算不算；`EngineTextTest` 在真实的引擎上跑，并确认扫描确实读到了各个模块和迁移脚本，不会因为什么都没读而通过。
+
 ## 对外契约
 
 [contracts/openapi.yaml](contracts/openapi.yaml) 是公开 API 的唯一源头，用 OpenAPI 3.1 写。现在有公共约定、身份和对话，其他资源做到时再加。目前实现了 `POST /v1/api-keys`、`DELETE /v1/api-keys/{key_id}`、`POST /v1/sessions` 和 `POST /v1/anonymous-sessions`；其他 `/v1` 路径带有效密钥时返回 404。
