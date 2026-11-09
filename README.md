@@ -121,6 +121,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_OWNER_PASSWO
 | --- | --- |
 | 名单之外的表 | 有 `NOT NULL` 的 `tenant_id`；行级安全开启并 `FORCE`；策略和模板逐字一致；给 `engine_app` 的授权不超过增删改查，不对 PUBLIC 开放 |
 | 表上的其他策略 | 只能是给 `engine_system` 的只读策略 |
+| 租户表之间的外键 | 必须把 `tenant_id` 对到 `tenant_id`，比如 `FOREIGN KEY (tenant_id, application_id) REFERENCES tenancy_applications (tenant_id, application_id)`。数据库检查外键时不管行级安全，只按父表的号连的话，一行就能挂到别的租户的父行下面 |
 | 物化视图 | 不允许，行级安全管不到它 |
 | 所有表 | 所有者是 `engine_owner` |
 | `SECURITY DEFINER` 函数 | 在名单里；`search_path` 固定为 `engine, pg_temp`；不对 PUBLIC 开放；所有者是 `engine_system` |

@@ -16,6 +16,9 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  *
  * <p>It compares the policy text too. A test with sample rows sees only the values in those rows, so it cannot notice a
  * policy that lets some other value through.
+ *
+ * <p>A foreign key between tenant tables must pair tenant_id with tenant_id. PostgreSQL checks a foreign key without
+ * row-level security, so a key on the parent's ID alone would let a row point at another tenant's parent.
  */
 public final class CatalogCheck {
 
@@ -70,6 +73,17 @@ public final class CatalogCheck {
                     FROM tenant_tables t, aclexplode(t.relacl) g
                     WHERE g.grantee = 0
                         OR (g.grantee = 'engine_app'::regrole AND g.privilege_type NOT IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE'))
+                    """),
+            new Rule("T-1", "has a foreign key to a tenant table that does not pair tenant_id with tenant_id", """
+                    SELECT DISTINCT t.relname
+                    FROM tenant_tables t
+                    JOIN pg_constraint c ON c.conrelid = t.oid AND c.contype = 'f'
+                    JOIN tenant_tables r ON r.oid = c.confrelid
+                    WHERE NOT EXISTS (
+                        SELECT FROM unnest(c.conkey, c.confkey) AS k (own, theirs)
+                        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.own
+                        JOIN pg_attribute b ON b.attrelid = c.confrelid AND b.attnum = k.theirs
+                        WHERE a.attname = 'tenant_id' AND b.attname = 'tenant_id')
                     """),
             new Rule("T-1", "is a materialized view, which row-level security cannot cover", """
                     SELECT c.relname

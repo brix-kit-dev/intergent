@@ -38,6 +38,10 @@ class CatalogCheckTest {
     private static final String OPEN_TO_PUBLIC = "T-5 sample_find: is open to PUBLIC";
     private static final String NOT_A_DEFINER =
             "T-5 sample_find: is on the system function list but is not a SECURITY DEFINER function";
+    private static final String TENANTLESS_KEY =
+            "T-1 sample_items: has a foreign key to a tenant table that does not pair tenant_id with tenant_id";
+    /** Lets a foreign key name the tenant and the item together, as the real tables do. */
+    private static final String TENANT_AND_ITEM = "ALTER TABLE sample_items ADD UNIQUE (tenant_id, item_id), ADD COLUMN parent_id text;";
 
     @Container
     private static final PostgreSQLContainer DATABASE = TestDatabase.container();
@@ -146,6 +150,10 @@ class CatalogCheckTest {
                 breach("ALTER FUNCTION sample_find(text) OWNER TO engine_owner", DEFINER_OF_ANOTHER_ROLE),
                 breach("ALTER FUNCTION sample_find(text) SECURITY INVOKER", NOT_A_DEFINER),
                 breach("DROP FUNCTION sample_find(text)", NOT_A_DEFINER),
+                breach("ALTER TABLE sample_items ADD COLUMN parent_id text REFERENCES sample_items (item_id)", TENANTLESS_KEY),
+                breach(TENANT_AND_ITEM + "ALTER TABLE sample_items ADD UNIQUE (item_id, tenant_id);"
+                        + "ALTER TABLE sample_items ADD FOREIGN KEY (tenant_id, parent_id) REFERENCES sample_items (item_id, tenant_id)",
+                        TENANTLESS_KEY),
                 breach("GRANT CREATE ON SCHEMA engine TO engine_system",
                         "T-5 engine: lets engine_system create objects, which it needs only during a handover"));
     }
@@ -167,7 +175,9 @@ class CatalogCheckTest {
     @ValueSource(strings = {
         "REVOKE UPDATE, DELETE ON sample_items FROM engine_app",
         "CREATE POLICY other_read ON sample_items FOR SELECT TO engine_system USING (true)",
-        "CREATE FUNCTION sample_plain() RETURNS int LANGUAGE sql AS 'SELECT 1'"
+        "CREATE FUNCTION sample_plain() RETURNS int LANGUAGE sql AS 'SELECT 1'",
+        TENANT_AND_ITEM + "ALTER TABLE sample_items ADD FOREIGN KEY (tenant_id, parent_id) REFERENCES sample_items (tenant_id, item_id)",
+        "ALTER TABLE sample_schedule ADD UNIQUE (job_id); ALTER TABLE sample_items ADD COLUMN job_id text REFERENCES sample_schedule (job_id)"
     })
     void theseAreAllowed(String sql) throws SQLException {
         change(sql);
