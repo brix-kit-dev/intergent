@@ -219,6 +219,7 @@ read -r KEY_ID API_KEY <<< "$(deploy/dev/admin.sh create-key --tenant="$TENANT" 
 | `revoke-site-key` | `--tenant`、`--site-key=<站点键号>`：都必填 | 吊销了的站点键号 |
 
 - **输出：** 标准输出只有新 ID，脚本可以直接接住。出错写到标准错误，退出码 1；命令或选项写错，退出码 2。
+- **测试里的密钥：** `AdminRoleTest` 用 `QuietOutput` 接住命令打印的内容，不转给控制台，所以 CI 日志里没有新发的密钥。Spring 的 `OutputCaptureExtension` 边接边转，不能用在这里，`QuietOutputTest` 会拦住改回去。测试失败时，`QuietOutput` 才把接住的内容打出来，密钥的机密部分换成 `<masked>`。断言失败时，报错里如果比对的正是密钥，仍会带出它。
 - **连接：** 和 `api` 一样先过启动自检，再用 `engine_app` 连接。地址里写的用户和会话参数都不起作用。
 - **单元码：** 新租户的单元码取自 `ENGINE_CELL_CODE`，必须是 1 到 8 位小写字母和数字，因为它会写进密钥。开发服务器不是单元，用 `dev`。
 - **API 版本：** 新应用锁定当前版本 `2026-11-05`。

@@ -20,14 +20,16 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.boot.test.system.CapturedOutput;
-import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
-/** Runs the role as an operator would, against the real scripts, and reads the result as the superuser. */
+/**
+ * Runs the role as an operator would, against the real scripts, and reads the result as the superuser. The role
+ * prints new keys, so {@link QuietOutput} keeps what it prints out of the CI log.
+ */
 @Testcontainers
-@ExtendWith(OutputCaptureExtension.class)
+@ExtendWith(QuietOutput.class)
 class AdminRoleTest {
 
     private static final String AN_ID = "_[0-9A-HJKMNP-TV-Z]{26}";
