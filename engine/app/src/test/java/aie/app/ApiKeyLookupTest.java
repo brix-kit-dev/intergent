@@ -211,7 +211,7 @@ class ApiKeyLookupTest {
         assertThat(keysSeenWithoutATenant()).isEmpty();
     }
 
-    /** Blueprint 7.6: engine_system reads only the columns its functions need, and writes nothing. */
+    /** Blueprint 7.6: engine_system reads only the columns its functions need, and writes nothing, on every table. */
     @Test
     void engineSystemMayOnlyReadWhatTheFunctionNeeds() throws SQLException {
         assertThat(TestDatabase.firstColumn(DATABASE, KEY_TABLE_PRIVILEGES)).containsExactly(
@@ -224,6 +224,12 @@ class ApiKeyLookupTest {
                 "tenancy_applications.application_id SELECT",
                 "tenancy_applications.environment SELECT",
                 "tenancy_applications.tenant_id SELECT",
+                "tenancy_site_keys.application_id SELECT",
+                "tenancy_site_keys.key_hash SELECT",
+                "tenancy_site_keys.origins SELECT",
+                "tenancy_site_keys.revoked_at SELECT",
+                "tenancy_site_keys.site_key_id SELECT",
+                "tenancy_site_keys.tenant_id SELECT",
                 "tenancy_tenants.parent_tenant_id SELECT",
                 "tenancy_tenants.tenant_id SELECT");
     }

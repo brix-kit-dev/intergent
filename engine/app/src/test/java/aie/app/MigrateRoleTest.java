@@ -84,7 +84,7 @@ class MigrateRoleTest {
     void theScriptsWereAppliedInOrder() throws SQLException {
         assertThat(TestDatabase.firstColumn(
                         DATABASE, "SELECT version FROM engine.flyway_history_tenancy WHERE type = 'SQL' ORDER BY installed_rank"))
-                .startsWith("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11")
+                .startsWith("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12")
                 .isSortedAccordingTo(Comparator.comparingInt(Integer::parseInt));
     }
 

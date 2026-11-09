@@ -87,12 +87,13 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_OWNER_PASSWO
 
 **改已有的系统函数：** 函数归 `engine_system` 所有，`engine_owner` 改不了它。照 [V6__revoke_api_keys.sql](engine/core/src/main/resources/db/migration/tenancy/V6__revoke_api_keys.sql) 写：先临时授予 schema 的 `CREATE`，`SET ROLE engine_system` 后用 `CREATE OR REPLACE` 改写，再 `RESET ROLE`，收回授权。`CREATE OR REPLACE` 保留所有者和 `EXECUTE` 授权，但 `SECURITY DEFINER` 和 `search_path` 要重新写上，漏了目录检查会失败。函数读到新列时，记得给 `engine_system` 加这一列的读权限。
 
-现有两个系统函数，`engine_system` 只能读它们用到的列，而且只能读不能写：
+现有三个系统函数，`engine_system` 只能读它们用到的列，而且只能读不能写：
 
 | 函数 | 做什么 | 读哪些列 |
 | --- | --- | --- |
 | `tenancy_find_api_key` | 按哈希找到正在使用的密钥属于哪个租户和应用，已吊销和已过期的都找不到 | 密钥表六列 |
 | `tenancy_find_lower_applications` | 判断一个租户是不是调用方的直接下级，并列出它在某个环境的应用，给 `On-Behalf-Of` 用 | 租户表两列、应用表三列 |
+| `tenancy_find_site_key` | 按哈希找到正在使用的站点键属于哪个租户和应用，再说明请求的来源在不在它的名单里。来源名单本身不出数据库。已吊销的找不到，和没发过的一样 | 站点键表六列 |
 测试函数自己固定的 `search_path` 时，要先给 `engine_app` 临时放开建临时表的权限。[create-roles.sql](deploy/db/create-roles.sql) 已经收回了这个权限，这是第一层防护；不放开的话，测到的只是这一层。
 
 **改租户表的数据：** 表所有者也受 `FORCE` 限制，所以 `migrate` 连接设了 `row_security = off`，忘了解除时直接报错，不会静默更新 0 行。在同一个脚本里先 `NO FORCE`，改完再 `FORCE`。
@@ -242,6 +243,7 @@ read -r KEY_ID API_KEY <<< "$(deploy/dev/admin.sh create-key --tenant="$TENANT" 
   - **格式：** 形如 `aie_site_test_dev_` 加 40 位随机字母和数字，前面是应用的环境和租户的单元码。它和服务端密钥的格式不会互相混淆。明文只在发放时打印这一次，丢了就再发一把。
   - **来源：** 每把站点键列出 1 到 10 个确切的来源，比如 `https://shop.example.com`，只有从这些网站来的请求才能换令牌。来源必须是 https，只有开发用的 `http://localhost` 和 `http://127.0.0.1` 例外。不支持通配符和路径；国际化域名要写成 punycode。来源按浏览器发送的写法保存：小写，去掉默认端口和末尾的斜杠，重复的只留一个。数据库的检查约束也会拦住不像来源的值。
   - **吊销：** 用 `revoke-site-key` 吊销。那一行保留，记下吊销时间；已经吊销的不能再吊销一次。
+  - **查找：** 先看格式，格式不对就不查数据库。格式对的，按哈希调用系统函数 `tenancy_find_site_key`，同时带上请求的来源，来源按浏览器的写法读。结果有三种：允许，就是来源在名单里；来源不对，包括请求没有来源或来源是 `null`；不认识，就是没发过或已吊销。等匿名会话接口接上（12-5），这三种分别是签发令牌、回 403、回 401。
   - **防护的边界：** 来源校验只能防别的网站嵌入这把站点键，防不了脚本伪造来源，所以匿名令牌的权限最低。按站点键限流是第 26 点，引擎对外公开前必须做完。
 
 真实单元这样运行：
