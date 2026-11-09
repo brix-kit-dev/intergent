@@ -234,7 +234,7 @@ read -r KEY_ID API_KEY <<< "$(deploy/dev/admin.sh create-key --tenant="$TENANT" 
     - 权限范围和上下文合起来，写成紧凑的 UTF-8 JSON 不超过 2048 字节。
 
     这样令牌最大约 3.1 KB。A-7 拦住这些限制被收紧，`SessionLimitsTest` 拦住它们被放宽。
-  - **还没做完：** `POST /v1/sessions` 还没接上。契约已经写明：同一个 `Idempotency-Key` 重放时，回答里没有令牌，因为引擎从不保存令牌。
+  - **换令牌：** 用 `POST /v1/sessions`，见[接口约定](#接口约定)。超过上面大小的请求返回 400；签发时还会再查一遍，所以哪条路径都签不出更大的令牌。
 - **密钥：** 形如 `aie_test_dev_` 加 40 位随机字母和数字。前面是应用的环境和租户的单元码，不查库就能看出来。数据库只存 SHA-256 哈希，检查约束挡住任何不像哈希的值。明文只在发放时打印这一次，丢了只能再发一把。一个应用可以有多把密钥，不用的可以吊销，见[接口约定](#接口约定)。
 
 真实单元这样运行：
@@ -288,7 +288,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 
 ## 对外契约
 
-[contracts/openapi.yaml](contracts/openapi.yaml) 是公开 API 的唯一源头，用 OpenAPI 3.1 写。现在有公共约定、身份和对话，其他资源做到时再加。目前实现了 `POST /v1/api-keys` 和 `DELETE /v1/api-keys/{key_id}`。建会话、建匿名会话先返回 404，等第 11、12 小点实现；其他 `/v1` 路径带有效密钥时也返回 404。
+[contracts/openapi.yaml](contracts/openapi.yaml) 是公开 API 的唯一源头，用 OpenAPI 3.1 写。现在有公共约定、身份和对话，其他资源做到时再加。目前实现了 `POST /v1/api-keys`、`DELETE /v1/api-keys/{key_id}` 和 `POST /v1/sessions`。建匿名会话先返回 404，等第 12 小点实现；其他 `/v1` 路径带有效密钥时也返回 404。
 
 改接口时先改这个文件。`engine/http` 构建时从它生成 Java 接口和数据类型，包名是 `aie.http.api`。实现类写成生成接口的实现，契约一变，对不上的代码就编译不过。
 
@@ -373,6 +373,21 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 - **环境和单元码：** 跟着调用方的应用和租户，和 `admin` 发的密钥一样。
 - **重试：** 带同一个 `Idempotency-Key` 重试，拿回同一个密钥号，但没有明文，因为明文从不保存。第一次的回答丢了的话，吊销这个密钥号，换一个新的 `Idempotency-Key` 再建一把。
 - **过期时间：** `expires_at` 可以不写，写了必须是将来的时间，否则返回 400。过了这个时间，密钥和吊销了一样返回 401，那一行仍然保留。不写就一直有效，直到被吊销。
+
+**换会话令牌：** 宿主后端用 `POST /v1/sessions` 给自己的一个用户换短期令牌，再交给浏览器。请求只有 `external_user_id` 是必填的。成功返回 201，回答里有令牌、过期时间、终端用户号、身份等级和权限范围。
+
+```bash
+curl -s -X POST http://127.0.0.1:18080/v1/sessions -H "Authorization: Bearer $API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"external_user_id":"host-user-1","scopes":["orders:read"],"context":{"order_id":"A-1001"},"locale":"ja-JP"}'
+```
+
+- **终端用户：** 同一个应用里，同一个外部用户号第一次出现时新建终端用户，以后每次都是同一个。
+- **身份等级：** 不写就是 `verified`，也可以写 `unverified`。`anonymous` 属于站点键，这里返回 400。
+- **检查：** 外部用户号、权限范围、上下文、语言和合计大小，任何一项不合格都返回 400 `invalid_request`，并说明是哪一项，见[开通租户](#开通租户)一节的“会话令牌”。检查都在新建终端用户之前，所以被拒的请求不留下终端用户。
+- **语言：** 按标准写法写进令牌，比如 `ja-jp` 写成 `ja-JP`。
+- **代下级租户：** 带 `On-Behalf-Of` 时，终端用户和令牌都属于下级租户的那个应用。
+- **重试：** 带同一个 `Idempotency-Key` 重试，拿回同样的回答，只是没有令牌，因为令牌从不保存。第一次的回答丢了的话，换一个新的 `Idempotency-Key` 再换一个。
 
 **`Engine-Version`：** `/v1` 下的请求可以传日期版本，如 `Engine-Version: 2026-11-05`。现在只有这一个版本，不传时也用它；以后按应用锁定的版本走。传别的版本返回 400 `invalid_request`，不会悄悄用另一个版本回答。版本写在 `EngineVersionFilter` 和契约的 `info.version`，测试保证两边一致。
 

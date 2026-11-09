@@ -182,7 +182,7 @@ class ApiKeyFilterTest {
         HttpResponse<String> response = send(withKey("/v1/test/caller").header("On-Behalf-Of", "ten_lower"));
 
         assertThat(response.statusCode()).isEqualTo(200);
-        assertThat(JSON.readValue(response.body(), Caller.class)).isEqualTo(new Caller("key_test", "ten_lower", "app_lower_test"));
+        assertThat(JSON.readValue(response.body(), Caller.class)).isEqualTo(new Caller("key_test", "ten_lower", "app_lowertest"));
     }
 
     @Test

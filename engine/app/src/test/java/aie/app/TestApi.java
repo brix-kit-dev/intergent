@@ -4,17 +4,23 @@ import aie.core.tenancy.api.ApiKeyLookup;
 import aie.core.tenancy.api.ApiKeyLookup.Owner;
 import aie.core.tenancy.api.ApiKeyManagement;
 import aie.core.tenancy.api.ApiKeyManagement.CreatedKey;
+import aie.core.tenancy.api.EndUsers;
 import aie.core.tenancy.api.IdempotencyKeys;
 import aie.core.tenancy.api.LowerTenants;
 import aie.core.tenancy.api.LowerTenants.Acting;
+import aie.core.tenancy.api.SessionTokens;
+import aie.core.tenancy.internal.SignedSessionTokens;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.springframework.boot.web.server.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.context.ConfigurableApplicationContext;
 
@@ -28,11 +34,16 @@ final class TestApi {
     /** 256 bits for tests that start the real api role, so its tokens are test tokens. */
     static final byte[] SESSION_KEY = sessionKey(7);
     static final String SESSION_KEY_SETTING = "--engine.session.key=" + Base64.getEncoder().encodeToString(SESSION_KEY);
+    /** Real tokens signed with {@link #SESSION_KEY}, which need no database, so a test can check what the api issued. */
+    static final SessionTokens SESSION_TOKENS = new SignedSessionTokens(Clock.systemUTC(), SESSION_KEY, List.of());
     /** Knows {@link #KEY} and nothing else. */
     static final ApiKeyLookup LOOKUP = key -> KEY.equals(key) ? Optional.of(OWNER) : Optional.empty();
-    /** ten_lower is a lower tenant with one application of each environment, ten_empty one without any. */
+    /**
+     * ten_lower is a lower tenant with one application of each environment, such as app_lowertest, and ten_empty one
+     * without any. The IDs are well formed, so a session token for them checks out.
+     */
     static final LowerTenants LOWER_TENANTS = (caller, environment, tenant) -> switch (tenant) {
-        case "ten_lower" -> new Acting.As(new Owner(caller.keyId(), "ten_lower", "app_lower_" + environment));
+        case "ten_lower" -> new Acting.As(new Owner(caller.keyId(), "ten_lower", "app_lower" + environment));
         case "ten_empty" -> new Acting.NoSingleApplication();
         default -> new Acting.NotALowerTenant();
     };
@@ -61,11 +72,18 @@ final class TestApi {
     }
 
     static ConfigurableApplicationContext start(ApiKeyLookup keys, ApiKeyManagement management, String... args) {
+        return start(keys, management, new StandInEndUsers(), args);
+    }
+
+    static ConfigurableApplicationContext start(
+            ApiKeyLookup keys, ApiKeyManagement management, EndUsers endUsers, String... args) {
         return ApiRole.serve(context -> {
             context.registerBean(ApiKeyLookup.class, () -> keys);
             context.registerBean(ApiKeyManagement.class, () -> management);
             context.registerBean(IdempotencyKeys.class, () -> NO_REPLAYS);
             context.registerBean(LowerTenants.class, () -> LOWER_TENANTS);
+            context.registerBean(EndUsers.class, () -> endUsers);
+            context.registerBean(SessionTokens.class, () -> SESSION_TOKENS);
         }, args);
     }
 
@@ -96,6 +114,21 @@ final class TestApi {
         public boolean revoke(Owner caller, String keyId) {
             calls.add(caller.keyId() + " of " + caller.tenantId() + "/" + caller.applicationId() + " revokes " + keyId);
             return revocable.remove(keyId);
+        }
+    }
+
+    /** Gives each host ID of each application an end user of its own, and remembers every call. */
+    static final class StandInEndUsers implements EndUsers {
+
+        final List<String> calls = new CopyOnWriteArrayList<>();
+        private final Map<String, String> ids = new ConcurrentHashMap<>();
+        private final AtomicInteger made = new AtomicInteger();
+
+        @Override
+        public String resolve(Owner caller, String externalId) {
+            String application = caller.tenantId() + "/" + caller.applicationId();
+            calls.add(application + " resolves " + externalId);
+            return ids.computeIfAbsent(application + " " + externalId, unused -> "eu_stand" + made.incrementAndGet());
         }
     }
 

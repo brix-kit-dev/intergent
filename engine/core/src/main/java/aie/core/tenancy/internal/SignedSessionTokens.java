@@ -7,8 +7,11 @@ import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.crypto.MACSigner;
 import com.nimbusds.jose.crypto.MACVerifier;
+import com.nimbusds.jose.util.JSONArrayUtils;
+import com.nimbusds.jose.util.JSONObjectUtils;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.text.ParseException;
@@ -75,6 +78,11 @@ public final class SignedSessionTokens implements SessionTokens {
 
     @Override
     public Issued issue(Session session) {
+        int claimsBytes = claimsBytes(session.scopes(), session.context());
+        if (claimsBytes > MAX_CLAIMS_BYTES) {
+            throw new IllegalArgumentException(
+                    "Scopes and context take " + claimsBytes + " bytes, and a token allows at most " + MAX_CLAIMS_BYTES);
+        }
         Instant now = clock.instant().truncatedTo(ChronoUnit.SECONDS);
         Instant expiresAt = now.plus(LIFETIME);
         JWTClaimsSet.Builder claims = new JWTClaimsSet.Builder()
@@ -101,6 +109,13 @@ public final class SignedSessionTokens implements SessionTokens {
             throw new IllegalStateException("Could not sign a session token", e);
         }
         return new Issued(token.serialize(), expiresAt);
+    }
+
+    /** The library's own writer, the one that writes the claims, so the count is what the token carries. */
+    @Override
+    public int claimsBytes(List<String> scopes, Map<String, String> context) {
+        return (scopes.isEmpty() ? 0 : JSONArrayUtils.toJSONString(scopes).getBytes(StandardCharsets.UTF_8).length)
+                + (context.isEmpty() ? 0 : JSONObjectUtils.toJSONString(context).getBytes(StandardCharsets.UTF_8).length);
     }
 
     @Override

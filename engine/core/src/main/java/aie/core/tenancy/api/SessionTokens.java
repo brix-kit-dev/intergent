@@ -37,8 +37,24 @@ public interface SessionTokens {
         }
     }
 
-    /** A signed token for the session. It expires {@link #LIFETIME} from now. */
+    /**
+     * The most bytes that scopes and context may take in a token, as compact UTF-8 JSON. The browser sends the token in
+     * a request header, and this keeps it near 3 KB. The contract's CreateSessionRequest states the same limit.
+     */
+    int MAX_CLAIMS_BYTES = 2048;
+
+    /**
+     * A signed token for the session. It expires {@link #LIFETIME} from now.
+     *
+     * @throws IllegalArgumentException when the scopes and context take more than {@link #MAX_CLAIMS_BYTES}
+     */
     Issued issue(Session session);
+
+    /**
+     * How many bytes these scopes and context take in a token: the compact UTF-8 JSON that a token writes for them,
+     * escapes included. Empty ones take none, because a token leaves them out.
+     */
+    int claimsBytes(List<String> scopes, Map<String, String> context);
 
     /**
      * The session in a token, or empty when the token is malformed, changed, signed with another algorithm or an

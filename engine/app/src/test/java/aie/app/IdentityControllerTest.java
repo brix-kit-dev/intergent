@@ -1,14 +1,24 @@
 package aie.app;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import aie.core.tenancy.api.SessionTokens;
+import aie.core.tenancy.api.SessionTokens.IdentityLevel;
 import aie.http.api.model.CreatedApiKey;
 import aie.http.api.model.Problem;
+import aie.http.api.model.Session;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpRequest.BodyPublishers;
 import java.net.http.HttpResponse;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -23,14 +33,19 @@ class IdentityControllerTest {
 
     private static final JsonMapper JSON = JsonMapper.builder().build();
     private static final TestApi.StandInKeys KEYS = new TestApi.StandInKeys();
+    private static final TestApi.StandInEndUsers END_USERS = new TestApi.StandInEndUsers();
     private static final String CALLER = "key_test of ten_test/app_test";
+    private static final String SCOPE_RULE = "each scope must have 1 to 64 letters, digits or _ . : -";
+    private static final String KEY_RULE = "each context key must have 1 to 40 letters, digits or _ . : -";
+    private static final String VALUE_RULE = "each context value must be a string of at most 200 characters";
+    private static final String LOCALE_RULE = "locale must be a BCP 47 language tag of at most 35 characters, such as ja-JP";
 
     private static ConfigurableApplicationContext context;
     private static int port;
 
     @BeforeAll
     static void start() {
-        context = TestApi.start(TestApi.LOOKUP, KEYS, "--server.port=0");
+        context = TestApi.start(TestApi.LOOKUP, KEYS, END_USERS, "--server.port=0");
         port = TestApi.port(context);
     }
 
@@ -42,6 +57,7 @@ class IdentityControllerTest {
     @BeforeEach
     void forgetCalls() {
         KEYS.calls.clear();
+        END_USERS.calls.clear();
     }
 
     private static HttpRequest.Builder request(String path) {
@@ -59,6 +75,35 @@ class IdentityControllerTest {
     private static HttpResponse<String> create(String body) throws Exception {
         return send(request("/v1/api-keys").header("Authorization", TestApi.AUTHORIZATION)
                 .header("Content-Type", "application/json").POST(BodyPublishers.ofString(body)));
+    }
+
+    private static HttpResponse<String> createSession(String body, String... headers) throws Exception {
+        HttpRequest.Builder request = request("/v1/sessions").header("Authorization", TestApi.AUTHORIZATION)
+                .header("Content-Type", "application/json").POST(BodyPublishers.ofString(body));
+        for (int i = 0; i < headers.length; i += 2) {
+            request.header(headers[i], headers[i + 1]);
+        }
+        return send(request);
+    }
+
+    /** A body with the host ID u1 and these fields, written by Jackson so that every string is escaped properly. */
+    private static String sessionBody(Map<String, Object> fields) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("external_user_id", "u1");
+        body.putAll(fields);
+        return JSON.writeValueAsString(body);
+    }
+
+    /** What the token in a 201 says, checked with the key the stand-in api signs with. */
+    private static SessionTokens.Session carried(HttpResponse<String> response) {
+        assertThat(response.statusCode()).isEqualTo(201);
+        return TestApi.SESSION_TOKENS.verify(JSON.readValue(response.body(), Session.class).getToken()).orElseThrow().session();
+    }
+
+    private static void assertRefused(HttpResponse<String> response, String detail) {
+        assertProblem(response, 400, "invalid_request");
+        assertThat(detail(response)).isEqualTo(detail);
+        assertThat(END_USERS.calls).as("a refused request makes no end user").isEmpty();
     }
 
     private static String detail(HttpResponse<String> response) {
@@ -112,7 +157,7 @@ class IdentityControllerTest {
                 .header("Authorization", TestApi.AUTHORIZATION).header("On-Behalf-Of", "ten_lower").DELETE());
 
         assertThat(response.statusCode()).isEqualTo(204);
-        assertThat(KEYS.calls).containsExactly("key_test of ten_lower/app_lower_test revokes key_lower");
+        assertThat(KEYS.calls).containsExactly("key_test of ten_lower/app_lowertest revokes key_lower");
     }
 
     @Test
@@ -192,14 +237,202 @@ class IdentityControllerTest {
         assertThat(KEYS.calls).isEmpty();
     }
 
-    /** These answer as their paths did before the controller existed, until their own points implement them. */
-    @ParameterizedTest
-    @ValueSource(strings = {"/v1/sessions", "/v1/anonymous-sessions"})
-    void theOperationsOfLaterPointsAreNotFoundYet(String path) throws Exception {
-        HttpResponse<String> response = send(request(path).header("Authorization", TestApi.AUTHORIZATION)
+    /** It answers as its path did before the controller existed, until point 12 implements it. */
+    @Test
+    void anonymousSessionsAreNotFoundYet() throws Exception {
+        HttpResponse<String> response = send(request("/v1/anonymous-sessions").header("Authorization", TestApi.AUTHORIZATION)
                 .header("Content-Type", "application/json").POST(BodyPublishers.ofString("{}")));
 
         assertProblem(response, 404, "not_found");
         assertThat(KEYS.calls).isEmpty();
+    }
+
+    @Test
+    void aSessionAnswersCreatedWithATokenForTheEndUser() throws Exception {
+        Instant before = Instant.now().truncatedTo(ChronoUnit.SECONDS);
+
+        HttpResponse<String> response = createSession(
+                "{\"external_user_id\":\"host-user-1\",\"scopes\":[\"orders:read\"],\"context\":{\"order_id\":\"A-1001\"},\"locale\":\"ja-jp\"}");
+
+        assertThat(response.statusCode()).isEqualTo(201);
+        assertThat(response.headers().firstValue("Request-Id")).isPresent();
+        Session answer = JSON.readValue(response.body(), Session.class);
+        assertThat(answer.getIdentityLevel()).isEqualTo("verified");
+        assertThat(answer.getScopes()).containsExactly("orders:read");
+        assertThat(answer.getExpiresAt().toInstant()).isBetween(before.plus(SessionTokens.LIFETIME), Instant.now().plus(SessionTokens.LIFETIME));
+        SessionTokens.Verified verified = TestApi.SESSION_TOKENS.verify(answer.getToken()).orElseThrow();
+        assertThat(verified.session()).isEqualTo(new SessionTokens.Session("ten_test", "app_test", answer.getEndUserId(),
+                IdentityLevel.VERIFIED, List.of("orders:read"), Map.of("order_id", "A-1001"), "ja-JP"));
+        assertThat(verified.expiresAt()).isEqualTo(answer.getExpiresAt().toInstant());
+        assertThat(END_USERS.calls).containsExactly("ten_test/app_test resolves host-user-1");
+    }
+
+    @Test
+    void aSessionNeedsOnlyTheHostsIdForTheEndUser() throws Exception {
+        HttpResponse<String> response = createSession("{\"external_user_id\":\"host-user-2\"}");
+
+        assertThat(carried(response)).isEqualTo(new SessionTokens.Session("ten_test", "app_test",
+                JSON.readValue(response.body(), Session.class).getEndUserId(), IdentityLevel.VERIFIED, List.of(), Map.of(), null));
+        assertThat(JSON.readValue(response.body(), Session.class).getScopes()).isEmpty();
+    }
+
+    @Test
+    void theSameHostIdGetsTheSameEndUser() throws Exception {
+        String first = JSON.readValue(createSession("{\"external_user_id\":\"host-user-3\"}").body(), Session.class).getEndUserId();
+        String again = JSON.readValue(createSession("{\"external_user_id\":\"host-user-3\"}").body(), Session.class).getEndUserId();
+        String other = JSON.readValue(createSession("{\"external_user_id\":\"host-user-4\"}").body(), Session.class).getEndUserId();
+
+        assertThat(again).isEqualTo(first);
+        assertThat(other).isNotEqualTo(first);
+    }
+
+    @Test
+    void theHostMayVouchLess() throws Exception {
+        assertThat(carried(createSession("{\"external_user_id\":\"u1\",\"identity_level\":\"unverified\"}")).identityLevel())
+                .isEqualTo(IdentityLevel.UNVERIFIED);
+    }
+
+    /** Anonymous tokens come from site keys, so a server key cannot ask for one. Jackson refuses the value. */
+    @ParameterizedTest
+    @ValueSource(strings = {"anonymous", "admin", "VERIFIED"})
+    void anotherIdentityLevelIsRefused(String level) throws Exception {
+        assertProblem(createSession("{\"external_user_id\":\"u1\",\"identity_level\":\"" + level + "\"}"), 400, "invalid_request");
+        assertThat(END_USERS.calls).isEmpty();
+    }
+
+    /** The contract counts characters, so a host ID of 255 symbols outside the basic plane passes too. */
+    @Test
+    void theHostsIdHasOneTo255Characters() throws Exception {
+        String rule = "external_user_id must have 1 to 255 characters";
+        assertRefused(createSession("{}"), rule);
+        assertRefused(createSession("{\"external_user_id\":\"\"}"), rule);
+        assertRefused(createSession("{\"external_user_id\":null}"), rule);
+        assertRefused(createSession("{\"external_user_id\":\"" + "u".repeat(256) + "\"}"), rule);
+
+        assertThat(createSession("{\"external_user_id\":\"" + "u".repeat(255) + "\"}").statusCode()).isEqualTo(201);
+        assertThat(createSession("{\"external_user_id\":\"" + "😀".repeat(255) + "\"}").statusCode()).isEqualTo(201);
+    }
+
+    @Test
+    void aSessionHasAtMostTwentyScopes() throws Exception {
+        assertRefused(createSession(sessionBody(Map.of("scopes", names("s", 21)))), "scopes may have at most 20 entries");
+
+        assertThat(carried(createSession(sessionBody(Map.of("scopes", names("s", 20))))).scopes()).hasSize(20);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "orders read", "orders/read", "orders,read", "注文", "orders\n"})
+    void aScopeIsAName(String scope) throws Exception {
+        assertRefused(createSession(sessionBody(Map.of("scopes", List.of("faq", scope)))), SCOPE_RULE);
+    }
+
+    @Test
+    void aScopeHasAtMostSixtyFourCharacters() throws Exception {
+        assertRefused(createSession(sessionBody(Map.of("scopes", List.of("s".repeat(65))))), SCOPE_RULE);
+
+        List<String> scopes = List.of("s".repeat(64), "Orders.Read:2_x-y");
+        assertThat(carried(createSession(sessionBody(Map.of("scopes", scopes)))).scopes()).isEqualTo(scopes);
+    }
+
+    @Test
+    void aScopeIsNeverNull() throws Exception {
+        assertRefused(createSession("{\"external_user_id\":\"u1\",\"scopes\":[\"faq\",null]}"), SCOPE_RULE);
+    }
+
+    @Test
+    void aSessionHasAtMostTenContextEntries() throws Exception {
+        assertRefused(createSession(sessionBody(Map.of("context", entries(11, 1)))), "context may have at most 10 entries");
+
+        assertThat(carried(createSession(sessionBody(Map.of("context", entries(10, 1))))).context()).hasSize(10);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "order id", "order/id", "注文", "order\n"})
+    void aContextKeyIsAName(String key) throws Exception {
+        assertRefused(createSession(sessionBody(Map.of("context", Map.of(key, "A-1001")))), KEY_RULE);
+    }
+
+    @Test
+    void aContextKeyHasAtMostFortyCharacters() throws Exception {
+        assertRefused(createSession(sessionBody(Map.of("context", Map.of("k".repeat(41), "v")))), KEY_RULE);
+
+        assertThat(carried(createSession(sessionBody(Map.of("context", Map.of("k".repeat(40), "v"))))).context())
+                .containsOnlyKeys("k".repeat(40));
+    }
+
+    /** Characters, not UTF-16 units: 200 symbols outside the basic plane pass, and 201 letters do not. */
+    @Test
+    void aContextValueHasAtMost200Characters() throws Exception {
+        assertRefused(createSession(sessionBody(Map.of("context", Map.of("note", "v".repeat(201))))), VALUE_RULE);
+        assertRefused(createSession("{\"external_user_id\":\"u1\",\"context\":{\"note\":null}}"), VALUE_RULE);
+
+        assertThat(carried(createSession(sessionBody(Map.of("context", Map.of("note", "😀".repeat(200)))))).context())
+                .containsEntry("note", "😀".repeat(200));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "ja_JP", " ja-JP", "日本語", "en-US-x-aaaaaaaa-bbbbbbbb-cccccccc-d"})
+    void aLocaleIsAWellFormedTag(String locale) throws Exception {
+        assertRefused(createSession(sessionBody(Map.of("locale", locale))), LOCALE_RULE);
+    }
+
+    /** The limit is the JSON as the token writes it, so 2048 bytes pass and one more does not. */
+    @Test
+    void scopesAndContextTakeAtMost2048Bytes() throws Exception {
+        Map<String, String> context = entries(9, 200);
+        context.put("k0", "v".repeat(167));
+        assertThat(context).hasSize(10);
+        assertThat(JSON.writeValueAsString(context).getBytes(UTF_8)).hasSize(2048);
+        Map<String, String> oneMore = new LinkedHashMap<>(context);
+        oneMore.put("k0", "v".repeat(168));
+
+        assertRefused(createSession(sessionBody(Map.of("context", oneMore))),
+                "scopes and context may take at most 2048 bytes together as JSON, and these take 2049");
+        assertThat(carried(createSession(sessionBody(Map.of("context", context)))).context()).isEqualTo(context);
+    }
+
+    /** A control character takes six bytes as JSON, so ten values of them are refused though each has 200 characters. */
+    @Test
+    void escapesCountAsTheBytesTheyTake() throws Exception {
+        Map<String, String> context = new LinkedHashMap<>();
+        for (int i = 0; i < 10; i++) {
+            context.put("k" + i, "\u0001".repeat(200));
+        }
+
+        assertRefused(createSession(sessionBody(Map.of("context", context))),
+                "scopes and context may take at most 2048 bytes together as JSON, and these take "
+                        + JSON.writeValueAsString(context).getBytes(UTF_8).length);
+    }
+
+    /** On-Behalf-Of: the end user and the token belong to the lower tenant's application. */
+    @Test
+    void aPlatformMakesASessionForItsLowerTenant() throws Exception {
+        HttpResponse<String> response = createSession("{\"external_user_id\":\"host-user-1\"}", "On-Behalf-Of", "ten_lower");
+
+        SessionTokens.Session session = carried(response);
+        assertThat(session.tenantId()).isEqualTo("ten_lower");
+        assertThat(session.applicationId()).isEqualTo("app_lowertest");
+        assertThat(END_USERS.calls).containsExactly("ten_lower/app_lowertest resolves host-user-1");
+    }
+
+    @Test
+    void aSessionNeedsAKey() throws Exception {
+        assertProblem(send(request("/v1/sessions").header("Content-Type", "application/json")
+                .POST(BodyPublishers.ofString("{\"external_user_id\":\"u1\"}"))), 401, "unauthorized");
+        assertThat(END_USERS.calls).isEmpty();
+    }
+
+    /** Names made of a prefix and a number, such as s1, s2 and so on. */
+    private static List<String> names(String prefix, int count) {
+        return IntStream.rangeClosed(1, count).mapToObj(i -> prefix + i).toList();
+    }
+
+    /** Entries k1, k2 and so on, each with a value of the given length. */
+    private static Map<String, String> entries(int count, int valueLength) {
+        Map<String, String> entries = new LinkedHashMap<>();
+        for (int i = 1; i <= count; i++) {
+            entries.put("k" + i, "v".repeat(valueLength));
+        }
+        return entries;
     }
 }

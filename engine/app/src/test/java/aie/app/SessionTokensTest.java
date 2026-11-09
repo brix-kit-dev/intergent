@@ -22,6 +22,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -338,5 +339,55 @@ class SessionTokensTest {
         assertThatThrownBy(() -> new Session("ten_A", "app_A", "eu_A", IdentityLevel.VERIFIED, List.of(), Map.of(), locale))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("A session locale must be a BCP 47 tag in standard form, such as ja-JP");
+    }
+
+    /**
+     * The count is what the token carries, escapes included: adding scp and ctx to a token adds the count, plus the
+     * 7 bytes of each {@code ,"scp":} and {@code ,"ctx":}. The values hold what the library escapes. By hand, the
+     * scopes take 26 bytes, because U+2028 is written as 6. The context takes 73. Its note takes 45: 6 each for
+     * U+0001, U+2028 and U+2029; 2 each for the quote, backslash, line feed, tab and é; 3 each for 日 and 本; 4 for the
+     * emoji; 1 each for the other six.
+     */
+    @Test
+    void claimsBytesAreWhatTheTokenCarries() throws Exception {
+        List<String> scopes = List.of("orders:read", "a b");
+        Map<String, String> context = Map.of("note", "<>&='\"\\/\u0001\n\t\u007f  é日本😀", "order", "A-1001");
+        Session bare = new Session("ten_A", "app_A", "eu_A", IdentityLevel.VERIFIED, List.of(), Map.of(), null);
+        Session full = new Session("ten_A", "app_A", "eu_A", IdentityLevel.VERIFIED, scopes, context, null);
+        SessionTokens tokens = tokens(NOW, KEY);
+
+        int added = payloadBytes(tokens.issue(full).token()) - payloadBytes(tokens.issue(bare).token());
+
+        assertThat(tokens.claimsBytes(scopes, context)).isEqualTo(added - 14).isEqualTo(26 + 73);
+        assertThat(tokens.claimsBytes(scopes, Map.of()) + tokens.claimsBytes(List.of(), context)).isEqualTo(added - 14);
+    }
+
+    @Test
+    void emptyScopesAndContextTakeNoBytes() {
+        assertThat(tokens(NOW, KEY).claimsBytes(List.of(), Map.of())).isZero();
+    }
+
+    /** Every token stays near 3 KB, whoever asks for it, so the limit holds here too and not only in the API. */
+    @Test
+    void aTokenCarriesAtMost2048BytesOfScopesAndContext() {
+        Map<String, String> context = new HashMap<>();
+        for (int i = 1; i <= 9; i++) {
+            context.put("k" + i, "v".repeat(200));
+        }
+        context.put("k0", "v".repeat(167));
+        Map<String, String> oneMore = new HashMap<>(context);
+        oneMore.put("k0", "v".repeat(168));
+        SessionTokens tokens = tokens(NOW, KEY);
+        assertThat(tokens.claimsBytes(List.of(), context)).isEqualTo(SessionTokens.MAX_CLAIMS_BYTES);
+
+        assertThat(tokens.issue(new Session("ten_A", "app_A", "eu_A", IdentityLevel.VERIFIED, List.of(), context, null)).token())
+                .hasSizeLessThan(3100);
+        assertThatThrownBy(() -> tokens.issue(new Session("ten_A", "app_A", "eu_A", IdentityLevel.VERIFIED, List.of(), oneMore, null)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Scopes and context take 2049 bytes, and a token allows at most 2048");
+    }
+
+    private static int payloadBytes(String token) {
+        return Base64.getUrlDecoder().decode(token.split("\\.")[1]).length;
     }
 }

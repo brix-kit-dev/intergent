@@ -4,11 +4,13 @@ import aie.adapters.storepg.PgPool;
 import aie.adapters.storepg.PgRuntime;
 import aie.core.tenancy.api.ApiKeyLookup;
 import aie.core.tenancy.api.ApiKeyManagement;
+import aie.core.tenancy.api.EndUsers;
 import aie.core.tenancy.api.IdempotencyKeys;
 import aie.core.tenancy.api.LowerTenants;
 import aie.core.tenancy.api.SessionTokens;
 import aie.core.tenancy.internal.DatabaseApiKeyLookup;
 import aie.core.tenancy.internal.DatabaseApiKeyManagement;
+import aie.core.tenancy.internal.DatabaseEndUsers;
 import aie.core.tenancy.internal.DatabaseIdempotencyKeys;
 import aie.core.tenancy.internal.DatabaseLowerTenants;
 import aie.ports.DatabaseException;
@@ -56,6 +58,7 @@ class ApiRole {
                 context.registerBean(ApiKeyManagement.class, () -> new DatabaseApiKeyManagement(database));
                 context.registerBean(IdempotencyKeys.class, () -> new DatabaseIdempotencyKeys(database));
                 context.registerBean(LowerTenants.class, () -> new DatabaseLowerTenants(database));
+                context.registerBean(EndUsers.class, () -> new DatabaseEndUsers(database));
                 context.registerBean(SessionTokens.class, () -> sessionTokens);
             }, args);
         } catch (RuntimeException e) {
