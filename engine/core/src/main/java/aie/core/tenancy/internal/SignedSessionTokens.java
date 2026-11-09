@@ -26,7 +26,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.regex.Pattern;
 
 /**
  * Session tokens as JWTs signed with HMAC-SHA256 (HS256), and nothing else.
@@ -46,9 +45,6 @@ public final class SignedSessionTokens implements SessionTokens {
     private static final String SCOPES = "scp";
     private static final String CONTEXT = "ctx";
     private static final String LOCALE = "loc";
-    private static final Pattern TENANT_ID = Pattern.compile("ten_[0-9A-Za-z]{1,60}");
-    private static final Pattern APPLICATION_ID = Pattern.compile("app_[0-9A-Za-z]{1,60}");
-    private static final Pattern END_USER_ID = Pattern.compile("eu_[0-9A-Za-z]{1,60}");
 
     private final Clock clock;
     private final String signingKeyId;
@@ -150,7 +146,8 @@ public final class SignedSessionTokens implements SessionTokens {
         List<String> scopes = claims.getStringListClaim(SCOPES);
         Map<String, Object> context = claims.getJSONObjectClaim(CONTEXT);
         String locale = claims.getStringClaim(LOCALE);
-        if (!matches(TENANT_ID, tenantId) || !matches(APPLICATION_ID, applicationId) || !matches(END_USER_ID, endUserId)
+        if (!SessionTokens.isId(TENANT_ID, tenantId) || !SessionTokens.isId(APPLICATION_ID, applicationId)
+                || !SessionTokens.isId(END_USER_ID, endUserId)
                 || level.isEmpty() || scopes != null && scopes.contains(null)
                 || locale != null && !SessionTokens.standardLocale(locale).equals(Optional.of(locale))) {
             return Optional.empty();
@@ -166,10 +163,6 @@ public final class SignedSessionTokens implements SessionTokens {
         }
         return Optional.of(new Session(
                 tenantId, applicationId, endUserId, level.get(), scopes == null ? List.of() : scopes, strings, locale));
-    }
-
-    private static boolean matches(Pattern pattern, String value) {
-        return value != null && pattern.matcher(value).matches();
     }
 
     private static byte[] checked(byte[] key) {

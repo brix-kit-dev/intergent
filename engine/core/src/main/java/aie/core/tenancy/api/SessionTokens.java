@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 /**
  * The short-lived end user tokens of blueprint 6.5. The host's server trades its key for one, and the browser then
@@ -18,6 +19,19 @@ public interface SessionTokens {
 
     /** How long every token lives. It is fixed, so no caller can ask for a long-lived one. */
     Duration LIFETIME = Duration.ofHours(1);
+
+    /**
+     * The shapes of the IDs a token carries: the type prefix of blueprint 6.2, then 1 to 60 letters and digits. An ID
+     * that {@code Ids} makes has 26. A session holds only these, so no token is signed that {@link #verify} refuses.
+     */
+    Pattern TENANT_ID = Pattern.compile("ten_[0-9A-Za-z]{1,60}");
+    Pattern APPLICATION_ID = Pattern.compile("app_[0-9A-Za-z]{1,60}");
+    Pattern END_USER_ID = Pattern.compile("eu_[0-9A-Za-z]{1,60}");
+
+    /** Whether the value is an ID of this shape. Null is not. */
+    static boolean isId(Pattern shape, String value) {
+        return value != null && shape.matcher(value).matches();
+    }
 
     /** The longest locale, in characters. The contract's Locale has the same limit. */
     int MAX_LOCALE = 35;
@@ -90,7 +104,8 @@ public interface SessionTokens {
      * them, so they hold no secrets. {@code locale} is the end user's language as the host gave it, in the form
      * {@link SessionTokens#standardLocale} returns, or null when the host gave none.
      *
-     * @throws IllegalArgumentException when the locale is not in that standard form
+     * @throws IllegalArgumentException when an ID does not have its shape, such as {@link SessionTokens#TENANT_ID}, or
+     *     the locale is not in that standard form
      */
     record Session(
             String tenantId,
@@ -102,11 +117,20 @@ public interface SessionTokens {
             String locale) {
 
         public Session {
+            requireId("tenant", TENANT_ID, tenantId);
+            requireId("application", APPLICATION_ID, applicationId);
+            requireId("end user", END_USER_ID, endUserId);
             scopes = List.copyOf(scopes);
             context = Map.copyOf(context);
             if (locale != null && !standardLocale(locale).equals(Optional.of(locale))) {
                 throw new IllegalArgumentException("A session locale must be a BCP 47 tag in standard form, such as ja-JP");
             }
+        }
+    }
+
+    private static void requireId(String kind, Pattern shape, String value) {
+        if (!isId(shape, value)) {
+            throw new IllegalArgumentException("A session's " + kind + " ID must match " + shape.pattern() + ", and " + value + " does not");
         }
     }
 

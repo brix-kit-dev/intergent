@@ -5,6 +5,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import aie.core.Ids;
 import aie.core.tenancy.api.SessionTokens;
 import aie.core.tenancy.api.SessionTokens.IdentityLevel;
 import aie.core.tenancy.api.SessionTokens.Issued;
@@ -339,6 +340,53 @@ class SessionTokensTest {
         assertThatThrownBy(() -> new Session("ten_A", "app_A", "eu_A", IdentityLevel.VERIFIED, List.of(), Map.of(), locale))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("A session locale must be a BCP 47 tag in standard form, such as ja-JP");
+    }
+
+    /** A session holds only IDs that the check accepts, so issue never signs a token that verify would refuse. */
+    @ParameterizedTest
+    @CsvSource(nullValues = "null", value = {
+        "tenant, app_A, app_A, eu_A",
+        "tenant, ten_, app_A, eu_A",
+        "tenant, ten_a-b, app_A, eu_A",
+        "tenant, ' ten_A', app_A, eu_A",
+        "tenant, null, app_A, eu_A",
+        "application, ten_A, app_lower_test, eu_A",
+        "application, ten_A, APP_A, eu_A",
+        "application, ten_A, null, eu_A",
+        "end user, ten_A, app_A, eu-A",
+        "end user, ten_A, app_A, eu_A.1",
+        "end user, ten_A, app_A, null"
+    })
+    void aSessionRefusesAnIdOfTheWrongShape(String kind, String tenantId, String applicationId, String endUserId) {
+        String wrong = switch (kind) {
+            case "tenant" -> tenantId;
+            case "application" -> applicationId;
+            default -> endUserId;
+        };
+        String prefix = switch (kind) {
+            case "tenant" -> "ten_";
+            case "application" -> "app_";
+            default -> "eu_";
+        };
+
+        assertThatThrownBy(() -> new Session(tenantId, applicationId, endUserId, IdentityLevel.VERIFIED, List.of(), Map.of(), null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("A session's " + kind + " ID must match " + prefix + "[0-9A-Za-z]{1,60}, and " + wrong + " does not");
+    }
+
+    /** An ID has 1 to 60 letters and digits after its prefix; one that Ids makes has 26. Each such session verifies. */
+    @Test
+    void everyIdASessionTakesComesBackFromItsToken() {
+        String sixty = "A".repeat(60);
+        Session longest = new Session("ten_" + sixty, "app_" + sixty, "eu_" + sixty, IdentityLevel.VERIFIED, List.of(), Map.of(), null);
+        Session real = new Session(Ids.next("ten"), Ids.next("app"), Ids.next("eu"), IdentityLevel.VERIFIED, List.of(), Map.of(), null);
+        SessionTokens tokens = tokens(NOW, KEY);
+
+        for (Session session : List.of(longest, real, SESSION)) {
+            assertThat(tokens.verify(tokens.issue(session).token())).hasValueSatisfying(verified -> assertThat(verified.session()).isEqualTo(session));
+        }
+        assertThatThrownBy(() -> new Session("ten_A", "app_A", "eu_" + sixty + "A", IdentityLevel.VERIFIED, List.of(), Map.of(), null))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     /**
