@@ -10,8 +10,11 @@ import java.util.Optional;
 /** Issuing a key, the same way for admin's first key and for keys created through the public API. */
 final class KeyIssuing {
 
-    /** The key takes the application's environment and the tenant's cell, so it can be routed without the database. */
-    private static final String KEY_PARTS = """
+    /**
+     * The key takes the application's environment and the tenant's cell, so it can be routed without the database. Site
+     * keys take them too. Row-level security hides the applications of other tenants, so one of them gives no row.
+     */
+    static final String KEY_PARTS = """
             SELECT a.environment, t.cell_id
             FROM tenancy_applications a
             JOIN tenancy_tenants t ON t.tenant_id = a.tenant_id

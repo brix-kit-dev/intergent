@@ -32,15 +32,20 @@ public final class ApiKeys {
 
     /** A new key for an application of this environment in this cell. */
     public static String issue(String environment, String cellCode) {
-        StringBuilder key = new StringBuilder(PREFIX).append('_').append(environment).append('_').append(cellCode).append('_');
-        for (int i = 0; i < SECRET_LENGTH; i++) {
-            key.append(SECRET_DIGITS[RANDOM.nextInt(SECRET_DIGITS.length)]);
-        }
-        String issued = key.toString();
+        String issued = PREFIX + "_" + environment + "_" + cellCode + "_" + secret();
         if (parse(issued).isEmpty()) {
             throw new IllegalArgumentException("No key can be made for environment " + environment + " in cell " + cellCode);
         }
         return issued;
+    }
+
+    /** The random part of a key, which site keys share. */
+    static String secret() {
+        StringBuilder secret = new StringBuilder(SECRET_LENGTH);
+        for (int i = 0; i < SECRET_LENGTH; i++) {
+            secret.append(SECRET_DIGITS[RANDOM.nextInt(SECRET_DIGITS.length)]);
+        }
+        return secret.toString();
     }
 
     /** Reads a key without the database. Anything else, a malformed key included, gives nothing. */

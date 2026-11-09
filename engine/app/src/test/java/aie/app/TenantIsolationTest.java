@@ -62,6 +62,10 @@ class TenantIsolationTest {
             new Sample("tenancy_end_users", """
                     INSERT INTO tenancy_end_users (end_user_id, tenant_id, application_id, external_id)
                     VALUES ('eu_{tenant}', '{tenant}', 'app_{tenant}', 'user-1')
+                    """),
+            new Sample("tenancy_site_keys", """
+                    INSERT INTO tenancy_site_keys (site_key_id, tenant_id, application_id, key_hash, origins)
+                    VALUES ('site_{tenant}', '{tenant}', 'app_{tenant}', md5('{tenant}') || md5('{tenant}'), '{https://shop.example}')
                     """));
 
     private static final String TENANT_TABLES = """

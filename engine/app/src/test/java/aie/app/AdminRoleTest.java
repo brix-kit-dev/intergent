@@ -6,11 +6,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import aie.adapters.storepg.TestDatabase;
 import aie.core.tenancy.api.ApiKeys;
 import aie.core.tenancy.api.ApiVersion;
+import aie.core.tenancy.api.SiteKeys;
 import java.io.IOException;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.stream.IntStream;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -314,5 +316,159 @@ class AdminRoleTest {
 
         assertThat(EngineApplication.launch(settings("create-tenant"))).isZero();
         assertThat(output.getOut().substring(before).strip()).matches("ten" + AN_ID);
+    }
+
+    /** A tenant and an application of the environment, then a site key for these origins. Prints the ID and the key. */
+    private static String[] issuedSiteKey(CapturedOutput output, String environment, String origins) {
+        String tenant = created(output, "create-tenant");
+        String application = created(output, "create-application", "--tenant=" + tenant, "--environment=" + environment);
+        return created(output, "create-site-key", "--tenant=" + tenant, "--application=" + application, "--origins=" + origins)
+                .split(" ");
+    }
+
+    /** The origins are kept as a browser writes them, in the order given, without repeats. */
+    @Test
+    void createSiteKeyPrintsTheIdAndTheKeyAndKeepsOnlyItsHash(CapturedOutput output) throws SQLException {
+        String tenant = created(output, "create-tenant");
+        String application = created(output, "create-application", "--tenant=" + tenant);
+        String[] printed = created(output, "create-site-key", "--tenant=" + tenant, "--application=" + application,
+                "--origins=https://Shop.Example.com/, http://localhost:3000,https://shop.example.com:443").split(" ");
+
+        assertThat(printed).hasSize(2);
+        assertThat(printed[0]).matches("site" + AN_ID);
+        assertThat(printed[1]).matches("aie_site_test_jp1_[0-9A-Za-z]{40}");
+        assertThat(rows("""
+                SELECT concat_ws(',', site_key_id, tenant_id, application_id, key_hash, array_to_string(origins, ' '),
+                       revoked_at IS NULL)
+                FROM engine.tenancy_site_keys"""))
+                .containsExactly(String.join(",", printed[0], tenant, application, SiteKeys.hash(printed[1]),
+                        "https://shop.example.com http://localhost:3000", "t"));
+    }
+
+    @Test
+    void aLiveApplicationGetsALiveSiteKey(CapturedOutput output) {
+        assertThat(issuedSiteKey(output, "live", "https://shop.example.com")[1]).startsWith("aie_site_live_jp1_");
+    }
+
+    @Test
+    void theSiteKeyItselfIsStoredNowhere(CapturedOutput output) throws SQLException {
+        String secret = issuedSiteKey(output, "test", "https://shop.example.com")[1].substring("aie_site_test_jp1_".length());
+
+        for (String table : rows("SELECT relname FROM pg_class WHERE relnamespace = 'engine'::regnamespace AND relkind = 'r'")) {
+            assertThat(rows("SELECT count(*) FROM engine." + table + " t WHERE t::text LIKE '%" + secret + "%'"))
+                    .as(table).containsExactly("0");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"http://shop.example.com", "https://shop.example.com/cart", "https://*.example.com",
+        "shop.example.com", "https://shop.example.com,ftp://shop.example.com", "https://shop.example.com,"})
+    void aSiteKeyListsOnlyExactOrigins(String origins, CapturedOutput output) throws SQLException {
+        String tenant = created(output, "create-tenant");
+        String application = created(output, "create-application", "--tenant=" + tenant);
+
+        assertThat(admin("create-site-key", "--tenant=" + tenant, "--application=" + application, "--origins=" + origins))
+                .isEqualTo(EngineApplication.EXIT_FAILED);
+
+        assertThat(output.getErr()).contains("Admin failed: Not an origin a site key may list: ");
+        assertThat(rows("SELECT count(*) FROM engine.tenancy_site_keys")).containsExactly("0");
+    }
+
+    @Test
+    void aSiteKeyListsAtMostTenOrigins(CapturedOutput output) throws SQLException {
+        String tenant = created(output, "create-tenant");
+        String application = created(output, "create-application", "--tenant=" + tenant);
+        String eleven = String.join(",", IntStream.rangeClosed(1, 11).mapToObj(i -> "https://shop" + i + ".example").toList());
+
+        assertThat(admin("create-site-key", "--tenant=" + tenant, "--application=" + application, "--origins=" + eleven))
+                .isEqualTo(EngineApplication.EXIT_FAILED);
+
+        assertThat(output.getErr()).contains("Admin failed: A site key lists 1 to 10 origins, not 11");
+        assertThat(rows("SELECT count(*) FROM engine.tenancy_site_keys")).containsExactly("0");
+    }
+
+    @Test
+    void aSiteKeyNeedsAnApplicationOfThatTenant(CapturedOutput output) throws SQLException {
+        String owner = created(output, "create-tenant");
+        String application = created(output, "create-application", "--tenant=" + owner);
+        String other = created(output, "create-tenant");
+
+        assertThat(admin("create-site-key", "--tenant=" + other, "--application=" + application,
+                "--origins=https://shop.example.com")).isEqualTo(EngineApplication.EXIT_FAILED);
+
+        assertThat(output.getErr()).contains("Admin failed: Application " + application + " does not exist in tenant " + other);
+        assertThat(rows("SELECT count(*) FROM engine.tenancy_site_keys")).containsExactly("0");
+    }
+
+    @Test
+    void createSiteKeyNeedsOrigins(CapturedOutput output) {
+        assertThat(admin("create-site-key", "--tenant=ten_x", "--application=app_x")).isEqualTo(EngineApplication.EXIT_USAGE);
+
+        assertThat(output.getErr()).contains("create-site-key needs --origins.");
+    }
+
+    /** The row stays, with the moment it was revoked, and a key revoked once cannot be revoked again. */
+    @Test
+    void revokeSiteKeyPrintsTheIdAndKeepsTheRow(CapturedOutput output) throws SQLException {
+        String tenant = created(output, "create-tenant");
+        String application = created(output, "create-application", "--tenant=" + tenant);
+        String siteKeyId = created(output, "create-site-key", "--tenant=" + tenant, "--application=" + application,
+                "--origins=https://shop.example.com").split(" ")[0];
+
+        assertThat(created(output, "revoke-site-key", "--tenant=" + tenant, "--site-key=" + siteKeyId)).isEqualTo(siteKeyId);
+        assertThat(rows("SELECT count(*) FROM engine.tenancy_site_keys WHERE revoked_at IS NOT NULL")).containsExactly("1");
+
+        assertThat(admin("revoke-site-key", "--tenant=" + tenant, "--site-key=" + siteKeyId)).isEqualTo(EngineApplication.EXIT_FAILED);
+        assertThat(output.getErr()).contains("Admin failed: Site key " + siteKeyId + " is not an active key of tenant " + tenant);
+    }
+
+    /** Row-level security hides another tenant's site key, so it reads as missing and stays as it was. */
+    @Test
+    void aTenantCannotRevokeAnotherTenantsSiteKey(CapturedOutput output) throws SQLException {
+        String siteKeyId = issuedSiteKey(output, "test", "https://shop.example.com")[0];
+        String other = created(output, "create-tenant");
+
+        assertThat(admin("revoke-site-key", "--tenant=" + other, "--site-key=" + siteKeyId)).isEqualTo(EngineApplication.EXIT_FAILED);
+
+        assertThat(rows("SELECT count(*) FROM engine.tenancy_site_keys WHERE revoked_at IS NULL")).containsExactly("1");
+    }
+
+    /** The checks behind "only a hash" and "only origins": a value that slipped past the code does not get in. */
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "'%s', '{https://shop.example.com}'",
+        "'0000000000000000000000000000000000000000000000000000000000000000', '{}'",
+        "'0000000000000000000000000000000000000000000000000000000000000000', '{NULL}'",
+        "'0000000000000000000000000000000000000000000000000000000000000000', '{https://shop.example.com,NULL}'",
+        "'0000000000000000000000000000000000000000000000000000000000000000', '{https://shop.example.com/cart}'",
+        "'0000000000000000000000000000000000000000000000000000000000000000', '{shop.example.com}'",
+        "'0000000000000000000000000000000000000000000000000000000000000000', '{\"https://a.example b\"}'",
+        "'0000000000000000000000000000000000000000000000000000000000000000', '{https://a.example,https://b.example,https://c.example,"
+            + "https://d.example,https://e.example,https://f.example,https://g.example,https://h.example,https://i.example,"
+            + "https://j.example,https://k.example}'"
+    })
+    void theDatabaseRefusesASiteKeyThatIsNotAHashOrOriginsThatAreNotOrigins(String values, CapturedOutput output) throws SQLException {
+        String tenant = created(output, "create-tenant");
+        String application = created(output, "create-application", "--tenant=" + tenant);
+
+        assertThatThrownBy(() -> TestDatabase.asAdmin(DATABASE, """
+                INSERT INTO engine.tenancy_site_keys (site_key_id, tenant_id, application_id, key_hash, origins)
+                VALUES ('site_x', '%s', '%s', %s)""".formatted(tenant, application, values.formatted(SiteKeys.issue("test", "jp1")))))
+                .hasMessageContaining("violates check constraint");
+        assertThat(rows("SELECT count(*) FROM engine.tenancy_site_keys")).containsExactly("0");
+    }
+
+    @Test
+    void theDatabaseTakesTenOriginsAsTheCodeWritesThem(CapturedOutput output) throws SQLException {
+        String tenant = created(output, "create-tenant");
+        String application = created(output, "create-application", "--tenant=" + tenant);
+        String ten = String.join(",", IntStream.rangeClosed(1, 10).mapToObj(i -> "https://shop" + i + ".example:8443").toList());
+
+        TestDatabase.asAdmin(DATABASE, """
+                INSERT INTO engine.tenancy_site_keys (site_key_id, tenant_id, application_id, key_hash, origins)
+                VALUES ('site_x', '%s', '%s', '%s', '{%s,http://localhost:3000}')""".formatted(
+                tenant, application, "0".repeat(64), ten.substring(ten.indexOf(',') + 1)));
+
+        assertThat(rows("SELECT cardinality(origins) FROM engine.tenancy_site_keys")).containsExactly("10");
     }
 }

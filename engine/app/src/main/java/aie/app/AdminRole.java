@@ -4,6 +4,7 @@ import aie.adapters.storepg.PgRuntime;
 import aie.core.tenancy.api.Provisioning;
 import aie.core.tenancy.internal.DatabaseProvisioning;
 import aie.ports.DatabaseException;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -12,8 +13,9 @@ import java.util.regex.Pattern;
 import org.springframework.boot.DefaultApplicationArguments;
 
 /**
- * The admin role of blueprint 12.5: opens tenants and applications and issues their first key, from the command line,
- * with no HTTP entry. Standard output holds only what was created, so a script can take it from there.
+ * The admin role of blueprint 12.5: opens tenants and applications, issues their first key, and issues and revokes
+ * their site keys, from the command line, with no HTTP entry. Standard output holds only what was created or revoked,
+ * so a script can take it from there.
  */
 final class AdminRole {
 
@@ -22,7 +24,9 @@ final class AdminRole {
               create-tenant [--parent=<tenant id>]
               create-application --tenant=<tenant id> [--environment=test|live] \
             [--data-class=public|internal|personal|sensitive]
-              create-key --tenant=<tenant id> --application=<application id>""";
+              create-key --tenant=<tenant id> --application=<application id>
+              create-site-key --tenant=<tenant id> --application=<application id> --origins=<origin>[,<origin>...]
+              revoke-site-key --tenant=<tenant id> --site-key=<site key id>""";
 
     private static final String CELL_CODE = "engine.cell.code";
     /** Blueprint 12.1: the cell code goes into API keys, and anything else would break parsing them. */
@@ -31,7 +35,9 @@ final class AdminRole {
     private static final Map<String, Options> COMMANDS = Map.of(
             "create-tenant", new Options(Set.of(), Set.of("parent")),
             "create-application", new Options(Set.of("tenant"), Set.of("environment", "data-class")),
-            "create-key", new Options(Set.of("tenant", "application"), Set.of()));
+            "create-key", new Options(Set.of("tenant", "application"), Set.of()),
+            "create-site-key", new Options(Set.of("tenant", "application", "origins"), Set.of()),
+            "revoke-site-key", new Options(Set.of("tenant", "site-key"), Set.of()));
 
     private AdminRole() {
     }
@@ -55,6 +61,9 @@ final class AdminRole {
                 case "create-application" -> provisioning.createApplication(
                         command.option("tenant"), command.option("environment", "test"), command.option("data-class", "internal"));
                 case "create-key" -> issued(provisioning.createKey(command.option("tenant"), command.option("application")));
+                case "create-site-key" -> issued(provisioning.createSiteKey(command.option("tenant"), command.option("application"),
+                        Arrays.stream(command.option("origins").split(",", -1)).map(String::strip).toList()));
+                case "revoke-site-key" -> revoked(provisioning, command.option("tenant"), command.option("site-key"));
                 default -> throw new IllegalStateException("No action for " + command.name());
             });
             return 0;
@@ -67,6 +76,14 @@ final class AdminRole {
     /** One line, the ID and then the key, so a script can read both. This is the only time the key is shown. */
     private static String issued(Provisioning.IssuedKey key) {
         return key.keyId() + " " + key.key();
+    }
+
+    /** The ID of the key just revoked. A key the tenant does not have, or one revoked before, is a failure. */
+    private static String revoked(Provisioning provisioning, String tenantId, String siteKeyId) {
+        if (!provisioning.revokeSiteKey(tenantId, siteKeyId)) {
+            throw new IllegalArgumentException("Site key " + siteKeyId + " is not an active key of tenant " + tenantId);
+        }
+        return siteKeyId;
     }
 
     private static String cellCode(RoleSettings settings) {

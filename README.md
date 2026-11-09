@@ -213,6 +213,8 @@ read -r KEY_ID API_KEY <<< "$(deploy/dev/admin.sh create-key --tenant="$TENANT" 
 | `create-tenant` | `--parent=<租户号>`：上级租户，可以在别的数据库或单元 | 新租户号，如 `ten_01M6...` |
 | `create-application` | `--tenant`：必填；`--environment=test\|live`：默认 `test`；`--data-class`：默认 `internal` | 新应用号，如 `app_01M6...` |
 | `create-key` | `--tenant`、`--application`：都必填 | 一行：密钥号和密钥，如 `key_01M6... aie_test_dev_...` |
+| `create-site-key` | `--tenant`、`--application`、`--origins`：都必填；`--origins` 用逗号隔开，如 `https://shop.example.com,http://localhost:3000` | 一行：站点键号和站点键，如 `site_01M6... aie_site_test_dev_...` |
+| `revoke-site-key` | `--tenant`、`--site-key=<站点键号>`：都必填 | 吊销了的站点键号 |
 
 - **输出：** 标准输出只有新 ID，脚本可以直接接住。出错写到标准错误，退出码 1；命令或选项写错，退出码 2。
 - **连接：** 和 `api` 一样先过启动自检，再用 `engine_app` 连接。地址里写的用户和会话参数都不起作用。
@@ -236,6 +238,11 @@ read -r KEY_ID API_KEY <<< "$(deploy/dev/admin.sh create-key --tenant="$TENANT" 
     这样令牌最大约 3.1 KB。A-7 拦住这些限制被收紧，`SessionLimitsTest` 拦住它们被放宽。
   - **换令牌：** 用 `POST /v1/sessions`，见[接口约定](#接口约定)。超过上面大小的请求返回 400；签发时还会再查一遍，所以哪条路径都签不出更大的令牌。
 - **密钥：** 形如 `aie_test_dev_` 加 40 位随机字母和数字。前面是应用的环境和租户的单元码，不查库就能看出来。数据库只存 SHA-256 哈希，检查约束挡住任何不像哈希的值。明文只在发放时打印这一次，丢了只能再发一把。一个应用可以有多把密钥，不用的可以吊销，见[接口约定](#接口约定)。
+- **站点键：** 放在宿主网页里，浏览器用它换匿名令牌（蓝图 6.5）。它是公开的，但和密钥一样只存哈希，因为蓝图 7.6 规定按哈希查找。用它换令牌的 `POST /v1/anonymous-sessions` 还没接上，在第 12 点后面几步做。这些规则 2026-11-09 获批：
+  - **格式：** 形如 `aie_site_test_dev_` 加 40 位随机字母和数字，前面是应用的环境和租户的单元码。它和服务端密钥的格式不会互相混淆。明文只在发放时打印这一次，丢了就再发一把。
+  - **来源：** 每把站点键列出 1 到 10 个确切的来源，比如 `https://shop.example.com`，只有从这些网站来的请求才能换令牌。来源必须是 https，只有开发用的 `http://localhost` 和 `http://127.0.0.1` 例外。不支持通配符和路径；国际化域名要写成 punycode。来源按浏览器发送的写法保存：小写，去掉默认端口和末尾的斜杠，重复的只留一个。数据库的检查约束也会拦住不像来源的值。
+  - **吊销：** 用 `revoke-site-key` 吊销。那一行保留，记下吊销时间；已经吊销的不能再吊销一次。
+  - **防护的边界：** 来源校验只能防别的网站嵌入这把站点键，防不了脚本伪造来源，所以匿名令牌的权限最低。按站点键限流是第 26 点，引擎对外公开前必须做完。
 
 真实单元这样运行：
 
