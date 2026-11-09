@@ -7,6 +7,9 @@ import static org.awaitility.Awaitility.await;
 
 import aie.ports.DatabaseException;
 import java.io.IOException;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -16,6 +19,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -250,6 +254,81 @@ class PgMigrationsTest {
                 .isInstanceOf(DatabaseException.class)
                 .hasMessageContaining("password authentication failed")
                 .hasMessageNotContaining("wrong-secret-value");
+    }
+
+    /** Logging in takes milliseconds on a working server. Thirty seconds leave room for a slow one. */
+    @Test
+    void loggingInMayTakeThirtySeconds() {
+        assertThat(PgMigrations.LOGIN_TIMEOUT).isEqualTo(Duration.ofSeconds(30));
+    }
+
+    @Test
+    void aServerThatNeverAnswersIsGivenUp() throws IOException {
+        try (SilentServer silent = new SilentServer()) {
+            assertGivenUpAfterTwoSeconds(silent, silent.address());
+        }
+    }
+
+    @Test
+    void theAddressCannotTurnTheLoginTimeoutOff() throws IOException {
+        try (SilentServer silent = new SilentServer()) {
+            assertGivenUpAfterTwoSeconds(silent, silent.address() + "?loginTimeout=0");
+        }
+    }
+
+    /** The run happens on another thread, so a run that would wait for good fails the test instead of hanging it. */
+    private static void assertGivenUpAfterTwoSeconds(SilentServer silent, String address) {
+        PgMigrations migrations = new PgMigrations(address, TestDatabase.OWNER_PASSWORD, "migrations/two-modules", Duration.ofSeconds(2));
+        long start = System.nanoTime();
+
+        assertThat(CompletableFuture.supplyAsync(migrations::run)).failsWithin(Duration.ofSeconds(15)).withThrowableThat()
+                .withCauseInstanceOf(DatabaseException.class)
+                .withMessageEndingWith("The migrations could not start: Connection attempt timed out.");
+        assertThat(Duration.ofNanos(System.nanoTime() - start)).isGreaterThanOrEqualTo(Duration.ofSeconds(2));
+        assertThat(silent.accepted()).isPositive();
+    }
+
+    /** The timeout covers logging in only, so a script may run longer than it. A socket timeout would stop it. */
+    @Test
+    void aScriptMayRunLongerThanTheLoginTimeout() {
+        PgMigrations migrations = new PgMigrations(DATABASE.getJdbcUrl(), TestDatabase.OWNER_PASSWORD, "migrations/slow", Duration.ofSeconds(1));
+
+        assertThat(migrations.run()).containsExactly(entry("alpha", 1));
+    }
+
+    /** Accepts connections and never says a word, as a hung server or the wrong service behind an address can. */
+    private static final class SilentServer implements AutoCloseable {
+
+        private final ServerSocket server = new ServerSocket(0, 16, InetAddress.getLoopbackAddress());
+        private final List<Socket> held = new CopyOnWriteArrayList<>();
+
+        SilentServer() throws IOException {
+            Thread.ofVirtual().start(() -> {
+                try {
+                    while (true) {
+                        held.add(server.accept());
+                    }
+                } catch (IOException closed) {
+                    // The test is over.
+                }
+            });
+        }
+
+        String address() {
+            return "jdbc:postgresql://127.0.0.1:" + server.getLocalPort() + "/engine";
+        }
+
+        int accepted() {
+            return held.size();
+        }
+
+        @Override
+        public void close() throws IOException {
+            server.close();
+            for (Socket socket : held) {
+                socket.close();
+            }
+        }
     }
 
     @Test

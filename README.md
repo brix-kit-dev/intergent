@@ -87,6 +87,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_OWNER_PASSWO
 | 数据库里缺 `engine` schema | 报错。它由 `create-roles.sql` 创建，`migrate` 不建 |
 | 表被别的事务锁住 | 等 10 秒就失败，否则请求会排在 `ALTER TABLE` 后面堵住 |
 | 同时跑两个 `migrate` | 后一个等前一个，最多 10 秒，等不到就失败。重跑即可 |
+| 数据库接受了连接却一直不回应 | 登录等 30 秒就失败，退出码 1，地址里的参数改不了这个时限。它只管登录，已经开始的 `ALTER TABLE` 再慢也不会被打断 |
 
 **新表：** 照 `V1__create_tenants.sql` 写，这是蓝图 5.6 的模板：行级安全、`FORCE`、租户策略、授权。有序列时序列也要授权给 `engine_app`。带 `tenant_id` 的表还要加一条样例行，见[租户隔离](#租户隔离)。
 

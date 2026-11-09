@@ -5,6 +5,7 @@ import java.io.IOException;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.SortedSet;
@@ -33,6 +34,13 @@ public final class PgMigrations {
     private static final String SESSION_OPTIONS = "-c row_security=off -c lock_timeout=10s";
 
     /**
+     * How long logging in may take. A server that accepts the connection and never answers, such as a hung one or
+     * the wrong service behind the address, would otherwise keep the run waiting for good. It covers logging in
+     * only: a socket timeout would also stop an ALTER TABLE that is still working. The address cannot change it.
+     */
+    static final Duration LOGIN_TIMEOUT = Duration.ofSeconds(30);
+
+    /**
      * Flyway locks through a module's history table, which does not exist on the module's first run. Two runs at once
      * would race to create it, so a whole run holds this lock. It goes away with the connection.
      */
@@ -42,13 +50,18 @@ public final class PgMigrations {
     private final String root;
 
     public PgMigrations(String url, String ownerPassword) {
-        this(url, ownerPassword, DEFAULT_ROOT);
+        this(url, ownerPassword, DEFAULT_ROOT, LOGIN_TIMEOUT);
     }
 
     PgMigrations(String url, String ownerPassword, String root) {
+        this(url, ownerPassword, root, LOGIN_TIMEOUT);
+    }
+
+    PgMigrations(String url, String ownerPassword, String root, Duration loginTimeout) {
         this.root = root;
         this.dataSource = PgConnections.as(OWNER, url, ownerPassword);
         dataSource.setOptions(SESSION_OPTIONS);
+        dataSource.setLoginTimeout(Math.toIntExact(loginTimeout.toSeconds()));
     }
 
     /** Migrates every module and returns how many scripts each one applied. */
