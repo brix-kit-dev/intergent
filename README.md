@@ -302,10 +302,12 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 | 规则 | 禁止什么 |
 | --- | --- |
 | `A-3` | 适配器以外的正式代码里出现模型名，比如 `gpt-4o`、`claude-sonnet-4-5`。换模型应当只改网关的配置 |
+| `A-5` | 正式代码里按地区判断：字符串正好是 `cn`、`jp`、`us`；`Locale` 里代表国家的常量，比如 `Locale.JAPAN`；名字或字符串里以 `region` 开头的词，比如 `getRegion`、`REGION_PACK`。地区之间的差别应当放在区域包里 |
 
 - **读什么：** 引擎每个模块 `src/main/java` 下的 Java 和 `src/main/resources` 下的 SQL，只看名字和字符串。注释、测试、文档、配置文件和对外契约都不读，所以注释里可以举例。守卫自己也不读，因为名单就写在它里面。
 - **模型名怎么认：** 按常见模型家族的开头认，不分大小写：`gpt-`、`chatgpt`、`o1-`/`o3-`/`o4-`、`claude-`、`gemini-`、`gemma`、`llama`、`mistral`、`mixtral`、`codestral`、`qwen`、`deepseek`、`command-r`、`text-embedding-`。家族名必须在词首，所以 `ollama` 不算；驼峰写法的名字逐个词看，所以 `QwenClient` 也算。
-- **报什么：** 每处一行，写明文件、行号和认出的模型名，比如 `A-3: core/src/main/java/aie/core/Pick.java:2: model name gpt-4o`。
+- **地区怎么认：** 地区代码不分大小写，只认整个字符串，所以 `jp1`、`us-east-1` 不算。获批的名单里原本还有 `"eu"`，但它正是终端用户号的前缀（`eu_...`），所以拿掉了；真要按欧洲判断，多半要写到 `region`，仍会被抓住。`Locale` 的语言常量（比如 `JAPANESE`）不算。`A-5` 连适配器也查；以后做区域包时，只给加载区域包的地方开例外。
+- **报什么：** 每处一行，写明文件、行号和认出的内容，比如 `A-3: core/src/main/java/aie/core/Pick.java:2: model name gpt-4o`、`A-5: core/src/main/java/aie/core/Route.java:3: country constant Locale.JAPAN`。
 - **测试：** `TextRulesTest` 在临时目录里摆出样例文件，逐条看算不算；`EngineTextTest` 在真实的引擎上跑，并确认扫描确实读到了各个模块和迁移脚本，不会因为什么都没读而通过。
 
 ## 对外契约

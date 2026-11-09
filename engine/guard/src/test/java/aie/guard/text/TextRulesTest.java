@@ -99,4 +99,78 @@ class TextRulesTest {
                 "adapters/store-postgres/src/main/java/C.java", "core/src/main/java/A.java",
                 "core/src/main/resources/db/migration/tenancy/V1__a.sql", "http/src/main/java/B.java");
     }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"cn", "jp", "us", "CN", "Jp", "US"})
+    void aRegionCodeAsAStringIsFound(String code) {
+        assertThat(TextRules.region(string(code), null)).contains("region code \"" + code + "\"");
+    }
+
+    /** Only the whole string counts, and "eu" is the end user ID prefix, so these are fine. */
+    @ParameterizedTest
+    @ValueSource(strings = {"eu", "jp1", "usa", "cn-north", "us-east-1", "jpy", "status", " jp"})
+    void aStringThatOnlyHoldsARegionCodeIsNot(String text) {
+        assertThat(TextRules.region(string(text), null)).isEmpty();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"CHINA", "PRC", "TAIWAN", "JAPAN", "KOREA", "US", "UK", "CANADA", "CANADA_FRENCH", "FRANCE", "GERMANY", "ITALY"})
+    void aCountryConstantOfLocaleIsFound(String constant) {
+        assertThat(TextRules.region(identifier(constant), identifier("Locale"))).contains("country constant Locale." + constant);
+    }
+
+    /** Language constants name no region, and a country name is only Locale's when it follows Locale. */
+    @Test
+    void languageConstantsAndOtherNamesAreNot() {
+        assertThat(TextRules.region(identifier("JAPANESE"), identifier("Locale"))).isEmpty();
+        assertThat(TextRules.region(identifier("ROOT"), identifier("Locale"))).isEmpty();
+        assertThat(TextRules.region(identifier("JAPAN"), identifier("Holidays"))).isEmpty();
+        assertThat(TextRules.region(identifier("JAPAN"), null)).isEmpty();
+        assertThat(TextRules.region(string("JAPAN"), identifier("Locale"))).isEmpty();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"region", "getRegion", "REGION_PACK", "regionCode", "Regional", "byRegion"})
+    void regionAsAWordInANameIsFound(String name) {
+        assertThat(TextRules.region(identifier(name), null)).contains("region in the name " + name);
+    }
+
+    @Test
+    void regionAsAWordInATextIsFound() {
+        assertThat(TextRules.region(string("engine.region"), null)).contains("region in the text engine.region");
+    }
+
+    /** Region must start a word, so these only contain its letters. */
+    @ParameterizedTest
+    @ValueSource(strings = {"foreignKey", "legion", "subregions", "xregion"})
+    void aWordThatOnlyContainsRegionIsNot(String name) {
+        assertThat(TextRules.region(identifier(name), null)).isEmpty();
+    }
+
+    @Test
+    void aRegionInMainCodeIsAViolation() throws IOException {
+        write("core/src/main/java/aie/core/Route.java", """
+                class Route {
+                    String code = "jp";
+                    java.util.Locale where = java.util.Locale.JAPAN;
+                    String region;
+                }
+                """);
+        write("core/src/main/resources/db/migration/tenancy/V1__a.sql", "-- region is fine here\nCREATE TABLE t (region text, c text DEFAULT 'cn');\n");
+
+        assertThat(TextRules.violations(engine)).containsExactly(
+                "A-5: core/src/main/java/aie/core/Route.java:2: region code \"jp\"",
+                "A-5: core/src/main/java/aie/core/Route.java:3: country constant Locale.JAPAN",
+                "A-5: core/src/main/java/aie/core/Route.java:4: region in the name region",
+                "A-5: core/src/main/resources/db/migration/tenancy/V1__a.sql:2: region in the name region",
+                "A-5: core/src/main/resources/db/migration/tenancy/V1__a.sql:2: region code \"cn\"");
+    }
+
+    /** Unlike model names, a region in an adapter is still a region in the code. */
+    @Test
+    void anAdapterMayNotBranchOnARegionEither() throws IOException {
+        write("adapters/openai/src/main/java/aie/adapters/openai/Pick.java", "class Pick { String code = \"us\"; }");
+
+        assertThat(TextRules.violations(engine)).containsExactly("A-5: adapters/openai/src/main/java/aie/adapters/openai/Pick.java:1: region code \"us\"");
+    }
 }
