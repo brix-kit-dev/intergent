@@ -303,4 +303,94 @@ class TextRulesTest {
 
         assertThat(TextRules.violations(engine)).isEmpty();
     }
+
+    private static final String SWITCH = "core/src/main/java/aie/core/tenancy/internal/Switch.java";
+    private static final String SWITCH_SQL = TENANCY + "V2__switch.sql";
+
+    /** Each way a module's Java can write the tenant: SQL in a string or a text block, or the name kept for later. */
+    @Test
+    void javaThatWritesTheTenantIsAViolation() throws IOException {
+        write(SWITCH, """
+                class Switch {
+                    String config = "SELECT set_config('app.tenant_id', ?, true)";
+                    String block = \"""
+                            UPDATE tenancy_notes SET body = ?;
+                            SET LOCAL app.tenant_id = ?
+                            \""";
+                    String reset = "reset App.Tenant_Id";
+                    String name = "App.Tenant_Id";
+                    // set_config('app.tenant_id', ?, true) in a comment is fine
+                }
+                """);
+
+        assertThat(TextRules.violations(engine)).containsExactly(
+                "A-13: " + SWITCH + ":2: uses set_config, which can write any setting",
+                "A-13: " + SWITCH + ":2: names app.tenant_id outside current_setting",
+                "A-13: " + SWITCH + ":5: writes app.tenant_id with SET",
+                "A-13: " + SWITCH + ":7: writes app.tenant_id with reset",
+                "A-13: " + SWITCH + ":8: names app.tenant_id outside current_setting");
+    }
+
+    /** Each way a migration can write the tenant, also from SQL that a function runs as a string. */
+    @Test
+    void aMigrationThatWritesTheTenantIsAViolation() throws IOException {
+        write(SWITCH_SQL, """
+                -- SET app.tenant_id in a comment is fine
+                CREATE FUNCTION tenancy_switch(wanted text) RETURNS void LANGUAGE plpgsql
+                    SET app.tenant_id = 'ten_x'
+                AS $$
+                BEGIN
+                    PERFORM SET_CONFIG('App.Tenant_Id', wanted, true);
+                    EXECUTE 'SET "app.tenant_id" = ' || quote_literal(wanted);
+                    EXECUTE 'SELECT set_config(''app.tenant_id'', $1, true)' USING wanted;
+                END
+                $$;
+                ALTER ROLE engine_app SET app.tenant_id TO 'ten_x';
+                SET SESSION "app"."tenant_id" TO DEFAULT;
+                """);
+
+        assertThat(TextRules.violations(engine)).containsExactly(
+                "A-13: " + SWITCH_SQL + ":3: writes app.tenant_id with SET",
+                "A-13: " + SWITCH_SQL + ":6: uses SET_CONFIG, which can write any setting",
+                "A-13: " + SWITCH_SQL + ":6: names app.tenant_id outside current_setting",
+                "A-13: " + SWITCH_SQL + ":7: writes app.tenant_id with SET",
+                "A-13: " + SWITCH_SQL + ":8: uses set_config, which can write any setting",
+                "A-13: " + SWITCH_SQL + ":8: names app.tenant_id outside current_setting",
+                "A-13: " + SWITCH_SQL + ":11: writes app.tenant_id with SET",
+                "A-13: " + SWITCH_SQL + ":12: writes app.tenant_id with SET");
+    }
+
+    /** Reading the tenant is fine, and so is a column tenant_id of a table that the SQL calls app. */
+    @Test
+    void readingTheTenantIsFine() throws IOException {
+        write(TENANCY + "V1__notes.sql", """
+                CREATE TABLE tenancy_notes (tenant_id text NOT NULL DEFAULT current_setting('app.tenant_id', true));
+                CREATE POLICY tenant_isolation ON tenancy_notes
+                    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), ''))
+                    WITH CHECK (tenant_id = NULLIF(pg_catalog.current_setting('APP.TENANT_ID', true), ''));
+                CREATE FUNCTION tenancy_f() RETURNS void LANGUAGE sql SET search_path = engine, pg_temp AS $$ SELECT 1 $$;
+                """);
+        write("core/src/main/java/aie/core/tenancy/internal/Notes.java", """
+                class Notes {
+                    String mine = "SELECT current_setting('app.tenant_id')";
+                    String alias = "SELECT app.application_id FROM tenancy_applications app WHERE app.tenant_id = ?";
+                    String update = "UPDATE tenancy_applications SET tenant_id = ?";
+                }
+                """);
+
+        assertThat(TextRules.violations(engine)).isEmpty();
+    }
+
+    /** The database adapter writes the tenant as each transaction starts; no other adapter or entry point may. */
+    @Test
+    void onlyTheDatabaseAdapterWritesTheTenant() throws IOException {
+        write("adapters/store-postgres/src/main/java/aie/adapters/storepg/PgDatabase.java",
+                "class PgDatabase { String set = \"SELECT set_config('app.tenant_id', ?, true)\"; }");
+        write("adapters/openai/src/main/java/aie/adapters/openai/Calls.java", "class Calls { String set = \"SET LOCAL app.tenant_id = ?\"; }");
+        write("app/src/main/java/aie/app/Boot.java", "class Boot { String set = \"RESET app.tenant_id\"; }");
+
+        assertThat(TextRules.violations(engine)).containsExactly(
+                "A-13: adapters/openai/src/main/java/aie/adapters/openai/Calls.java:1: writes app.tenant_id with SET",
+                "A-13: app/src/main/java/aie/app/Boot.java:1: writes app.tenant_id with RESET");
+    }
 }

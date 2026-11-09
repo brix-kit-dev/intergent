@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.IOException;
 import java.net.URISyntaxException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import org.junit.jupiter.api.BeforeAll;
@@ -36,5 +37,14 @@ class EngineTextTest {
                 .anyMatch(path -> path.startsWith("adapters/store-postgres/src/main/java/"))
                 .anyMatch(path -> path.startsWith("core/src/main/resources/db/migration/tenancy/") && path.endsWith(".sql"))
                 .noneMatch(path -> path.startsWith("guard/"));
+    }
+
+    /** A-13 leaves out the database adapter because the tenant is written there, which the scan would find otherwise. */
+    @Test
+    void theDatabaseAdapterIsWhereTheTenantIsWritten() throws IOException {
+        String path = TextRules.DATABASE_ADAPTER + "src/main/java/aie/adapters/storepg/PgDatabase.java";
+        List<SourceText.Token> tokens = SourceText.java(Files.readString(engine.resolve(path)));
+
+        assertThat(TextRules.tenantContext(path, tokens)).anyMatch(found -> found.endsWith(": uses set_config, which can write any setting"));
     }
 }

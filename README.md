@@ -306,14 +306,16 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 | `A-4` 表 | 模块的迁移新建的表、视图、序列、函数、索引、类型不带模块前缀（如 `tenancy_`）；模块的 SQL 碰到别的模块的东西，包括迁移里的外键和函数体，以及模块 Java 代码里的 SQL 字符串。跨模块只能走对方的 `api` 包 |
 | `A-5` | 正式代码里按地区判断：字符串正好是 `cn`、`jp`、`us`；`Locale` 里代表国家的常量，比如 `Locale.JAPAN`；名字或字符串里以 `region` 开头的词，比如 `getRegion`、`REGION_PACK`。地区之间的差别应当放在区域包里 |
 | `A-6` | 适配器以外的正式代码里出现宿主或行业的概念：宿主名 `brix`，以及 `cart`、`checkout`、`sku`、`invoice`、`shipment`、`booking`、`reservation`、`hotel`、`patient`、`student`、`loan` 这些只属于某个行业的词。宿主的世界只能作为数据进来，比如会话的上下文 |
+| `A-13` 租户 | 数据库适配器以外的正式代码写 `app.tenant_id`：用 `SET`、`RESET` 改它，包括函数和角色上的 `SET`；用 `set_config`，它能按运行时才知道的名字改任何设置；把这个名字当字符串用在 `current_setting` 以外的地方。租户只由适配器在事务开始时写入（蓝图 5.5），在租户事务里改它就换成了别的租户 |
 
 - **读什么：** 引擎每个模块 `src/main/java` 下的 Java 和 `src/main/resources` 下的 SQL，只看名字和字符串。注释、测试、文档、配置文件和对外契约都不读，所以注释里可以举例。守卫自己也不读，因为名单就写在它里面。
 - **模型名怎么认：** 按常见模型家族的开头认，不分大小写：`gpt-`、`chatgpt`、`o1-`/`o3-`/`o4-`、`claude-`、`gemini-`、`gemma`、`llama`、`mistral`、`mixtral`、`codestral`、`qwen`、`deepseek`、`command-r`、`text-embedding-`。家族名必须在词首，所以 `ollama` 不算；驼峰写法的名字逐个词看，所以 `QwenClient` 也算。
 - **地区怎么认：** 地区代码不分大小写，只认整个字符串，所以 `jp1`、`us-east-1` 不算。获批的名单里原本还有 `"eu"`，但它正是终端用户号的前缀（`eu_...`），所以拿掉了；真要按欧洲判断，多半要写到 `region`，仍会被抓住。`Locale` 的语言常量（比如 `JAPANESE`）不算。`A-5` 连适配器也查；以后做区域包时，只给加载区域包的地方开例外。
 - **宿主和行业词怎么认：** 不分大小写，复数也算，但必须是完整的词，所以 `cartridge` 不算 `cart`、`Brixton` 不算 `brix`。`order` 故意不放进名单，因为 Spring 的写法和普通英语里到处都是。`A-6` 和 `A-3` 一样不查适配器，因为对接外部系统的适配器可以用那个系统的词。
 - **模块和前缀怎么认：** 模块就是迁移所在的文件夹名，或者 `aie.core`、`aie.modules` 下面的包名，比如 `tenancy`。前缀就是“模块名加下划线”，所以以别的模块名加下划线开头的名字都算那个模块的。策略和触发器的名字只在各自的表里有效，不要求前缀。只查模块自己的迁移和代码；模块以外的代码（比如启动入口）不算跨模块。Java 里的名字是代码不是 SQL，只看字符串。现在只有 `tenancy` 一个模块，跨模块的那半条用两个模块的样例来测。
-- **报什么：** 每处一行，写明文件、行号和认出的内容，比如 `A-3: core/src/main/java/aie/core/Pick.java:2: model name gpt-4o`、`A-5: core/src/main/java/aie/core/Route.java:3: country constant Locale.JAPAN`、`A-4: core/src/main/resources/db/migration/tenancy/V2__b.sql:1: reaches events_outbox of module events`。
-- **测试：** `TextRulesTest` 在临时目录里摆出样例文件，逐条看算不算；`EngineTextTest` 在真实的引擎上跑，并确认扫描确实读到了各个模块和迁移脚本，不会因为什么都没读而通过。
+- **租户怎么认：** 只许读，不许写。`current_setting('app.tenant_id', true)` 可以，策略就是这样读的；`FROM tenancy_applications app WHERE app.tenant_id = ?` 里的 `app.tenant_id` 是表的列，也不算。Java 的字符串当 SQL 读，SQL 里的字符串也当 SQL 读（两个单引号还原成一个），因为 `EXECUTE` 会执行它。`pg_settings` 视图里没有 `app.tenant_id` 这种自定义设置，改它改不到租户，所以不算。只有 `adapters/store-postgres` 例外，以后加别的数据库适配器时也要给它开例外。拼字符串、换写法存心绕过的，扫描抓不全，要靠代码审查。
+- **报什么：** 每处一行，写明文件、行号和认出的内容，比如 `A-3: core/src/main/java/aie/core/Pick.java:2: model name gpt-4o`、`A-5: core/src/main/java/aie/core/Route.java:3: country constant Locale.JAPAN`、`A-4: core/src/main/resources/db/migration/tenancy/V2__b.sql:1: reaches events_outbox of module events`、`A-13: core/src/main/java/aie/core/tenancy/internal/Switch.java:5: writes app.tenant_id with SET`。
+- **测试：** `TextRulesTest` 在临时目录里摆出样例文件，逐条看算不算；`EngineTextTest` 在真实的引擎上跑，并确认扫描确实读到了各个模块和迁移脚本，不会因为什么都没读而通过；它还确认数据库适配器里真有写租户的地方，所以 `A-13` 的例外指的是对的文件夹。
 
 ## 对外契约
 

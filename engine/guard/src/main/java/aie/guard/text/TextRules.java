@@ -18,8 +18,9 @@ import java.util.stream.Stream;
  * The red lines a class graph cannot see, checked on the text of the engine's main sources (blueprint 16.1): every
  * Java file under {@code src/main/java} and every SQL file under {@code src/main/resources}, in every module but the
  * guard, which names what it forbids. Only identifiers and string literals count; comments, tests and docs are not
- * read. A-3 and A-6 leave adapters out, A-5 reads them too, and A-4's table rules read a module's own migrations and
- * code. The owner approved the scope and the lists on 2026-11-09, and the lists grow as models and needs do.
+ * read. A-3 and A-6 leave adapters out, A-5 reads them too, A-4's table rules read a module's own migrations and code,
+ * and A-13 leaves out the database adapter alone. The owner approved the scope and the lists on 2026-11-09, and the
+ * lists grow as models and needs do.
  */
 public final class TextRules {
 
@@ -67,6 +68,20 @@ public final class TextRules {
     private static final Pattern MODULE_CODE = Pattern.compile(".*/src/main/java/aie/(?:core|modules)/([a-z0-9]+)/.+\\.java");
     private static final Pattern SQL_WORD = Pattern.compile("[A-Za-z0-9_]+");
 
+    /**
+     * A-13: the tenant goes into a transaction from the database adapter alone, as the transaction starts (blueprint
+     * 5.5 and 7.2). Other code may read it with current_setting, as the policies do, but SQL that wrote it inside a
+     * tenant transaction would switch tenant.
+     */
+    static final String TENANT_SETTING = "app.tenant_id";
+    /**
+     * A-13: set_config writes a setting whose name may only be known at run time, so only the adapter may use it. An
+     * UPDATE of pg_settings cannot reach app.tenant_id, because PostgreSQL leaves custom settings out of that view.
+     */
+    static final String SETTING_WRITER = "set_config";
+    /** The adapter behind DatabasePort, which writes the tenant. A second database adapter would join it here. */
+    static final String DATABASE_ADAPTER = "adapters/store-postgres/";
+
     /** An object a migration creates under a name of its own. */
     record Created(String kind, String name, int line) {
     }
@@ -93,6 +108,9 @@ public final class TextRules {
                     hostWord(token).ifPresent(found -> problems.add("A-6: " + where + found));
                 }
                 region(token, i == 0 ? null : tokens.get(i - 1)).ifPresent(found -> problems.add("A-5: " + where + found));
+            }
+            if (!path.startsWith(DATABASE_ADAPTER)) {
+                problems.addAll(tenantContext(path, tokens));
             }
         }
         return problems;
@@ -220,6 +238,63 @@ public final class TextRules {
 
     private static boolean isWord(List<Token> tokens, int at, String word) {
         return at < tokens.size() && tokens.get(at).kind() == SourceText.Kind.IDENTIFIER && tokens.get(at).text().equalsIgnoreCase(word);
+    }
+
+    /**
+     * A-13 for one file outside the database adapter: SQL that writes app.tenant_id, or could. A Java string is read
+     * as SQL, and a Java string that is just the name counts too, since code only needs it to build such SQL.
+     */
+    static List<String> tenantContext(String path, List<Token> tokens) {
+        List<String> problems = new ArrayList<>();
+        if (path.endsWith(".sql")) {
+            settingWrites(path, tokens, 0, problems);
+            return problems;
+        }
+        for (Token token : tokens) {
+            if (token.kind() != SourceText.Kind.STRING) {
+                continue;
+            }
+            if (token.text().equalsIgnoreCase(TENANT_SETTING)) {
+                problems.add("A-13: " + path + ":" + token.line() + ": names " + TENANT_SETTING + " outside current_setting");
+            }
+            settingWrites(path, SourceText.sql(token.text()), token.line() - 1, problems);
+        }
+        return problems;
+    }
+
+    /**
+     * Writes of the tenant in SQL whose first line is line {@code offset + 1} of the file: SET or RESET of
+     * app.tenant_id, as a statement or in the SET of a function or a role; set_config; and the name as a string
+     * anywhere but in current_setting. A string inside the SQL is read as SQL too, with its doubled quotes made
+     * single, since it may be a statement that EXECUTE runs.
+     */
+    private static void settingWrites(String path, List<Token> tokens, int offset, List<String> problems) {
+        for (int i = 0; i < tokens.size(); i++) {
+            Token token = tokens.get(i);
+            int line = offset + token.line();
+            String where = "A-13: " + path + ":" + line + ": ";
+            if (isWord(tokens, i, SETTING_WRITER)) {
+                problems.add(where + "uses " + token.text() + ", which can write any setting");
+            } else if (token.kind() == SourceText.Kind.STRING && token.text().equalsIgnoreCase(TENANT_SETTING)
+                    && !(i > 0 && isWord(tokens, i - 1, "current_setting"))) {
+                problems.add(where + "names " + TENANT_SETTING + " outside current_setting");
+            } else if ((isWord(tokens, i, "SET") || isWord(tokens, i, "RESET")) && namesTenantSetting(tokens, afterScope(tokens, i + 1))) {
+                problems.add(where + "writes " + TENANT_SETTING + " with " + token.text());
+            }
+            if (token.kind() == SourceText.Kind.STRING) {
+                settingWrites(path, SourceText.sql(token.text().replace("''", "'")), line - 1, problems);
+            }
+        }
+    }
+
+    /** Past the LOCAL or SESSION after a SET, when there is one. */
+    private static int afterScope(List<Token> tokens, int at) {
+        return isWord(tokens, at, "LOCAL") || isWord(tokens, at, "SESSION") ? at + 1 : at;
+    }
+
+    /** Whether app.tenant_id starts at this token: as two names, each perhaps quoted, or as one quoted name. */
+    private static boolean namesTenantSetting(List<Token> tokens, int at) {
+        return isWord(tokens, at, "app") && isWord(tokens, at + 1, "tenant_id") || isWord(tokens, at, TENANT_SETTING);
     }
 
     /** The module a file belongs to: its migration folder, or its package under aie.core or aie.modules. */
