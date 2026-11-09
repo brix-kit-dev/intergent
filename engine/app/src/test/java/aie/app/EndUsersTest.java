@@ -154,4 +154,59 @@ class EndUsersTest {
                 .isInstanceOf(DatabaseException.class);
         assertThat(rows()).isEmpty();
     }
+    /** Every end user as its ID, tenant, application and whether it lacks a host ID, oldest first. */
+    private static List<String> allRows() throws SQLException {
+        return TestDatabase.firstColumn(DATABASE, """
+                SELECT end_user_id || ' ' || tenant_id || ' ' || application_id || ' ' || (external_id IS NULL)::text
+                FROM engine.tenancy_end_users ORDER BY created_at, end_user_id""");
+    }
+
+    /** One visitor's sessions cannot be linked, because each anonymous session is a new end user without a host ID. */
+    @Test
+    void eachAnonymousSessionIsANewEndUserWithoutAHostId() throws SQLException {
+        Owner caller = newApplication();
+
+        String first = endUsers.anonymous(caller);
+        String second = endUsers.anonymous(caller);
+
+        assertThat(first).matches("eu_[0-9A-HJKMNP-TV-Z]{26}");
+        assertThat(second).isNotEqualTo(first);
+        assertThat(allRows()).containsExactlyInAnyOrder(
+                first + " " + caller.tenantId() + " " + caller.applicationId() + " true",
+                second + " " + caller.tenantId() + " " + caller.applicationId() + " true");
+    }
+
+    /** The lookup by the host's ID compares it with the column, so it never lands on an anonymous end user. */
+    @Test
+    void theHostsIdNeverFindsAnAnonymousEndUser() throws SQLException {
+        Owner caller = newApplication();
+        String anonymous = endUsers.anonymous(caller);
+
+        String known = endUsers.resolve(caller, "user-42");
+
+        assertThat(known).isNotEqualTo(anonymous);
+        assertThat(endUsers.resolve(caller, "user-42")).isEqualTo(known);
+        assertThat(allRows()).hasSize(2);
+    }
+
+    /** Without an ID, resolve would make an anonymous end user and then fail to find it, so it refuses first. */
+    @Test
+    void resolvingNeedsTheHostsId() throws SQLException {
+        Owner caller = newApplication();
+
+        assertThatThrownBy(() -> endUsers.resolve(caller, null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("An end user found by the host's ID needs the ID");
+        assertThat(allRows()).isEmpty();
+    }
+
+    @Test
+    void anAnonymousEndUserBelongsToTheCallersTenantOnly() throws SQLException {
+        Owner mine = newApplication();
+        Owner theirs = newApplication();
+
+        assertThatThrownBy(() -> endUsers.anonymous(new Owner("key_unused", mine.tenantId(), theirs.applicationId())))
+                .isInstanceOf(DatabaseException.class);
+        assertThat(allRows()).isEmpty();
+    }
 }

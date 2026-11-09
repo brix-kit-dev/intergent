@@ -11,6 +11,14 @@ public interface EndUsers {
     /**
      * The end user behind the host's ID in the caller's application, made the first time it is seen. The same ID
      * always gives the same end user, also when two requests bring it at the same moment.
+     *
+     * @throws IllegalArgumentException without an ID, because only {@link #anonymous} makes end users without one
      */
     String resolve(Owner caller, String externalId);
+
+    /**
+     * A new end user of the caller's application for one anonymous session (blueprint 6.5). It has no host ID, so it is
+     * never found again, and two sessions of one visitor are two end users.
+     */
+    String anonymous(Owner caller);
 }

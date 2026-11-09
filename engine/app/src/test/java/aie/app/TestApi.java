@@ -117,7 +117,10 @@ final class TestApi {
         }
     }
 
-    /** Gives each host ID of each application an end user of its own, and remembers every call. */
+    /**
+     * Gives each host ID of each application, and each anonymous session, an end user of its own, and remembers every
+     * call.
+     */
     static final class StandInEndUsers implements EndUsers {
 
         final List<String> calls = new CopyOnWriteArrayList<>();
@@ -129,6 +132,12 @@ final class TestApi {
             String application = caller.tenantId() + "/" + caller.applicationId();
             calls.add(application + " resolves " + externalId);
             return ids.computeIfAbsent(application + " " + externalId, unused -> "eu_stand" + made.incrementAndGet());
+        }
+
+        @Override
+        public String anonymous(Owner caller) {
+            calls.add(caller.tenantId() + "/" + caller.applicationId() + " makes an anonymous end user");
+            return "eu_stand" + made.incrementAndGet();
         }
     }
 
