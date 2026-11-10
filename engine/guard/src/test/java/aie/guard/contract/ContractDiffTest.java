@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -205,6 +206,64 @@ class ContractDiffTest {
     @Test
     void aTightenedMapValueIsBreaking() {
         assertThat(changes("maxLength: 100", "maxLength: 50")).singleElement().asString().contains("A-7", "tightened maxLength");
+    }
+
+    private static final String NOTES = "        notes:\n          type: object\n";
+
+    /** The sample's notes map with these rules for its key names, one rule per line. */
+    private static String notesWithKeys(String rules) {
+        return NOTES + "          propertyNames:\n" + rules.lines().map(rule -> "            " + rule + "\n").collect(Collectors.joining());
+    }
+
+    /** The sample with the notes map as {@code from} is the baseline; the sample with it as {@code to} is current. */
+    private static List<String> notes(String from, String to) {
+        return ContractDiff.breakingChanges(Contract.parse(legal.replace(NOTES, from)), Contract.parse(legal.replace(NOTES, to)));
+    }
+
+    @Test
+    void aTightenedKeyNameLengthIsBreaking() {
+        assertThat(notes(notesWithKeys("maxLength: 40"), notesWithKeys("maxLength: 20")))
+                .singleElement().asString().contains("A-7", "body.notes property names tightened maxLength");
+    }
+
+    @Test
+    void aNewKeyNameRuleIsBreaking() {
+        assertThat(changes(NOTES, notesWithKeys("maxLength: 40")))
+                .singleElement().asString().contains("A-7", "body.notes property names tightened maxLength");
+    }
+
+    @Test
+    void aRaisedKeyNameMinimumIsBreaking() {
+        assertThat(notes(notesWithKeys("minLength: 1"), notesWithKeys("minLength: 2")))
+                .singleElement().asString().contains("A-7", "body.notes property names tightened minLength");
+    }
+
+    @Test
+    void aChangedKeyNamePatternIsBreaking() {
+        assertThat(notes(notesWithKeys("pattern: \"^[a-z_]+$\""), notesWithKeys("pattern: \"^[a-z]+$\"")))
+                .singleElement().asString().contains("A-7", "body.notes property names changed its pattern");
+    }
+
+    @Test
+    void aClosedListOfKeyNamesIsBreaking() {
+        assertThat(changes(NOTES, notesWithKeys("enum: [order_id, plan]")))
+                .singleElement().asString().contains("A-7", "body.notes property names closed its list of values");
+    }
+
+    @Test
+    void aWiderOrDroppedKeyNameRuleIsNotBreaking() {
+        assertThat(notes(notesWithKeys("maxLength: 40"), notesWithKeys("maxLength: 80"))).isEmpty();
+        assertThat(notes(notesWithKeys("maxLength: 40"), NOTES)).isEmpty();
+    }
+
+    @Test
+    void aTighterKeyNameRuleInAResponseIsNotBreaking() {
+        String token = "        token:\n          type: string\n";
+        String meta = token + "        meta:\n          type: object\n          additionalProperties:\n            type: string\n";
+        String before = legal.replace(token, meta);
+        String after = legal.replace(token, meta + "          propertyNames:\n            maxLength: 10\n");
+
+        assertThat(ContractDiff.breakingChanges(Contract.parse(before), Contract.parse(after))).isEmpty();
     }
 
     @Test

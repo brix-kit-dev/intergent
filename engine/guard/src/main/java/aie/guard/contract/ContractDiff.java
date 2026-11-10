@@ -165,6 +165,10 @@ public final class ContractDiff {
         if (old.get("additionalProperties") instanceof Map<?, ?> && now.get("additionalProperties") instanceof Map<?, ?>) {
             compareSchema(where + "{}", map(old.get("additionalProperties")), map(now.get("additionalProperties")), direction);
         }
+        // A map's key names are checked like its values. No rule means any name, so a rule where there was none counts.
+        if (old.containsKey("propertyNames") || now.containsKey("propertyNames")) {
+            compareSchema(where + " property names", map(old.get("propertyNames")), map(now.get("propertyNames")), direction);
+        }
     }
 
     private void compareTypes(String where, Map<String, Object> old, Map<String, Object> now, Direction direction) {

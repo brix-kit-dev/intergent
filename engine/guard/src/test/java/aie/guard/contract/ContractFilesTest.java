@@ -34,6 +34,19 @@ class ContractFilesTest {
         assertThat(ContractDiff.breakingChanges(contracts.resolve("baseline.yaml"), contracts.resolve("openapi.yaml"))).isEmpty();
     }
 
+    /** Code point 23: the key names of a session's context were the one request limit A-7 did not compare. */
+    @Test
+    void aTighterContextKeyNameBreaksTheBaseline() throws IOException {
+        String contract = Files.readString(contracts.resolve("openapi.yaml"));
+        String keys = "          propertyNames:\n            minLength: 1\n            maxLength: 40\n";
+        assertThat(contract).containsOnlyOnce(keys);
+
+        assertThat(ContractDiff.breakingChanges(
+                        Contract.read(contracts.resolve("baseline.yaml")),
+                        Contract.parse(contract.replace(keys, keys.replace("maxLength: 40", "maxLength: 20")))))
+                .containsExactly("A-7: POST /v1/sessions body.context property names tightened maxLength");
+    }
+
     @Test
     void theContractHasOperations() throws IOException {
         assertThat(Contract.read(contracts.resolve("openapi.yaml")).operations()).hasSizeGreaterThan(5);

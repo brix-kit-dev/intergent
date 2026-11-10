@@ -354,7 +354,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 
 这些规则写在 `engine/guard/src/main/java/aie/guard/contract`，测试样例是 `engine/guard/src/test/resources/contract/legal.yaml`。
 
-**破坏性差异：** 基线是 `contracts/baseline.yaml`。按蓝图 6.2，新增字段、可选参数、事件类型和枚举值都不算破坏性，删除、改名算。收紧请求的限制也算。含义变了从文件上看不出来，要靠评审。A-7 还不比对 `propertyNames`，所以上下文键名的限制再收紧时，它报不出来。
+**破坏性差异：** 基线是 `contracts/baseline.yaml`。按蓝图 6.2，新增字段、可选参数、事件类型和枚举值都不算破坏性，删除、改名算。收紧请求的限制也算，键名的限制（`propertyNames`，比如上下文的键名）也包括在内。含义变了从文件上看不出来，要靠评审。
 
 **更新基线：** 基线只有两种情况才改。发布新的日期版本时，把 `openapi.yaml` 复制过去，让新增的内容也受保护。确实要做破坏性变更时，先得到批准，再更新基线，而且只改获批的那几处。经批准改过两次：
 - 2026-11-08：`CreatedApiKey.key` 不再总是出现，因为重放新建密钥的回答时不带明文。
