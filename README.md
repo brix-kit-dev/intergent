@@ -516,6 +516,11 @@ const answer = await fetch("https://引擎地址/v1/anonymous-sessions", {
 
 500 不告诉调用方任何内部信息。原因写在日志里，用 `Request-Id` 能查到。`internal_error` 的来历见 [ADR-0001](docs/adr/0001-internal-error-code.md)。
 
+**一个失败只记一条：** 日志里一个失败只有一条 ERROR，带 `Request-Id` 和 trace ID。
+- 控制器里的失败由 `ProblemAdvice` 记。
+- 过滤器抛出的由 `RequestIdFilter` 接住，交给错误页，由 `ProblemErrorController` 记。要是让它冒到 Tomcat，Tomcat 会先记一条不带 ID 的，告警就会算两次。
+- 回答已经开始发送后才出错的，没法再变成 problem，照旧交给 Tomcat 处理。
+
 **ID：** `aie.core.Ids` 生成蓝图 6.2 的 ID：类型前缀、时间、随机数。时间在前，所以后生成的排在后面；随机部分让人猜不到相邻的 ID。
 
 ## CI 和依赖规则

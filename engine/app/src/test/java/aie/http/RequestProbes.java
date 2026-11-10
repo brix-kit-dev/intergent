@@ -57,6 +57,12 @@ public final class RequestProbes {
                 case "/test/send-error-500" -> ((HttpServletResponse) response).sendError(
                         HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "an internal message");
                 case "/test/filter-fails" -> throw new IllegalStateException("a failure inside a filter");
+                case "/test/filter-fails-checked" -> throw new ServletException("a checked failure inside a filter");
+                case "/test/filter-fails-late" -> {
+                    response.getWriter().write("partial");
+                    response.flushBuffer();
+                    throw new IllegalStateException("a failure after the answer started");
+                }
                 default -> chain.doFilter(request, response);
             }
         }

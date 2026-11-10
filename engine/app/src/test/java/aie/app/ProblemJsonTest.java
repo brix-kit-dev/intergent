@@ -36,6 +36,8 @@ class ProblemJsonTest {
     private static final String PROBLEM = "application/problem+json";
     private static final String AN_ENGINE_ID = "req_[0-9A-HJKMNP-TV-Z]{26}";
     private static final String CLOSE = "Connection: close\r\n";
+    private static final String TRACE = "4bf92f3577b34da6a3ce929d0e0e4736";
+    private static final String TRACEPARENT = "00-" + TRACE + "-00f067aa0ba902b7-01";
 
     private static ConfigurableApplicationContext context;
     private static int port;
@@ -100,7 +102,8 @@ class ProblemJsonTest {
                 arguments("sendError in a filter", request("/test/send-error"), 400, "invalid_request"),
                 arguments("a 500 from a filter", request("/test/send-error-500"), 500, "internal_error"),
                 arguments("a failure in a controller", request("/test/fail"), 500, "internal_error"),
-                arguments("a failure in a filter", request("/test/filter-fails"), 500, "internal_error"));
+                arguments("a failure in a filter", request("/test/filter-fails"), 500, "internal_error"),
+                arguments("a checked failure in a filter", request("/test/filter-fails-checked"), 500, "internal_error"));
     }
 
     @ParameterizedTest(name = "{0}")
@@ -200,12 +203,28 @@ class ProblemJsonTest {
                 .hasSize(1);
     }
 
-    /** Tomcat logs what reaches it, without the Request-Id, so a failure in a controller must stop before that. */
-    @Test
-    void aControllerFailureIsLoggedOnlyOnce(CapturedOutput output) throws Exception {
-        get("/test/fail");
+    /**
+     * Tomcat logs what reaches it, without the Request-Id or the trace, so a failure must stop before that, in a filter as
+     * in a controller (code point 31). One line is left, and it carries both.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"/test/fail", "/test/filter-fails", "/test/filter-fails-checked"})
+    void aFailureIsLoggedOnlyOnce(String path, CapturedOutput output) throws Exception {
+        String id = requestId(send(request(path).header("traceparent", TRACEPARENT)));
 
         assertThat(output.getOut()).doesNotContain("Servlet.service()");
+        assertThat(output.getOut().lines().filter(line -> line.contains(" ERROR ")))
+                .singleElement().asString().contains("[" + id + "] [" + TRACE + "]", "The request failed");
+    }
+
+    /** An answer that has started cannot become a problem, so Tomcat handles the failure as before, with its own cause. */
+    @Test
+    void aFailureAfterTheAnswerStartedKeepsItsCause(CapturedOutput output) throws Exception {
+        String response = raw(get("/test/filter-fails-late", "Host: x\r\n"));
+
+        assertThat(response).startsWith("HTTP/1.1 200").contains("partial");
+        assertThat(output.getOut()).contains("java.lang.IllegalStateException: a failure after the answer started")
+                .doesNotContain("Cannot call sendError()");
     }
 
     @Test
