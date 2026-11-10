@@ -91,6 +91,8 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_OWNER_PASSWO
 
 **新表：** 照 `V1__create_tenants.sql` 写，这是蓝图 5.6 的模板：行级安全、`FORCE`、租户策略、授权。有序列时序列也要授权给 `engine_app`。带 `tenant_id` 的表还要加一条样例行，见[租户隔离](#租户隔离)。
 
+**整数列：** 按取值范围选 `smallint`、`integer` 或 `bigint`，`Row.number` 都能读。别的类型一律报错，`numeric` 存的是整数也一样，因为下一行可能带小数；要读就在查询里转成 `bigint`。`V3__create_idempotency_keys.sql` 里“只能用 `bigint`”的注释已经过时，脚本执行过就不能改，所以留着。
+
 **系统表和系统函数：** 先写进名单 [SystemObjects.java](engine/app/src/test/java/aie/app/SystemObjects.java)，再照 [V1__templates.sql](engine/adapters/store-postgres/src/test/resources/migrations/templates/sample/V1__templates.sql) 写，这是蓝图 7.6 的模板。系统函数有四个容易错的地方：
 
 - **用 PL/pgSQL：** `migrate` 关了 `row_security`，`LANGUAGE sql` 的函数读 `FORCE` 表时建不起来。PL/pgSQL 建函数时不检查里面的 SQL，所以每个系统函数都要有调用它的测试。

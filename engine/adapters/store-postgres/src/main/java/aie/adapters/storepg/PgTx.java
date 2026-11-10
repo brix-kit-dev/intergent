@@ -5,11 +5,13 @@ import aie.ports.Row;
 import aie.ports.Tx;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Types;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Set;
 import java.util.function.Function;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -72,6 +74,12 @@ final class PgTx implements Tx, AutoCloseable {
 
     private record ResultRow(ResultSet result) implements Row {
 
+        /**
+         * The column types of smallint, integer and bigint, as the driver reports them. The type decides, not the
+         * value, so getLong cannot cut a fraction off or read text as a number.
+         */
+        private static final Set<Integer> WHOLE_NUMBERS = Set.of(Types.SMALLINT, Types.INTEGER, Types.BIGINT);
+
         @Override
         public String string(String column) {
             return read(() -> result.getString(column));
@@ -85,7 +93,14 @@ final class PgTx implements Tx, AutoCloseable {
 
         @Override
         public long number(String column) {
-            return required(column, read(() -> result.getObject(column, Long.class)));
+            return required(column, read(() -> {
+                int index = result.findColumn(column);
+                if (!WHOLE_NUMBERS.contains(result.getMetaData().getColumnType(index))) {
+                    throw new IllegalStateException("Column " + column + " is not smallint, integer or bigint");
+                }
+                long value = result.getLong(index);
+                return result.wasNull() ? null : value;
+            }));
         }
 
         @Override

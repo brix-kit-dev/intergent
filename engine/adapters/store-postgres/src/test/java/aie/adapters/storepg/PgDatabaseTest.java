@@ -27,6 +27,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
@@ -300,6 +301,31 @@ class PgDatabaseTest {
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("amount");
         assertThatThrownBy(() -> database.inTenantTx(TENANT_A, tx -> tx.query("SELECT done FROM notes", row -> row.flag("done"))))
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("done");
+    }
+
+    @ParameterizedTest
+    @CsvSource({"smallint, -32768, 32767", "integer, -2147483648, 2147483647", "bigint, -9223372036854775808, 9223372036854775807"})
+    void everyWholeNumberTypeReadsToItsLimits(String type, long lowest, long highest) {
+        List<Long> values = database.inSystemTx(tx -> tx.query(
+                "SELECT CAST(? AS " + type + ") AS lowest, CAST(? AS " + type + ") AS highest",
+                row -> List.of(row.number("lowest"), row.number("highest")), lowest, highest).get(0));
+
+        assertThat(values).containsExactly(lowest, highest);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"smallint", "integer", "bigint"})
+    void aNullOfAnyWholeNumberTypeFails(String type) {
+        assertThatThrownBy(() -> database.inSystemTx(tx -> tx.query("SELECT CAST(NULL AS " + type + ") AS n", row -> row.number("n"))))
+                .isInstanceOf(IllegalStateException.class).hasMessage("Column n is null");
+    }
+
+    /** A whole numeric fails too, and so does a null one: the type decides, so a later row cannot change the outcome. */
+    @ParameterizedTest
+    @ValueSource(strings = {"2::numeric", "1.5::numeric", "NULL::numeric", "1::real", "1::double precision", "'1'::text", "true"})
+    void aColumnOfAnyOtherTypeFailsInsteadOfBeingConverted(String value) {
+        assertThatThrownBy(() -> database.inSystemTx(tx -> tx.query("SELECT " + value + " AS n", row -> row.number("n"))))
+                .isInstanceOf(IllegalStateException.class).hasMessage("Column n is not smallint, integer or bigint");
     }
 
     @Test
