@@ -18,6 +18,9 @@ import java.util.Set;
  *
  * <p>This follows blueprint 6.2. New fields, optional parameters, event types and enum values are not breaking.
  * Removing or renaming is. A change of meaning leaves no trace in the file, so reviews have to catch that.
+ *
+ * <p>As in JSON Schema, a rule that is not written takes anything. So a rule written where there was none narrows what
+ * it covers: in a request that is breaking, in a response it is not.
  */
 public final class ContractDiff {
 
@@ -28,10 +31,41 @@ public final class ContractDiff {
         RESPONSE
     }
 
+    /**
+     * The rules that hold a schema for part of a value. Not written and {@code true} both take anything, and
+     * {@code false} takes nothing.
+     */
+    private enum Part {
+        ITEMS("items", "[]", "items"),
+        OTHER_PROPERTIES("additionalProperties", "{}", "other properties"),
+        KEY_NAMES("propertyNames", " property names", "any property");
+
+        private final String keyword;
+        /** Follows the value's name in a report. */
+        private final String label;
+        /** What the value no longer takes once the rule is {@code false}. */
+        private final String refused;
+
+        Part(String keyword, String label, String refused) {
+            this.keyword = keyword;
+            this.label = label;
+            this.refused = refused;
+        }
+    }
+
+    /** A schema with no rules, which takes anything. */
+    private static final Map<String, Object> ANYTHING = Map.of();
+    /** JSON Schema's types. A schema that names none takes them all. */
+    private static final Set<Object> ANY_TYPE = Set.of("null", "boolean", "object", "array", "number", "integer", "string");
+    /** A key name is always a string. */
+    private static final Map<String, Object> A_NAME = Map.of("type", "string");
+
     private final Contract baseline;
     private final Contract current;
     private final List<String> problems = new ArrayList<>();
     private final Set<String> visited = new HashSet<>();
+    /** The pairs of schemas being compared right now. */
+    private final Set<List<Object>> open = new HashSet<>();
 
     private ContractDiff(Contract baseline, Contract current) {
         this.baseline = baseline;
@@ -148,6 +182,12 @@ public final class ContractDiff {
         if (named && !visited.add(direction + " " + oldSchema.get("$ref") + " " + newSchema.get("$ref"))) {
             return;
         }
+        // Against a rule that is not written, a schema that refers to itself would go on for ever.
+        // So a pair that is still being compared ends the walk.
+        List<Object> pair = List.of(direction, oldSchema, newSchema);
+        if (!open.add(pair)) {
+            return;
+        }
         Map<String, Object> old = baseline.flatten(oldSchema);
         Map<String, Object> now = current.flatten(newSchema);
         compareTypes(where, old, now, direction);
@@ -159,16 +199,36 @@ public final class ContractDiff {
             compareLimits(where, old, now);
         }
         compareProperties(where, old, now, direction);
-        if (old.get("items") instanceof Map<?, ?> && now.get("items") instanceof Map<?, ?>) {
-            compareSchema(where + "[]", map(old.get("items")), map(now.get("items")), direction);
+        for (Part part : Part.values()) {
+            comparePart(where, part, old.get(part.keyword), now.get(part.keyword), direction);
         }
-        if (old.get("additionalProperties") instanceof Map<?, ?> && now.get("additionalProperties") instanceof Map<?, ?>) {
-            compareSchema(where + "{}", map(old.get("additionalProperties")), map(now.get("additionalProperties")), direction);
+        open.remove(pair);
+    }
+
+    private void comparePart(String where, Part part, Object oldRule, Object newRule, Direction direction) {
+        if (oldRule == null && newRule == null) {
+            return;
         }
-        // A map's key names are checked like its values. No rule means any name, so a rule where there was none counts.
-        if (old.containsKey("propertyNames") || now.containsKey("propertyNames")) {
-            compareSchema(where + " property names", map(old.get("propertyNames")), map(now.get("propertyNames")), direction);
+        boolean tookNothing = Boolean.FALSE.equals(oldRule);
+        if (tookNothing || Boolean.FALSE.equals(newRule)) {
+            // A request may only take more. Where a response sent nothing, a client had nothing to rely on.
+            if (direction == Direction.REQUEST && !tookNothing) {
+                report(where + " no longer takes " + part.refused);
+            }
+            return;
         }
+        Map<String, Object> old = rule(oldRule);
+        Map<String, Object> now = rule(newRule);
+        if (part == Part.KEY_NAMES) {
+            // A map's key names are checked like its values. A name rule without a type still means a string.
+            old = Map.of("allOf", List.of(A_NAME, old));
+            now = Map.of("allOf", List.of(A_NAME, now));
+        }
+        compareSchema(where + part.label, old, now, direction);
+    }
+
+    private static Map<String, Object> rule(Object rule) {
+        return rule == null || Boolean.TRUE.equals(rule) ? ANYTHING : map(rule);
     }
 
     private void compareTypes(String where, Map<String, Object> old, Map<String, Object> now, Direction direction) {
@@ -176,7 +236,7 @@ public final class ContractDiff {
         Set<Object> newTypes = types(now);
         boolean compatible = direction == Direction.REQUEST ? newTypes.containsAll(oldTypes) : oldTypes.containsAll(newTypes);
         if (!compatible) {
-            report(where + " changed type from " + oldTypes + " to " + newTypes);
+            report(where + " changed type from " + describe(oldTypes) + " to " + describe(newTypes));
         }
     }
 
@@ -235,7 +295,11 @@ public final class ContractDiff {
 
     private static Set<Object> types(Map<String, Object> schema) {
         Object type = schema.get("type");
-        return type instanceof List<?> ? new HashSet<>(list(type)) : type == null ? Set.of() : Set.of(type);
+        return type instanceof List<?> ? new HashSet<>(list(type)) : type == null ? ANY_TYPE : Set.of(type);
+    }
+
+    private static String describe(Set<Object> types) {
+        return types.equals(ANY_TYPE) ? "any" : types.toString();
     }
 
     private static String key(Map<String, Object> parameter) {

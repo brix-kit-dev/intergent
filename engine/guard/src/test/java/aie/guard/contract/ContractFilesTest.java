@@ -47,6 +47,19 @@ class ContractFilesTest {
                 .containsExactly("A-7: POST /v1/sessions body.context property names tightened maxLength");
     }
 
+    /** Code point 30: A-7 compared these rules only where both sides wrote one, so refusing other properties went unseen. */
+    @Test
+    void aSessionRequestThatTakesNoOtherPropertiesBreaksTheBaseline() throws IOException {
+        String contract = Files.readString(contracts.resolve("openapi.yaml"));
+        String request = "    CreateSessionRequest:\n      type: object\n";
+        assertThat(contract).containsOnlyOnce(request);
+
+        assertThat(ContractDiff.breakingChanges(
+                        Contract.read(contracts.resolve("baseline.yaml")),
+                        Contract.parse(contract.replace(request, request + "      additionalProperties: false\n"))))
+                .containsExactly("A-7: POST /v1/sessions body no longer takes other properties");
+    }
+
     @Test
     void theContractHasOperations() throws IOException {
         assertThat(Contract.read(contracts.resolve("openapi.yaml")).operations()).hasSizeGreaterThan(5);

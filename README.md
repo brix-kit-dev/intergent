@@ -356,6 +356,12 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 
 **破坏性差异：** 基线是 `contracts/baseline.yaml`。按蓝图 6.2，新增字段、可选参数、事件类型和枚举值都不算破坏性，删除、改名算。收紧请求的限制也算，键名的限制（`propertyNames`，比如上下文的键名）也包括在内。含义变了从文件上看不出来，要靠评审。
 
+**没写的规则：** 和 JSON Schema 一样，没写就是什么都收。没写 `type` 就是任何类型；没写 `items`、`additionalProperties`，或者写成 `true`，就是什么值都收；写成 `false` 就是什么都不收。所以：
+- 请求里原来没写的地方新写上规则，算收紧，比如对象加上 `additionalProperties: false`、数组加上 `items`。
+- 响应里去掉类型，或者去掉数组元素、其他属性的规则，算放宽，也报。
+- 响应里原来是 `false` 的地方放开，等于新增字段，不算。
+- 键名总是字符串，所以键名规则里写不写 `type: string` 都一样。
+
 **更新基线：** 基线只有两种情况才改。发布新的日期版本时，把 `openapi.yaml` 复制过去，让新增的内容也受保护。确实要做破坏性变更时，先得到批准，再更新基线，而且只改获批的那几处。经批准改过两次：
 - 2026-11-08：`CreatedApiKey.key` 不再总是出现，因为重放新建密钥的回答时不带明文。
 - 2026-11-09：`CreateSessionRequest` 的权限范围和上下文收紧了，具体大小见[开通租户](#开通租户)一节的“会话令牌”；`Session.token` 不再总是出现，因为重放时不带令牌。

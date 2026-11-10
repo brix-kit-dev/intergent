@@ -417,4 +417,153 @@ class ContractDiffTest {
         assertThat(legal).contains("$ref: \"#/components/schemas/Message\"");
         assertThat(ContractDiff.breakingChanges(Contract.parse(legal), Contract.parse(legal))).isEmpty();
     }
+
+    // Code point 30: a rule that is not written takes anything, so writing one where there was none is a change too.
+
+    private static final String REQUEST = "    CreateSessionRequest:\n      type: object\n";
+    private static final String RESPONSE = "    Session:\n      type: object\n";
+    private static final String TOKEN = "        token:\n          type: string\n";
+    private static final String NOTE_VALUES = "          additionalProperties:\n            type: string\n            maxLength: 100\n";
+    private static final String LABEL_ITEMS = "          maxItems: 10\n          items:\n            type: string\n";
+    private static final String NO_LABEL_ITEMS = "          maxItems: 10\n";
+
+    /** The sample with {@code from} after the session's token is the baseline; with {@code to} there, it is current. */
+    private static List<String> sessionFields(String from, String to) {
+        return ContractDiff.breakingChanges(Contract.parse(legal.replace(TOKEN, TOKEN + from)), Contract.parse(legal.replace(TOKEN, TOKEN + to)));
+    }
+
+    @Test
+    void aTypeWhereThereWasNoneIsBreakingInARequest() {
+        assertThat(reversed("            type: string\n            maxLength: 100\n", "            maxLength: 100\n"))
+                .containsExactly("A-7: POST /v1/sessions body.notes{} changed type from any to [string]");
+    }
+
+    @Test
+    void aRequestValueThatDropsItsTypeIsNotBreaking() {
+        assertThat(changes("            type: string\n            maxLength: 100\n", "            maxLength: 100\n")).isEmpty();
+    }
+
+    @Test
+    void aResponseValueThatDropsItsTypeIsBreaking() {
+        assertThat(changes(TOKEN, "        token: {}\n")).containsExactly("A-7: POST /v1/sessions 201.token changed type from [string] to any");
+    }
+
+    @Test
+    void aResponseValueThatGainsATypeIsNotBreaking() {
+        assertThat(reversed(TOKEN, "        token: {}\n")).isEmpty();
+    }
+
+    @Test
+    void aRuleForMapValuesWhereThereWasNoneIsBreaking() {
+        assertThat(reversed(NOTE_VALUES, "")).containsExactly(
+                "A-7: POST /v1/sessions body.notes{} changed type from any to [string]",
+                "A-7: POST /v1/sessions body.notes{} tightened maxLength");
+    }
+
+    @Test
+    void aDroppedRuleForMapValuesIsNotBreakingInARequest() {
+        assertThat(changes(NOTE_VALUES, "")).isEmpty();
+        assertThat(changes(NOTE_VALUES, "          additionalProperties: true\n")).isEmpty();
+    }
+
+    @Test
+    void aRequestObjectThatTakesNoOtherPropertiesIsBreaking() {
+        assertThat(changes(REQUEST, REQUEST + "      additionalProperties: false\n"))
+                .containsExactly("A-7: POST /v1/sessions body no longer takes other properties");
+        assertThat(changes(NOTE_VALUES, "          additionalProperties: false\n"))
+                .containsExactly("A-7: POST /v1/sessions body.notes no longer takes other properties");
+    }
+
+    @Test
+    void aRequestObjectThatTakesOtherPropertiesAgainIsNotBreaking() {
+        assertThat(reversed(REQUEST, REQUEST + "      additionalProperties: false\n")).isEmpty();
+        assertThat(reversed(NOTE_VALUES, "          additionalProperties: false\n")).isEmpty();
+    }
+
+    @Test
+    void aResponseObjectThatSendsNoOtherPropertiesIsNotBreaking() {
+        assertThat(changes(RESPONSE, RESPONSE + "      additionalProperties: false\n")).isEmpty();
+    }
+
+    /** Blueprint 6.2: new fields are not breaking, so a response that starts sending other properties is fine. */
+    @Test
+    void aResponseObjectThatSendsOtherPropertiesAgainIsNotBreaking() {
+        assertThat(reversed(RESPONSE, RESPONSE + "      additionalProperties: false\n")).isEmpty();
+    }
+
+    @Test
+    void aResponseMapWhoseValuesLoseTheirRuleIsBreaking() {
+        String map = "        meta:\n          type: object\n";
+        String values = "          additionalProperties:\n            type: string\n";
+
+        assertThat(sessionFields(map + values, map)).containsExactly("A-7: POST /v1/sessions 201.meta{} changed type from [string] to any");
+        assertThat(sessionFields(map, map + values)).isEmpty();
+    }
+
+    @Test
+    void aRuleForArrayItemsWhereThereWasNoneIsBreaking() {
+        assertThat(reversed(LABEL_ITEMS, NO_LABEL_ITEMS))
+                .containsExactly("A-7: POST /v1/sessions body.labels[] changed type from any to [string]");
+    }
+
+    @Test
+    void aDroppedRuleForArrayItemsIsNotBreakingInARequest() {
+        assertThat(changes(LABEL_ITEMS, NO_LABEL_ITEMS)).isEmpty();
+        assertThat(changes(LABEL_ITEMS, NO_LABEL_ITEMS + "          items: true\n")).isEmpty();
+    }
+
+    @Test
+    void aRequestArrayThatTakesNoItemsIsBreaking() {
+        assertThat(changes(LABEL_ITEMS, NO_LABEL_ITEMS + "          items: false\n"))
+                .containsExactly("A-7: POST /v1/sessions body.labels no longer takes items");
+        assertThat(reversed(LABEL_ITEMS, NO_LABEL_ITEMS + "          items: false\n")).isEmpty();
+    }
+
+    @Test
+    void aResponseArrayWhoseItemsLoseTheirRuleIsBreaking() {
+        String array = "        tags:\n          type: array\n";
+        String items = "          items:\n            type: string\n";
+
+        assertThat(sessionFields(array + items, array)).containsExactly("A-7: POST /v1/sessions 201.tags[] changed type from [string] to any");
+        assertThat(sessionFields(array, array + items)).isEmpty();
+    }
+
+    /** A key name is always a string, so saying so changes nothing. */
+    @Test
+    void aStringTypeOnKeyNamesChangesNothing() {
+        assertThat(notes(notesWithKeys("maxLength: 40"), notesWithKeys("type: string\nmaxLength: 40"))).isEmpty();
+        assertThat(notes(notesWithKeys("type: string\nmaxLength: 40"), notesWithKeys("maxLength: 40"))).isEmpty();
+        assertThat(changes(NOTES, notesWithKeys("type: string\nmaxLength: 40")))
+                .containsExactly("A-7: POST /v1/sessions body.notes property names tightened maxLength");
+    }
+
+    @Test
+    void keyNamesThatTakeNoNameAreBreakingInARequest() {
+        assertThat(changes(NOTES, NOTES + "          propertyNames: false\n"))
+                .containsExactly("A-7: POST /v1/sessions body.notes no longer takes any property");
+        assertThat(reversed(NOTES, NOTES + "          propertyNames: false\n")).isEmpty();
+    }
+
+    /** A pair counts as open only while it is compared, so the same change in two places is reported in both. */
+    @Test
+    void theSameChangeInTwoPlacesIsReportedInBoth() {
+        String twice = LABEL_ITEMS + "        aliases:\n          type: array\n          items:\n            type: string\n";
+        String tighter = twice.replace("            type: string\n", "            type: string\n            maxLength: 5\n");
+
+        assertThat(ContractDiff.breakingChanges(Contract.parse(legal.replace(LABEL_ITEMS, twice)), Contract.parse(legal.replace(LABEL_ITEMS, tighter))))
+                .containsExactly("A-7: POST /v1/sessions body.labels[] tightened maxLength", "A-7: POST /v1/sessions body.aliases[] tightened maxLength");
+    }
+
+    /** Comparing no rule with items that are the array itself would never end without a guard. */
+    @Test
+    void aRuleThatRefersToItselfAgainstNoRuleEnds() {
+        String nested = "    Nested:\n      type: array\n      items:\n        $ref: \"#/components/schemas/Nested\"\n";
+        String withNested = legal.replace(RESPONSE, nested + RESPONSE);
+        String none = withNested.replace(LABEL_ITEMS, NO_LABEL_ITEMS);
+        String itself = withNested.replace(LABEL_ITEMS, NO_LABEL_ITEMS + "          items:\n            $ref: \"#/components/schemas/Nested\"\n");
+
+        assertThat(ContractDiff.breakingChanges(Contract.parse(none), Contract.parse(itself)))
+                .containsExactly("A-7: POST /v1/sessions body.labels[] changed type from any to [array]");
+        assertThat(ContractDiff.breakingChanges(Contract.parse(itself), Contract.parse(none))).isEmpty();
+    }
 }
