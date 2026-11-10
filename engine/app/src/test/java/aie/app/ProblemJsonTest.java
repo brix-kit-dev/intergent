@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.boot.test.system.CapturedOutput;
@@ -132,8 +133,31 @@ class ProblemJsonTest {
     void brokenJsonGivesAwayNothingOfTheParser() throws Exception {
         String body = send(post("/test/body", "application/json", "{broken")).body();
 
-        assertThat(problem(body).getDetail()).isEqualTo("Failed to read request");
+        assertThat(problem(body).getDetail()).isEqualTo("The body is not valid JSON");
         assertThat(body).doesNotContain("broken", "jackson", "Unexpected", "line:");
+    }
+
+    @Test
+    void aMissingBodyIsNamed() throws Exception {
+        HttpResponse<String> response = send(post("/test/body", "application/json", ""));
+
+        assertProblem(response, 400, "invalid_request");
+        assertThat(problem(response.body()).getDetail()).isEqualTo("The request needs a JSON body");
+        assertThat(response.body()).doesNotContain("Required", "public", "aie.");
+    }
+
+    /** The probe reads a map of strings, whose keys the caller chose, so the detail leaves the key out. */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            []                      | The body must be a single JSON object
+            {"chosen_key":{"x":1}}  | each value in the body must be a string
+            """)
+    void aBodyOfTheWrongShapeSaysWhatItMustBe(String json, String detail) throws Exception {
+        HttpResponse<String> response = send(post("/test/body", "application/json", json));
+
+        assertProblem(response, 400, "invalid_request");
+        assertThat(problem(response.body()).getDetail()).isEqualTo(detail);
+        assertThat(response.body()).doesNotContain("chosen_key", "java.", "LinkedHashMap");
     }
 
     @Test

@@ -498,6 +498,8 @@ const answer = await fetch("https://引擎地址/v1/anonymous-sessions", {
 | Tomcat 自己拒绝：路径非法、请求行错误、缺 `Host`、请求头过大 | 400 | `invalid_request` |
 | 引擎内部出错 | 500 | `internal_error` |
 
+**读不了的请求体：** 正文不是合法的 JSON、没有正文，或者字段的类型不对、取值不在契约列出的范围里时，返回 400 `invalid_request`，`detail` 写明是哪个字段、应该是什么，比如 `identity_level must be one of: unverified, verified`、`scopes[1] must be a string`。它不重复调用方发来的值，也不转述解析器的原话，因为原话里有引擎内部的类名。键值表的键名是调用方自己起的，所以写成 `each value in context`。写在 `aie.http.UnreadableBodies`。
+
 错误在三个地方转换，这样无论在哪一层失败，格式都一样：
 
 | 在哪里失败 | 谁来转换 |

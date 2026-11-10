@@ -8,6 +8,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.ErrorResponse;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -32,6 +33,13 @@ class ProblemAdvice extends ResponseEntityExceptionHandler {
         // On a 404 Spring's detail only talks about static resources, which mean nothing to a caller.
         String detail = status.value() == HttpStatus.NOT_FOUND.value() ? null : detail(failure, body);
         return Problems.response(status.value(), detail, headers);
+    }
+
+    /** Spring's own detail here is only "Failed to read request", so this one says which field is wrong. */
+    @Override
+    protected @Nullable ResponseEntity<Object> handleHttpMessageNotReadable(
+            HttpMessageNotReadableException failure, HttpHeaders headers, HttpStatusCode status, WebRequest request) {
+        return Problems.response(status.value(), UnreadableBodies.detail(failure.getCause()), headers);
     }
 
     /** Spring writes these for the caller, so they say what is wrong with the request and nothing about the engine. */

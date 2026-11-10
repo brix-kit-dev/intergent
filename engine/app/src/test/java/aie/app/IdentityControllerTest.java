@@ -24,6 +24,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.context.ConfigurableApplicationContext;
 import tools.jackson.databind.json.JsonMapper;
@@ -286,8 +287,33 @@ class IdentityControllerTest {
     @ParameterizedTest
     @ValueSource(strings = {"anonymous", "admin", "VERIFIED"})
     void anotherIdentityLevelIsRefused(String level) throws Exception {
-        assertProblem(createSession("{\"external_user_id\":\"u1\",\"identity_level\":\"" + level + "\"}"), 400, "invalid_request");
-        assertThat(END_USERS.calls).isEmpty();
+        HttpResponse<String> response = createSession("{\"external_user_id\":\"u1\",\"identity_level\":\"" + level + "\"}");
+
+        assertRefused(response, "identity_level must be one of: unverified, verified");
+        assertThat(response.body()).doesNotContain(level, "aie.", "Enum");
+    }
+
+    /** The model cannot hold these, so Jackson refuses them before the checks; the detail still names the field. */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            {"external_user_id":{}}                       | external_user_id must be a string
+            {"external_user_id":"u1","scopes":"read"}     | scopes must be an array
+            {"external_user_id":"u1","scopes":["a",[]]}   | scopes[1] must be a string
+            {"external_user_id":"u1","context":"x"}       | context must be an object
+            {"external_user_id":"u1","context":{"k":[]}}  | each value in context must be a string
+            """)
+    void aSessionFieldOfTheWrongTypeIsNamed(String body, String detail) throws Exception {
+        assertRefused(createSession(body), detail);
+    }
+
+    @Test
+    void anExpiryThatIsNoDateIsNamed() throws Exception {
+        HttpResponse<String> response = create("{\"expires_at\":\"tomorrow\"}");
+
+        assertProblem(response, 400, "invalid_request");
+        assertThat(detail(response)).isEqualTo("expires_at must be a date and time such as 2026-01-01T00:00:00Z");
+        assertThat(response.body()).doesNotContain("tomorrow", "OffsetDateTime");
+        assertThat(KEYS.calls).isEmpty();
     }
 
     /** The contract counts characters, so a host ID of 255 symbols outside the basic plane passes too. */
