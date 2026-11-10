@@ -71,7 +71,8 @@ class RepositoryFilesTest {
         assertThat(Files.readString(repository.resolve(".github/workflows/ci.yml")))
                 .contains("run: engine/verify.sh\n");
         assertThat(Files.readString(engine.resolve("verify.sh")))
-                .contains("mvn -B -ntp \"${retries[@]}\" -Dmaven.repo.local=\"$repository\" clean verify\n")
+                .contains("mvn -B -ntp \"${retries[@]}\" -Dmaven.repo.local=\"$repository\" clean verify 2>&1 | tee \"$build_log\" || status=$?\n")
+                .contains("[ \"$status\" -eq 0 ] || exit \"$status\"\n")
                 .contains("\"${check[@]}\" check . \"$repository\"\n")
                 .contains("set -euo pipefail\n");
     }
@@ -88,8 +89,35 @@ class RepositoryFilesTest {
                   -Dmaven.wagon.http.retryHandler.count=3
                   -Dmaven.wagon.httpconnectionManager.ttlSeconds=25
                 )
-                mvn -B -ntp "${retries[@]}" -Dmaven.repo.local="$repository" clean verify
+                status=0
+                mvn -B -ntp "${retries[@]}" -Dmaven.repo.local="$repository" clean verify 2>&1 | tee "$build_log" || status=$?
                 """);
+    }
+
+    /**
+     * Code point 28: a key in the build's output fails the build, also when the build failed anyway, and the message
+     * shows it masked. A failed build still fails after the check. The saved output goes when the script ends.
+     */
+    @Test
+    void theBuildOutputIsCheckedForKeys() throws IOException {
+        assertThat(Files.readString(engine.resolve("verify.sh")))
+                .contains("""
+                        build_log=$(mktemp)
+                        trap 'rm -rf "$repository" "$build_log"' EXIT
+                        """)
+                .contains("""
+                        key_shape='(aie_(site_)?(live|test)_[a-z0-9]{1,8}_)[0-9A-Za-z]{40}'
+                        keys() { LC_ALL=C grep -a "$@" -E "$key_shape" "$build_log"; }
+                        if keys -q; then
+                        """)
+                .contains("""
+                          keys -m 5 | LC_ALL=C sed -E "s/$key_shape/\\\\1<masked>/g" | cut -c1-300 >&2
+                          exit 1
+                        fi
+                        [ "$status" -eq 0 ] || exit "$status"
+
+                        check=(java -cp guard/target/classes aie.guard.supply.SupplyCheck)
+                        """);
     }
 
     @Test

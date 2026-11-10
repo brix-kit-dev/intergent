@@ -234,7 +234,7 @@ read -r KEY_ID API_KEY <<< "$(deploy/dev/admin.sh create-key --tenant="$TENANT" 
 | `revoke-site-key` | `--tenant`、`--site-key=<站点键号>`：都必填 | 吊销了的站点键号 |
 
 - **输出：** 标准输出只有新 ID，脚本可以直接接住。出错写到标准错误，退出码 1；命令或选项写错，退出码 2。
-- **测试里的密钥：** `AdminRoleTest` 用 `QuietOutput` 接住命令打印的内容，不转给控制台，所以 CI 日志里没有新发的密钥。Spring 的 `OutputCaptureExtension` 边接边转，不能用在这里，`QuietOutputTest` 会拦住改回去。测试失败时，`QuietOutput` 才把接住的内容打出来，密钥的机密部分换成 `<masked>`。断言失败时，报错里如果比对的正是密钥，仍会带出它。
+- **测试里的密钥：** `AdminRoleTest` 用 `QuietOutput` 接住命令打印的内容，不转给控制台，所以 CI 日志里没有新发的密钥。Spring 的 `OutputCaptureExtension` 边接边转，不能用在这里，`QuietOutputTest` 会拦住改回去。测试失败时，`QuietOutput` 才把接住的内容打出来，密钥的机密部分换成 `<masked>`。断言失败时，报错里如果比对的正是密钥，仍会带出它，这时 `verify.sh` 会报出来，见[构建输出里不许有密钥](#ci-和依赖规则)。
 - **连接：** 和 `api` 一样先过启动自检，再用 `engine_app` 连接。地址里写的用户和会话参数都不起作用。
 - **单元码：** 新租户的单元码取自 `ENGINE_CELL_CODE`，必须是 1 到 8 位小写字母和数字，因为它会写进密钥。开发服务器不是单元，用 `dev`。
 - **API 版本：** 新应用锁定当前版本 `2026-11-05`。
@@ -534,6 +534,11 @@ GitHub 和 Maven Central 偶尔会有几分钟返回 5xx 或超时，所以下�
 这些设置写在 `verify.sh` 里，由 `mvn verify` 检查。它们没有放进 `.mvn`，因为 `.mvn` 目录会让构建失败。
 
 **发布日期也照样重试：** 构建完成后，`verify.sh` 从 Maven Central 读每个版本的发布日期，检查是否发布满 7 天。遇到上面那几个状态码或者连接出错时，同样每 5 秒重试一次，最多重试 10 次；404 这类回答不会变，不重试。只要有一个文件重试 10 次还读不到日期，就当 Maven Central 停摆了：别的文件不再发请求，没读到日期的都报出来，检查失败。不这样的话，Maven Central 停摆时要等大约半小时才失败，先撞上 CI 的 25 分钟上限。重试的次数和间隔必须和上面 mvn 的设置一致，由 `mvn verify` 检查。
+
+**构建输出里不许有密钥：** `verify.sh` 把 mvn 的输出照常显示，同时另存一份。构建结束后查这一份，构建失败也查。只要里面有 API 密钥或站点键格式的字符串，检查就失败，并列出前 5 行，密钥的机密部分换成 `<masked>`。
+- 测试编的假密钥也算，因为看日志的人分不出真假。
+- `QuietOutput` 打过码的不算。
+- 密钥的格式写在 `verify.sh` 里，`BuildLogKeysTest` 用 `ApiKeys`、`SiteKeys` 真发的密钥核对它，`mvn verify` 检查这几行没被删掉。
 
 | 红线 | 规则 | 什么时候检查 |
 | --- | --- | --- |
