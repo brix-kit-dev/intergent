@@ -89,6 +89,15 @@ class IdempotencyKeysTest {
                 TestDatabase.firstColumn(DATABASE, "SELECT extract(epoch FROM " + column + ")::bigint FROM engine.tenancy_idempotency_keys").get(0)));
     }
 
+    /** Code point 29: an HTTP status fits an integer. V3 chose bigint only because Row.number read nothing else then. */
+    @Test
+    void theStatusIsKeptAsAnInteger() throws SQLException {
+        assertThat(TestDatabase.firstColumn(DATABASE, """
+                SELECT data_type FROM information_schema.columns
+                WHERE table_schema = 'engine' AND table_name = 'tenancy_idempotency_keys' AND column_name = 'response_status'
+                """)).containsExactly("integer");
+    }
+
     @Test
     void theFirstRequestGetsTheKey() {
         assertThat(keys.claim(KEY, REQUEST)).isEqualTo(ACQUIRED);
