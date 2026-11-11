@@ -38,6 +38,8 @@ class CentralDatesTest {
     private static final Instant PUBLISHED = Instant.parse("2025-06-03T10:15:30Z");
     /** Short, so that a test does not wait 5 seconds between tries. */
     private static final Duration SHORT_DELAY = Duration.ofMillis(1);
+    /** Long enough that a busy machine adds little to it, compared with the delay itself. */
+    private static final Duration MEASURED_DELAY = Duration.ofMillis(500);
     /** Planned in place of a status: drop the connection without an answer. */
     private static final int DROP = -1;
     private static final String GIVE_UP = "so no file is tried again";
@@ -119,16 +121,19 @@ class CentralDatesTest {
         assertThat(log()).startsWith("java.io.IOException").endsWith(" for a.pom" + System.lineSeparator());
     }
 
-    /** The build waits the same 5 seconds before every retry, not longer each time. */
+    /**
+     * The build waits the same 5 seconds before every retry, not longer each time. The gaps are measured where Central sees
+     * the requests, so starting the client does not count, and a busy machine has the whole delay as room (code point 33).
+     */
     @Test
     void everyRetryWaitsTheSameDelay() {
         central.plan("a.pom", List.of(503, 503, 503));
 
-        long start = System.nanoTime();
-        assertThat(published(List.of("a.pom"), Duration.ofMillis(300))).containsKey("a.pom");
-        Duration took = Duration.ofNanos(System.nanoTime() - start);
+        assertThat(published(List.of("a.pom"), MEASURED_DELAY)).containsKey("a.pom");
 
-        assertThat(took).isBetween(Duration.ofMillis(900), Duration.ofMillis(1500));
+        assertThat(central.gaps("a.pom")).hasSize(3).allSatisfy(gap -> assertThat(gap)
+                .isGreaterThanOrEqualTo(MEASURED_DELAY)
+                .isLessThan(MEASURED_DELAY.multipliedBy(2)));
     }
 
     /** The files after the first 16 wait in a queue, so they start only once a file has given up. */
@@ -175,6 +180,7 @@ class CentralDatesTest {
         private final HttpServer server;
         private final Map<String, Queue<Integer>> plans = new ConcurrentHashMap<>();
         private final Map<String, AtomicInteger> requests = new ConcurrentHashMap<>();
+        private final Map<String, Queue<Long>> arrivals = new ConcurrentHashMap<>();
 
         FakeCentral() {
             try {
@@ -199,9 +205,17 @@ class CentralDatesTest {
             return count == null ? 0 : count.get();
         }
 
+        /** The time between one request for the path and the next. */
+        List<Duration> gaps(String path) {
+            List<Long> times = List.copyOf(arrivals.getOrDefault(path, new ConcurrentLinkedQueue<>()));
+            return IntStream.range(1, times.size()).mapToObj(i -> Duration.ofNanos(times.get(i) - times.get(i - 1))).toList();
+        }
+
         private void answer(HttpExchange exchange) throws IOException {
+            long arrived = System.nanoTime();
             String path = exchange.getRequestURI().getPath().substring(ROOT.length());
             requests.computeIfAbsent(path, any -> new AtomicInteger()).incrementAndGet();
+            arrivals.computeIfAbsent(path, any -> new ConcurrentLinkedQueue<>()).add(arrived);
             Queue<Integer> planned = plans.get(path);
             Integer status = planned == null ? null : planned.poll();
             if (status == null) {
