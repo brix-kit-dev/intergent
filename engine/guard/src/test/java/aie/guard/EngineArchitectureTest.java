@@ -88,8 +88,35 @@ class EngineArchitectureTest {
     @Test
     void theModelRuleCoversEveryTypeOfTheRealPort() {
         assertThat(classes.contain("aie.ports.ModelPort")).isTrue();
+
+        assertThat(engineTypesReachedFrom(classes.get("aie.ports.ModelPort")))
+                .contains("aie.ports.ModelPort$Request", "aie.ports.ModelPort$Turn", "aie.ports.ModelPort$Result")
+                .allMatch(name -> name.matches("aie\\.ports\\.ModelPort(\\$.*)?"));
+    }
+
+    /**
+     * Other modules call the gateway. A port type in its API, generics, supertypes and throws included, would reach
+     * them in spite of A-2, and A-2 would not see it, because they would never name it (M2-2). Every class of the API
+     * package counts, also one that no method of the gateway reaches.
+     */
+    @Test
+    void theGatewayApiHandsOutNoPortType() {
+        List<JavaClass> api = classes.stream().filter(type -> type.getPackageName().equals("aie.core.gateway.api")).toList();
         Set<String> reached = new TreeSet<>();
-        Deque<JavaClass> open = new ArrayDeque<>(List.of(classes.get("aie.ports.ModelPort")));
+        api.forEach(type -> {
+            reached.addAll(engineTypesReachedFrom(type));
+            type.getDirectDependenciesFromSelf().forEach(dependency -> reached.add(dependency.getTargetClass().getName()));
+        });
+
+        assertThat(reached).contains("aie.core.gateway.api.Gateway", "aie.core.gateway.api.Gateway$Request",
+                        "aie.core.gateway.api.Gateway$Turn", "aie.core.gateway.api.Gateway$Failed")
+                .noneMatch(name -> name.startsWith("aie.ports."));
+    }
+
+    /** The engine types that a type's methods and fields use, generics included, and the ones those use in turn. */
+    private static Set<String> engineTypesReachedFrom(JavaClass start) {
+        Set<String> reached = new TreeSet<>();
+        Deque<JavaClass> open = new ArrayDeque<>(List.of(start));
         while (!open.isEmpty()) {
             JavaClass type = open.pop();
             if (!type.getName().startsWith("aie.") || !reached.add(type.getName())) {
@@ -103,9 +130,7 @@ class EngineArchitectureTest {
             type.getFields().forEach(field -> used.add(field.getType()));
             used.forEach(javaType -> open.addAll(javaType.getAllInvolvedRawTypes()));
         }
-
-        assertThat(reached).contains("aie.ports.ModelPort$Request", "aie.ports.ModelPort$Turn", "aie.ports.ModelPort$Result")
-                .allMatch(name -> name.matches("aie\\.ports\\.ModelPort(\\$.*)?"));
+        return reached;
     }
 
     /** A-4-tx and T-5 match by name, so a rename would switch them off without any failure. */

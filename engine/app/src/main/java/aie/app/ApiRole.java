@@ -2,6 +2,7 @@ package aie.app;
 
 import aie.adapters.storepg.PgPool;
 import aie.adapters.storepg.PgRuntime;
+import aie.core.gateway.api.Gateway;
 import aie.core.tenancy.api.ApiKeyLookup;
 import aie.core.tenancy.api.ApiKeyManagement;
 import aie.core.tenancy.api.EndUsers;
@@ -42,16 +43,18 @@ class ApiRole {
     }
 
     /**
-     * The session keys are checked before the pool opens, so a missing or weak key never gets as far as the database.
-     * The pool runs the self-check of blueprint 7.6 before its first connection, so a role that may not serve traffic
-     * never opens a port. The context closes the pool as it closes, because the pool is AutoCloseable. A context that
-     * fails before it has made its beans would not, so the role closes the pool itself then.
+     * The session keys and the routes to the models are checked before the pool opens, so a missing or weak key or a
+     * route to a model that does not exist never gets as far as the database. The pool runs the self-check of blueprint
+     * 7.6 before its first connection, so a role that may not serve traffic never opens a port. The context closes the
+     * pool as it closes, because the pool is AutoCloseable. A context that fails before it has made its beans would
+     * not, so the role closes the pool itself then.
      */
     static ConfigurableApplicationContext start(String... args) {
         RoleSettings settings = RoleSettings.read(args);
         String address = settings.required(RoleSettings.DATABASE_URL);
         String password = settings.required(RoleSettings.APP_PASSWORD);
         SessionTokens sessionTokens = SessionKeys.tokens(settings, Clock.systemUTC());
+        Gateway gateway = Models.gateway();
         PgPool database = PgRuntime.pool(address, password, POOL_SIZE);
         try {
             return serve(context -> {
@@ -63,6 +66,7 @@ class ApiRole {
                 context.registerBean(EndUsers.class, () -> new DatabaseEndUsers(database));
                 context.registerBean(SiteKeyLookup.class, () -> new DatabaseSiteKeyLookup(database));
                 context.registerBean(SessionTokens.class, () -> sessionTokens);
+                context.registerBean(Gateway.class, () -> gateway);
             }, args);
         } catch (RuntimeException e) {
             database.close();

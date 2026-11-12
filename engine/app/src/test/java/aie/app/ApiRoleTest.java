@@ -7,6 +7,7 @@ import static org.awaitility.Awaitility.await;
 import aie.adapters.storepg.PgPool;
 import aie.adapters.storepg.PgRuntime;
 import aie.adapters.storepg.TestDatabase;
+import aie.core.gateway.api.Gateway;
 import aie.core.tenancy.api.ApiKeys;
 import aie.core.tenancy.api.Provisioning;
 import aie.core.tenancy.api.Provisioning.IssuedKey;
@@ -30,6 +31,7 @@ import java.net.http.HttpResponse;
 import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
@@ -211,6 +213,18 @@ class ApiRoleTest {
         awaitOnlyTheClassPool();
 
         assertThat(currentUserOf(context.getBean(PgPool.class))).isEqualTo("engine_app");
+    }
+
+    /** The api's gateway has the routes of {@link Models}, so the fake model answers customer_chat (M2-2). */
+    @Test
+    void theApiAnswersCustomerChatThroughItsGateway() {
+        List<String> pieces = new ArrayList<>();
+
+        Gateway.Result result = context.getBean(Gateway.class).answer(new Gateway.Request(
+                Models.CUSTOMER_CHAT, List.of(new Gateway.Turn(Gateway.Role.USER, "Hello")), () -> false), pieces::add);
+
+        assertThat(result).isInstanceOf(Gateway.Completed.class);
+        assertThat(pieces).hasSize(8).startsWith("Piece 1 of 8. ");
     }
 
     @Test
