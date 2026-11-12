@@ -282,7 +282,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 | `engine/core` | 平台核心（L2） | `ports` |
 | `engine/modules` | 能力模块（L3） | `core`、`ports` |
 | `engine/http` | 接口层（L4） | `modules`、`core` |
-| `engine/adapters` | 适配器（L0），每个适配器是它的子模块。现有 `store-postgres` | `ports` |
+| `engine/adapters` | 适配器（L0），每个适配器是它的子模块。现有 `store-postgres` 和 `model-fake` | `ports` |
 | `engine/app` | 启动入口 | 引擎内所有层 |
 | `engine/guard` | 架构守卫、依赖检查和契约检查，只在构建时运行 | 不进运行时 |
 
@@ -333,6 +333,31 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 - **租户怎么认：** 只许读，不许写。`current_setting('app.tenant_id', true)` 可以，策略就是这样读的；`FROM tenancy_applications app WHERE app.tenant_id = ?` 里的 `app.tenant_id` 是表的列，也不算。Java 的字符串当 SQL 读，SQL 里的字符串也当 SQL 读（两个单引号还原成一个），因为 `EXECUTE` 会执行它。`pg_settings` 视图里没有 `app.tenant_id` 这种自定义设置，改它改不到租户，所以不算。只有 `adapters/store-postgres` 例外，以后加别的数据库适配器时也要给它开例外。拼字符串、换写法存心绕过的，扫描抓不全，要靠代码审查。
 - **报什么：** 每处一行，写明文件、行号和认出的内容，比如 `A-3: core/src/main/java/aie/core/Pick.java:2: model name gpt-4o`、`A-5: core/src/main/java/aie/core/Route.java:3: country constant Locale.JAPAN`、`A-4: core/src/main/resources/db/migration/tenancy/V2__b.sql:1: reaches events_outbox of module events`、`A-13: core/src/main/java/aie/core/tenancy/internal/Switch.java:5: writes app.tenant_id with SET`。
 - **测试：** `TextRulesTest` 在临时目录里摆出样例文件，逐条看算不算；`EngineTextTest` 在真实的引擎上跑，并确认扫描确实读到了各个模块和迁移脚本，不会因为什么都没读而通过；它还确认数据库适配器里真有写租户的地方，所以 `A-13` 的例外指的是对的文件夹。
+
+## 模型端口和模拟模型
+
+模型只经 `aie.ports.ModelPort` 调用，只有网关能用它（`A-2-ports`）。端口里没有任何厂商的概念：
+
+- **一次调用：** `generate(请求, 输出)` 一直阻塞到回答结束，文本一段一段交给输出。请求写明模型号、到目前为止的对话（最后一句是用户说的）、整个回答最多用多久，以及一个取消信号。
+- **怎么结束：** 完成、取消、失败（包括超时）都作为结果返回，带上到那时为止的用量。失败还写明已经交出了几段，网关据此判断能不能换模型重试，因为只能在第一段之前重试（蓝图 8.6）。抛异常只说明请求本身写错了，或者异常来自输出。
+- **类型都在端口里面：** 请求、对话、用量、结果都嵌套在 `ModelPort` 里。`A-2-ports` 按这个名字匹配，所以它们一起受管。`EngineArchitectureTest` 会顺着端口的方法检查这一点。
+
+模拟模型是适配器 `engine/adapters/model-fake`，模型号 `fake`。它在进程里回答，数据不出进程，每次回答都一样：
+
+- **回答：** 编了号的几段：`Piece 1 of 8. `、`Piece 2 of 8. `……少一段或者多一段，一眼就能看出来。默认 8 段，每段之前等 50 毫秒。
+- **用量：** 字符数当作 token 数。对话的所有轮次算输入，生成的文字算输出。
+- **取消和超时：** 等待时每 10 毫秒看一次取消信号和时间，所以取消通常在 10 毫秒内生效，机器忙时会晚一些。
+
+测试和演示可以在最后一句用户输入里加一个方括号，控制它怎么回答：
+
+| 写法 | 意思 |
+| --- | --- |
+| `[fake pieces=3]` | 回答 3 段，可以是 1 到 1000 |
+| `[fake delay=2s]` | 每段之前等 2 秒，写成 `200ms` 或 `2s`，最多 60 秒 |
+| `[fake fail-after=2]` | 交出 2 段后失败；写 `0` 就是第一段之前失败 |
+| `[fake hang-after=1]` | 交出 1 段后卡住，直到被取消或者超时 |
+
+几项可以写在同一个方括号里，如 `[fake pieces=20 delay=1s]`。一句话里只能有一个这样的方括号，写错了回答直接失败，原因里写明错在哪。`[fakery]` 这样的写法不算指令。
 
 ## 对外契约
 

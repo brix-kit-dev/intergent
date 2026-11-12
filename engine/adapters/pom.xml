@@ -15,6 +15,7 @@
 
     <modules>
         <module>store-postgres</module>
+        <module>model-fake</module>
     </modules>
     <name>Adapters (L0)</name>
 

@@ -4,14 +4,20 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import aie.guard.ArchitectureRules.NamedRule;
+import com.tngtech.archunit.core.domain.JavaClass;
 import com.tngtech.archunit.core.domain.JavaClasses;
+import com.tngtech.archunit.core.domain.JavaType;
 import com.tngtech.archunit.core.importer.ClassFileImporter;
 import java.io.IOException;
 import java.net.URISyntaxException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -73,6 +79,33 @@ class EngineArchitectureTest {
                 .as("source files with no compiled class: is the module part of the build?")
                 .filteredOn(source -> !classes.contain(source))
                 .isEmpty();
+    }
+
+    /**
+     * A-2 matches the model ports by name, with their nested types. So every engine type that the real port's call
+     * reaches, generics included, must live inside the port, or the rule would let other modules use it (M2-1).
+     */
+    @Test
+    void theModelRuleCoversEveryTypeOfTheRealPort() {
+        assertThat(classes.contain("aie.ports.ModelPort")).isTrue();
+        Set<String> reached = new TreeSet<>();
+        Deque<JavaClass> open = new ArrayDeque<>(List.of(classes.get("aie.ports.ModelPort")));
+        while (!open.isEmpty()) {
+            JavaClass type = open.pop();
+            if (!type.getName().startsWith("aie.") || !reached.add(type.getName())) {
+                continue;
+            }
+            List<JavaType> used = new ArrayList<>();
+            type.getMethods().forEach(method -> {
+                used.add(method.getReturnType());
+                used.addAll(method.getParameterTypes());
+            });
+            type.getFields().forEach(field -> used.add(field.getType()));
+            used.forEach(javaType -> open.addAll(javaType.getAllInvolvedRawTypes()));
+        }
+
+        assertThat(reached).contains("aie.ports.ModelPort$Request", "aie.ports.ModelPort$Turn", "aie.ports.ModelPort$Result")
+                .allMatch(name -> name.matches("aie\\.ports\\.ModelPort(\\$.*)?"));
     }
 
     /** A-4-tx and T-5 match by name, so a rename would switch them off without any failure. */
