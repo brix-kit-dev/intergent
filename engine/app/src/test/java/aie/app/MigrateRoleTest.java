@@ -88,11 +88,19 @@ class MigrateRoleTest {
                 .isSortedAccordingTo(Comparator.comparingInt(Integer::parseInt));
     }
 
+    /** The second module numbers its scripts from 1 again, in a history of its own (blueprint 5.6). */
+    @Test
+    void theConversationScriptsHaveAHistoryOfTheirOwn() throws SQLException {
+        assertThat(TestDatabase.firstColumn(
+                        DATABASE, "SELECT version FROM engine.flyway_history_conversation WHERE type = 'SQL' ORDER BY installed_rank"))
+                .startsWith("1");
+    }
+
     @Test
     void aSecondRunSaysNothingWasApplied(CapturedOutput output) {
         assertThat(migrate()).isZero();
 
-        assertThat(output.getOut()).contains("tenancy: 0 applied");
+        assertThat(output.getOut()).contains("conversation: 0 applied", "tenancy: 0 applied");
     }
 
     @Test

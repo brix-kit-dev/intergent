@@ -69,7 +69,7 @@ deploy/dev/migrate.sh
 
 ## 数据库迁移
 
-迁移脚本放在所属模块的目录里，如 `engine/core/src/main/resources/db/migration/tenancy`。目录名就是模块名，新模块加目录就行，不用登记。每个模块有自己的历史表 `flyway_history_<模块>`，所以版本号互不影响，模块拆走时脚本和历史一起带走。
+迁移脚本放在所属模块的目录里，如 `engine/core/src/main/resources/db/migration/tenancy`。目录名就是模块名，新模块加目录就行，不用登记。每个模块有自己的历史表 `flyway_history_<模块>`，所以版本号互不影响，模块拆走时脚本和历史一起带走。现在有两个模块：`tenancy` 和 `conversation`，后者的脚本在 `engine/modules/src/main/resources/db/migration/conversation`，也从 `V1` 编号。
 
 真实单元这样运行，部署时跑一次：
 
@@ -382,6 +382,16 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 - **启动时就检查：** api 角色先打开数据库连接池，再构造网关，因为网关要问连接池当前线程在不在事务里。路由引用了注册表里没有的模型时，启动被拒绝，退出码 1，连接池随之关闭。
 - **检查的位置：** 输入检查在选模型之前，输出检查在每段交给调用方之前。现在都直接放行，测试锁住了先后顺序；M3 换成信任层。
 - **以后：** 两张表现在写在 `engine/app` 的 `Models` 里。接入真实模型时（M3），它们搬进区域包。
+
+## 会话
+
+会话模块 `aie.modules.conversation` 是第一个 L3 模块。别的模块只经它的公开接口 `aie.modules.conversation.api.Conversations` 调用（`A-4`）：
+
+- **表：** `conversation_conversations`，一行一个会话，记会话号（`conv_` 开头）、租户、应用、终端用户号、语言和创建时间。表带行级安全，迁移脚本放在模块自己的目录里。
+- **归属：** 一个会话属于一个应用的一个终端用户。按会话号找时只在调用方的应用里找，所以别的租户、同租户的别的应用都找不到。应用分测试环境和正式环境，测试环境的密钥因此读不到正式环境的会话。
+- **不跨模块：** 终端用户归 tenancy 管。这张表只存终端用户号，不建外键（`A-4`）。建会话时用的终端用户号，由 tenancy 的 `EndUsers` 给出。
+- **语言：** 规则和会话令牌一样：不超过 35 个字符的语言标记，用标准写法，比如 `ja-JP`。可以不给。格式不对时，`Conversations` 抛 `IllegalArgumentException`。
+- **接口：** `POST /v1/conversations` 和 `GET /v1/conversations/{id}` 在接下来的两个小点里做。
 
 ## 对外契约
 
