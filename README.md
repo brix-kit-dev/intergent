@@ -90,7 +90,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_OWNER_PASSWO
 | 同时跑两个 `migrate` | 后一个等前一个，最多 10 秒，等不到就失败。重跑即可 |
 | 数据库接受了连接却一直不回应 | 登录等 30 秒就失败，退出码 1，地址里的参数改不了这个时限。它只管登录，已经开始的 `ALTER TABLE` 再慢也不会被打断 |
 
-**新表：** 照 `V1__create_tenants.sql` 写，这是蓝图 5.6 的模板：行级安全、`FORCE`、租户策略、授权。有序列时序列也要授权给 `engine_app`。带 `tenant_id` 的表还要加一条样例行，见[租户隔离](#租户隔离)。
+**新表：** 照 `V1__create_tenants.sql` 写，这是蓝图 5.6 的模板：行级安全、`FORCE`、租户策略、授权。有序列时序列也要授权给 `engine_app`；`GENERATED ALWAYS AS IDENTITY` 的列不用，比如消息表的顺序号，插入时数据库自己取号。带 `tenant_id` 的表还要加一条样例行，见[租户隔离](#租户隔离)。
 
 **整数列：** 按取值范围选 `smallint`、`integer` 或 `bigint`，`Row.number` 都能读。别的类型一律报错，`numeric` 存的是整数也一样，因为下一行可能带小数；要读就在查询里转成 `bigint`。`V3__create_idempotency_keys.sql` 里“只能用 `bigint`”的注释已经过时，脚本执行过就不能改，所以留着；那一列 `response_status` 已由 `V14__integer_idempotency_status.sql` 改成 `integer`。
 
@@ -122,6 +122,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_OWNER_PASSWO
 | --- | --- |
 | 租户读数据 | 只看到自己的行，上级租户也看不到下级的行 |
 | 不带条件地改或删 | 只影响自己的行，别的租户不受影响 |
+| 只追加的表，比如 `conversation_messages` | 改和删都没有权限，自己的行也一样 |
 | 写别的租户的行，或把自己的行改给别的租户 | 被行级安全拒绝 |
 | `TRUNCATE` | 没有权限。行级安全管不到它，只能靠授权挡住 |
 | 没有租户上下文 | 读不到、改不到、写不进 |
@@ -129,7 +130,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_OWNER_PASSWO
 
 没有上下文的情况在新连接和复用的连接上各跑一次。两种连接状态不同：复用的连接上这个变量是空串，新连接上没有这个变量。
 
-**新表：** 在测试的 `SAMPLES` 里加一条样例行，父表排在子表前面。不加时这个测试类全部失败，所以新表漏不掉。
+**新表：** 在测试的 `SAMPLES` 里加一条样例行，父表排在子表前面。不加时这个测试类全部失败，所以新表漏不掉。只追加的表用 `Sample.appendOnly` 加，测试就改为检查改和删都被拒绝。
 
 这个测试只看得到样例行用到的值。红线 T-1 和 T-5 的迁移部分由目录检查 [CatalogCheck.java](engine/adapters/store-postgres/src/test/java/aie/adapters/storepg/CatalogCheck.java) 管。它在所有脚本跑完后读数据库目录，所以后面的脚本撤掉前面的保护也逃不掉：
 
@@ -385,7 +386,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 
 ## 会话
 
-会话模块 `aie.modules.conversation` 是第一个 L3 模块。别的模块只经它的公开接口 `aie.modules.conversation.api.Conversations` 调用（`A-4`）：
+会话模块 `aie.modules.conversation` 是第一个 L3 模块。别的模块只经它的公开接口调用（`A-4`），也就是 `aie.modules.conversation.api` 里的 `Conversations` 和 `Messages`：
 
 - **表：** `conversation_conversations`，一行一个会话，记会话号（`conv_` 开头）、租户、应用、终端用户号、语言和创建时间。表带行级安全，迁移脚本放在模块自己的目录里。
 - **归属：** 一个会话属于一个应用的一个终端用户。按会话号找时只在调用方的应用里找，所以别的租户、同租户的别的应用都找不到。应用分测试环境和正式环境，测试环境的密钥因此读不到正式环境的会话。
@@ -401,6 +402,14 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
   - 只在调用方的应用里找。别的租户的会话、同租户别的应用的会话（比如用测试环境的密钥读正式环境的会话）、不存在的会话，都回答同样的 404，不透露会话在不在。带 `On-Behalf-Of` 时，在下级租户的应用里找。
   - 会话号要符合契约：`conv_` 后面跟 1 到 59 个英文字母或数字，总长不超过 64。不符合的回答 400，不查库。必须整个会话号都符合，结尾多一个换行也不行。路径里带 NUL 的请求，Tomcat 自己就回答 400，到不了引擎。
   - 浏览器令牌同样到 M2-12 才接受。
+- **消息：** 表 `conversation_messages`，一行一条消息，经公开接口 `aie.modules.conversation.api.Messages` 存和读。
+  - 用户消息一存就是完成状态。文字 1 到 32000 个字符，和契约一致，按字符算：一个 emoji 也只算一个。带 NUL 字符的文字 PostgreSQL 存不了，`Messages` 直接拒绝。
+  - 助手消息一建是进行中，文字为空。它的事件和结束在之后的小点里做，在那之前数据库不允许它有别的状态。
+  - 顺序：每条消息有一个数据库给的顺序号，读会话的消息时按它排。消息号排不出先后：同一毫秒里建的两条消息，消息号只有后面的随机部分不同。
+  - 外键指向会话表，把租户号对上租户号。同一模块里的外键 `A-4` 允许。
+  - 只追加：引擎只能读和新增，不能改，也不能删。M2 不删数据，清理在 M4。
+  - 和读会话一样只在调用方的应用里：别的应用、别的租户的会话，存不进消息，也读不到。
+  - 表自己也守这些规则，绕过 `Messages` 直接写 SQL 也一样。
 - **还没有的：** 消息相关的四个接口在之后的点里做，在那之前回答 404。
 
 ## 对外契约

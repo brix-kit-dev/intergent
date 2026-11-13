@@ -62,7 +62,7 @@ class ConversationsTest {
     @BeforeEach
     void emptyTheTables() throws SQLException {
         TestDatabase.asAdmin(DATABASE, "TRUNCATE engine.tenancy_tenants CASCADE");
-        TestDatabase.asAdmin(DATABASE, "TRUNCATE engine.conversation_conversations");
+        TestDatabase.asAdmin(DATABASE, "TRUNCATE engine.conversation_conversations CASCADE");
     }
 
     /** A caller of a new tenant's application; the key ID plays no part here. */

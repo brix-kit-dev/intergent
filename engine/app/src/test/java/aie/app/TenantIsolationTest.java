@@ -70,6 +70,10 @@ class TenantIsolationTest {
             new Sample("conversation_conversations", """
                     INSERT INTO conversation_conversations (conversation_id, tenant_id, application_id, end_user_id)
                     VALUES ('conv_{tenant}', '{tenant}', 'app_{tenant}', 'eu_{tenant}')
+                    """),
+            Sample.appendOnly("conversation_messages", """
+                    INSERT INTO conversation_messages (message_id, tenant_id, conversation_id, role, status, text, completed_at)
+                    VALUES ('msg_{tenant}', '{tenant}', 'conv_{tenant}', 'user', 'completed', 'Hello', now())
                     """));
 
     private static final String TENANT_TABLES = """
@@ -87,7 +91,19 @@ class TenantIsolationTest {
     private static PgDatabase reused;
     private static PgDatabase fresh;
 
-    private record Sample(String table, String insert) {
+    /**
+     * How to add one row of a table for any tenant. engine_app may neither change nor delete the rows of an append-only
+     * table, its own included, so the tests check that the database refuses both instead.
+     */
+    private record Sample(String table, String insert, boolean appendOnly) {
+
+        Sample(String table, String insert) {
+            this(table, insert, false);
+        }
+
+        static Sample appendOnly(String table, String insert) {
+            return new Sample(table, insert, true);
+        }
 
         String insertFor(String tenant) {
             return insert.replace("{tenant}", tenant);
@@ -132,6 +148,15 @@ class TenantIsolationTest {
                 .toList();
     }
 
+    /** The tenant tables whose rows engine_app may change and delete, each tenant its own. */
+    static List<String> changeableTables() throws SQLException {
+        return tenantTables().stream().filter(table -> !sampleOf(table).appendOnly()).toList();
+    }
+
+    static List<String> appendOnlyTables() throws SQLException {
+        return tenantTables().stream().filter(table -> sampleOf(table).appendOnly()).toList();
+    }
+
     /** What is really in the table, whatever row-level security lets the engine see. */
     private static List<String> rowsIn(String table) throws SQLException {
         return TestDatabase.firstColumn(DATABASE, "SELECT tenant_id FROM engine." + table + " ORDER BY tenant_id");
@@ -170,11 +195,23 @@ class TenantIsolationTest {
         assertThatThrownBy(write).isInstanceOf(DatabaseException.class).hasStackTraceContaining("row-level security");
     }
 
-    /** The statements have no filter, so only row-level security decides what they reach. */
+    private static void assertRefusedForWantOfAGrant(ThrowingCallable write) {
+        assertThatThrownBy(write).isInstanceOf(DatabaseException.class).hasStackTraceContaining("permission denied");
+    }
+
+    /**
+     * The statements have no filter, so only row-level security decides what they reach. On an append-only table the
+     * missing grants refuse a change or a delete before any row is looked at.
+     */
     private static void assertNothingInReach(PgDatabase connection, String table) {
         assertThat(seenWithoutAContext(connection, table)).isEmpty();
-        assertThat(withoutAContext(connection, "UPDATE " + table + " SET tenant_id = 'ten_c'")).isZero();
-        assertThat(withoutAContext(connection, "DELETE FROM " + table)).isZero();
+        if (sampleOf(table).appendOnly()) {
+            assertRefusedForWantOfAGrant(() -> withoutAContext(connection, "UPDATE " + table + " SET tenant_id = 'ten_c'"));
+            assertRefusedForWantOfAGrant(() -> withoutAContext(connection, "DELETE FROM " + table));
+        } else {
+            assertThat(withoutAContext(connection, "UPDATE " + table + " SET tenant_id = 'ten_c'")).isZero();
+            assertThat(withoutAContext(connection, "DELETE FROM " + table)).isZero();
+        }
     }
 
     /** The rows go in as the superuser, because nothing else may write them. */
@@ -204,21 +241,39 @@ class TenantIsolationTest {
 
     /** With no filter it would take over every row, so changing exactly one proves both directions. */
     @ParameterizedTest
-    @MethodSource("tenantTables")
+    @MethodSource("changeableTables")
     void anUpdateReachesOnlyTheTenantsOwnRows(String table) throws SQLException {
         assertThat(asTenant(TENANT_A, "UPDATE " + table + " SET tenant_id = 'ten_a'")).isOne();
 
         assertThat(rowsIn(table)).containsExactly(TENANT_A, TENANT_B);
     }
 
-    /** Children first, because a parent row cannot go while its children stay. */
+    /**
+     * Children first, because a parent row cannot go while its children stay. engine_app cannot delete from an
+     * append-only table at all, as the next test shows, so the superuser takes those rows away to let the parents go.
+     */
     @Test
     void aDeleteReachesOnlyTheTenantsOwnRows() throws SQLException {
         for (Sample sample : SAMPLES.reversed()) {
-            assertThat(asTenant(TENANT_A, "DELETE FROM " + sample.table())).isOne();
+            if (sample.appendOnly()) {
+                TestDatabase.asAdmin(DATABASE, "DELETE FROM engine." + sample.table() + " WHERE tenant_id = '" + TENANT_A + "'");
+            } else {
+                assertThat(asTenant(TENANT_A, "DELETE FROM " + sample.table())).isOne();
+            }
 
             assertThat(rowsIn(sample.table())).containsExactly(TENANT_B);
         }
+    }
+
+    /** Not even its own rows: the table has no grant for it. */
+    @ParameterizedTest
+    @MethodSource("appendOnlyTables")
+    void anAppendOnlyTableRefusesEveryChangeAndDelete(String table) throws SQLException {
+        assertRefusedForWantOfAGrant(() -> asTenant(TENANT_A, "UPDATE " + table + " SET tenant_id = 'ten_a'"));
+        assertRefusedForWantOfAGrant(() -> asTenant(TENANT_A, "UPDATE " + table + " SET tenant_id = 'ten_b'"));
+        assertRefusedForWantOfAGrant(() -> asTenant(TENANT_A, "DELETE FROM " + table));
+
+        assertThat(rowsIn(table)).containsExactly(TENANT_A, TENANT_B);
     }
 
     @ParameterizedTest
@@ -228,7 +283,7 @@ class TenantIsolationTest {
     }
 
     @ParameterizedTest
-    @MethodSource("tenantTables")
+    @MethodSource("changeableTables")
     void aTenantCannotMoveItsRowToAnotherTenant(String table) {
         assertRefusedByRowSecurity(() -> asTenant(TENANT_A, "UPDATE " + table + " SET tenant_id = 'ten_b'"));
     }
