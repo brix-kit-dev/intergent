@@ -16,6 +16,9 @@ import aie.modules.conversation.api.Messages;
 import aie.modules.conversation.api.Messages.Event;
 import aie.modules.conversation.api.Messages.EventType;
 import aie.modules.conversation.api.Messages.Message;
+import aie.modules.conversation.api.Messages.Written;
+import aie.modules.conversation.api.Messages.Written.Added;
+import aie.modules.conversation.api.Messages.Written.NotFound;
 import aie.modules.conversation.internal.DatabaseConversations;
 import aie.modules.conversation.internal.DatabaseMessages;
 import aie.ports.DatabaseException;
@@ -26,7 +29,6 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -155,9 +157,9 @@ class EventLogTest {
         String conversation = newConversation(caller);
         String answer = newAnswer(caller, conversation);
 
-        assertThat(messages.addDelta(caller, conversation, answer, "Hel")).hasValue(2);
-        assertThat(messages.addDelta(caller, conversation, answer, "lo")).hasValue(3);
-        assertThat(messages.addDelta(caller, conversation, answer, ", world")).hasValue(4);
+        assertThat(messages.addDelta(caller, conversation, answer, "Hel")).isEqualTo(new Added(2));
+        assertThat(messages.addDelta(caller, conversation, answer, "lo")).isEqualTo(new Added(3));
+        assertThat(messages.addDelta(caller, conversation, answer, ", world")).isEqualTo(new Added(4));
 
         assertThat(eventsOf(caller, conversation, answer)).containsExactly(
                 "1 message.started null", "2 message.delta Hel", "3 message.delta lo", "4 message.delta , world");
@@ -171,9 +173,9 @@ class EventLogTest {
         String first = newAnswer(caller, conversation);
         String second = newAnswer(caller, conversation);
 
-        assertThat(messages.addDelta(caller, conversation, first, "a")).hasValue(2);
-        assertThat(messages.addDelta(caller, conversation, second, "b")).hasValue(2);
-        assertThat(messages.addDelta(caller, conversation, first, "c")).hasValue(3);
+        assertThat(messages.addDelta(caller, conversation, first, "a")).isEqualTo(new Added(2));
+        assertThat(messages.addDelta(caller, conversation, second, "b")).isEqualTo(new Added(2));
+        assertThat(messages.addDelta(caller, conversation, first, "c")).isEqualTo(new Added(3));
 
         assertThat(eventsOf(caller, conversation, first)).containsExactly(
                 "1 message.started null", "2 message.delta a", "3 message.delta c");
@@ -269,7 +271,7 @@ class EventLogTest {
             throw new IllegalStateException("roll it back");
         })).hasMessageContaining("roll it back");
 
-        assertThat(messages.addDelta(caller, conversation, answer, "next")).hasValue(3);
+        assertThat(messages.addDelta(caller, conversation, answer, "next")).isEqualTo(new Added(3));
         assertThat(eventsOf(caller, conversation, answer)).containsExactly(
                 "1 message.started null", "2 message.delta kept", "3 message.delta next");
     }
@@ -294,7 +296,7 @@ class EventLogTest {
                     ready.await();
                     List<Long> numbers = new ArrayList<>();
                     for (int i = 0; i < each; i++) {
-                        numbers.add(messages.addDelta(caller, conversation, answer, writer + ":" + i).orElseThrow());
+                        numbers.add(((Added) messages.addDelta(caller, conversation, answer, writer + ":" + i)).seq());
                     }
                     return numbers;
                 }));
@@ -339,7 +341,7 @@ class EventLogTest {
         }));
         assertThat(holding.await(30, TimeUnit.SECONDS)).isTrue();
 
-        CompletableFuture<OptionalLong> second =
+        CompletableFuture<Written> second =
                 CompletableFuture.supplyAsync(() -> messages.addDelta(caller, conversation, answer, "second"));
         waitForAWriterOnALock();
         assertThat(second).as("the second writer waits for the first").isNotDone();
@@ -348,7 +350,7 @@ class EventLogTest {
         release.countDown();
 
         assertThat(first.get(30, TimeUnit.SECONDS)).isEqualTo(2);
-        assertThat(second.get(30, TimeUnit.SECONDS)).hasValue(3);
+        assertThat(second.get(30, TimeUnit.SECONDS)).isEqualTo(new Added(3));
         assertThat(described(messages.eventsAfter(caller, conversation, answer, 1, 10)))
                 .containsExactly("2 message.delta first", "3 message.delta second");
     }
@@ -374,7 +376,7 @@ class EventLogTest {
         String conversation = newConversation(caller);
         String question = messages.addUserMessage(caller, conversation, "Hello?").orElseThrow().messageId();
 
-        assertThat(messages.addDelta(caller, conversation, question, "no")).isEmpty();
+        assertThat(messages.addDelta(caller, conversation, question, "no")).isEqualTo(new NotFound());
         assertThat(messages.eventsAfter(caller, conversation, question, 0, 10)).isEmpty();
         assertRefused(() -> addRow(caller, question, "message.started", null), "Only an answer has events");
         assertThat(rows()).isEmpty();
@@ -390,10 +392,10 @@ class EventLogTest {
                 provisioning.createApplication(caller.tenantId(), "test", "internal"));
         Owner otherTenant = new Owner("key_unused", newApplication().tenantId(), caller.applicationId());
 
-        assertThat(messages.addDelta(caller, otherConversation, answer, "x")).isEmpty();
-        assertThat(messages.addDelta(otherApplication, conversation, answer, "x")).isEmpty();
-        assertThat(messages.addDelta(otherTenant, conversation, answer, "x")).isEmpty();
-        assertThat(messages.addDelta(caller, conversation, "msg_00000000000000000000000000", "x")).isEmpty();
+        assertThat(messages.addDelta(caller, otherConversation, answer, "x")).isEqualTo(new NotFound());
+        assertThat(messages.addDelta(otherApplication, conversation, answer, "x")).isEqualTo(new NotFound());
+        assertThat(messages.addDelta(otherTenant, conversation, answer, "x")).isEqualTo(new NotFound());
+        assertThat(messages.addDelta(caller, conversation, "msg_00000000000000000000000000", "x")).isEqualTo(new NotFound());
         assertThat(messages.eventsAfter(caller, otherConversation, answer, 0, 10)).isEmpty();
         assertThat(messages.eventsAfter(otherApplication, conversation, answer, 0, 10)).isEmpty();
         assertThat(messages.eventsAfter(otherTenant, conversation, answer, 0, 10)).isEmpty();
@@ -451,7 +453,7 @@ class EventLogTest {
 
         assertRefused(() -> addRow(caller, answer, "message.delta", null), "conversation_events_text");
         assertRefused(() -> addRow(caller, answer, "message.delta", ""), "conversation_events_text");
-        for (String later : List.of("message.completed", "message.cancelled", "error", "message.blocked", "message.citation")) {
+        for (String later : List.of("message.blocked", "message.citation", "tool.started", "handoff.requested")) {
             assertRefused(() -> addRow(caller, answer, later, null), "conversation_events_type_check");
         }
         assertThat(rows()).containsExactly(answer + " 1 message.started -");

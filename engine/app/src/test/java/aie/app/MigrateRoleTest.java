@@ -93,7 +93,7 @@ class MigrateRoleTest {
     void theConversationScriptsHaveAHistoryOfTheirOwn() throws SQLException {
         assertThat(TestDatabase.firstColumn(
                         DATABASE, "SELECT version FROM engine.flyway_history_conversation WHERE type = 'SQL' ORDER BY installed_rank"))
-                .startsWith("1", "2", "3")
+                .startsWith("1", "2", "3", "4")
                 .isSortedAccordingTo(Comparator.comparingInt(Integer::parseInt));
     }
 

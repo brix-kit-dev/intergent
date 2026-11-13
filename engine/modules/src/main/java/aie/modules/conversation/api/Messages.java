@@ -5,13 +5,12 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
-import java.util.OptionalLong;
 
 /**
  * The messages of a conversation (blueprint 6.3), and the event log of each answer (blueprint 6.4). What the end user
- * says is stored whole. An answer starts in progress with its message.started event, and grows by message.delta events.
- * Every call works within the caller's application, as {@link Conversations} does: a conversation of another
- * application or tenant is treated as one that does not exist.
+ * says is stored whole. An answer starts in progress with its message.started event, grows by message.delta events, and
+ * ends with exactly one ending event: completed, cancelled or error. Every call works within the caller's application, as
+ * {@link Conversations} does: a conversation of another application or tenant is treated as one that does not exist.
  */
 public interface Messages {
 
@@ -36,13 +35,20 @@ public interface Messages {
     Optional<Message> startAssistantMessage(Owner caller, String conversationId);
 
     /**
-     * Adds a message.delta event to an answer. The database gives it the next number of the answer.
+     * Adds a message.delta event to an answer in progress. The database gives it the next number of the answer.
      *
-     * @return the event's number, or empty when the message is not an answer in this conversation of the caller's
-     *     application
      * @throws IllegalArgumentException for text that is empty or holds a NUL
      */
-    OptionalLong addDelta(Owner caller, String conversationId, String messageId, String text);
+    Written addDelta(Owner caller, String conversationId, String messageId, String text);
+
+    /** Ends an answer with message.completed and its usage. */
+    Written complete(Owner caller, String conversationId, String messageId, Usage usage);
+
+    /** Ends an answer with message.cancelled, which carries what the deltas so far say, and the usage so far. */
+    Written cancel(Owner caller, String conversationId, String messageId, Usage usage);
+
+    /** Ends an answer with an error event and its code. */
+    Written fail(Owner caller, String conversationId, String messageId, ErrorCode code);
 
     /**
      * The events of an answer with a number above {@code after}, in order, at most {@code limit} of them. Empty when the
@@ -70,7 +76,7 @@ public interface Messages {
 
     /** The kinds of event, by the names the contract gives them. */
     enum EventType {
-        MESSAGE_STARTED, MESSAGE_DELTA;
+        MESSAGE_STARTED, MESSAGE_DELTA, MESSAGE_COMPLETED, MESSAGE_CANCELLED, ERROR;
 
         /** The contract's name, such as message.delta. */
         public String wireName() {
@@ -78,15 +84,57 @@ public interface Messages {
         }
     }
 
-    /**
-     * A message, with a completedAt of null while it is in progress. The text of an answer in progress is its deltas so
-     * far.
-     */
-    record Message(String messageId, String conversationId, Role role, Status status, String text, Instant createdAt,
-            Instant completedAt) {
+    /** Why an answer failed after it started (blueprint 6.10). */
+    enum ErrorCode {
+        /** The model failed partway. */
+        MODEL_FAILED,
+        /** The writer stopped answering, and a reader ended the answer for it. */
+        STREAM_INTERRUPTED;
+
+        /** The contract's code, such as model_failed. */
+        public String wireName() {
+            return name().toLowerCase(Locale.ROOT);
+        }
     }
 
-    /** An event of an answer, with its number. Only a delta has text. */
-    record Event(String messageId, long seq, EventType type, String text, Instant createdAt) {
+    /** The tokens an answer took. */
+    record Usage(long inputTokens, long outputTokens) {
+
+        public Usage {
+            if (inputTokens < 0 || outputTokens < 0) {
+                throw new IllegalArgumentException("A usage counts tokens, so it is 0 or more");
+            }
+        }
+    }
+
+    /** What became of an event written to an answer. */
+    sealed interface Written {
+
+        /** The answer took the event, as this number. */
+        record Added(long seq) implements Written {
+        }
+
+        /** The answer had ended already, in this status, so it took no event. */
+        record AlreadyEnded(Status status) implements Written {
+        }
+
+        /** No answer has this ID in this conversation of the caller's application. */
+        record NotFound() implements Written {
+        }
+    }
+
+    /**
+     * A message. While it is in progress, its completedAt, usage and code are null, and the text of an answer is its
+     * deltas so far. An ended answer has usage when it completed or was cancelled, and a code when it failed.
+     */
+    record Message(String messageId, String conversationId, Role role, Status status, String text, Usage usage,
+            ErrorCode code, Instant createdAt, Instant completedAt) {
+    }
+
+    /**
+     * An event of an answer, with its number. A delta has text, and message.cancelled has what was generated. Usage comes
+     * with message.completed and message.cancelled, a code with error.
+     */
+    record Event(String messageId, long seq, EventType type, String text, Usage usage, ErrorCode code, Instant createdAt) {
     }
 }

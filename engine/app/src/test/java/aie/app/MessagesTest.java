@@ -304,7 +304,10 @@ class MessagesTest {
         assertThat(size.max()).isEqualTo(Messages.MAX_TEXT);
     }
 
-    /** SQL that goes around DatabaseMessages meets the same rules in the table. */
+    /**
+     * SQL that goes around DatabaseMessages meets the same rules in the table. An answer stored as ended is refused too,
+     * by a rule of its own: AnswerEndingsTest covers it.
+     */
     @ParameterizedTest
     @ValueSource(strings = {
             "'user', 'completed', '', NULL, NULL, NULL, now()",
@@ -315,9 +318,6 @@ class MessagesTest {
             "'user', 'completed', 'Hello', 1, NULL, NULL, now()",
             "'user', 'completed', 'Hello', NULL, 1, NULL, now()",
             "'user', 'completed', 'Hello', NULL, NULL, 'model_failed', now()",
-            "'assistant', 'completed', '', NULL, NULL, NULL, now()",
-            "'assistant', 'failed', '', NULL, NULL, 'model_failed', now()",
-            "'assistant', 'blocked', '', NULL, NULL, NULL, now()",
             "'assistant', 'in_progress', 'Hi', NULL, NULL, NULL, NULL",
             "'assistant', 'in_progress', '', NULL, NULL, NULL, now()",
             "'assistant', 'in_progress', '', 1, NULL, NULL, NULL",
