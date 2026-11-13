@@ -31,6 +31,11 @@ public final class PgPool implements DatabasePort, AutoCloseable {
         return database.inSystemTx(work);
     }
 
+    @Override
+    public boolean insideTx() {
+        return database.insideTx();
+    }
+
     /** Closes every connection of the pool. Calling it again does nothing. */
     @Override
     public void close() {

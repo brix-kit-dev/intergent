@@ -21,6 +21,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -222,6 +223,55 @@ class PgDatabaseTest {
         });
 
         assertThat(setting).isEqualTo(TENANT_A);
+    }
+
+    @Test
+    void insideTxTellsWhetherTheThreadIsInATransaction() {
+        boolean before = database.insideTx();
+        boolean inTenantTx = database.inTenantTx(TENANT_A, tx -> database.insideTx());
+        boolean inSystemTx = database.inSystemTx(tx -> database.insideTx());
+        boolean after = database.insideTx();
+
+        assertThat(before).isFalse();
+        assertThat(inTenantTx).isTrue();
+        assertThat(inSystemTx).isTrue();
+        assertThat(after).isFalse();
+    }
+
+    @Test
+    void insideTxEndsWithTheTransactionHoweverItEnds() {
+        IllegalArgumentException stop = new IllegalArgumentException("stop");
+        assertThatThrownBy(() -> database.inTenantTx(TENANT_A, tx -> {
+            throw stop;
+        })).isSameAs(stop);
+        assertThat(database.insideTx()).isFalse();
+
+        assertThatThrownBy(() -> database.inTenantTx(TENANT_A, tx -> tx.update("NOT SQL"))).isInstanceOf(DatabaseException.class);
+        assertThat(database.insideTx()).isFalse();
+
+        assertThatThrownBy(() -> database.inSystemTx(outer -> database.inTenantTx(TENANT_B, inner -> 1)))
+                .isInstanceOf(IllegalStateException.class);
+        assertThat(database.insideTx()).isFalse();
+    }
+
+    /** The other thread holds the only connection, so this also shows that asking needs no connection. */
+    @Test
+    void anotherThreadsTransactionIsNotThisThreads() throws Exception {
+        CompletableFuture<Void> opened = new CompletableFuture<>();
+        CompletableFuture<Void> looked = new CompletableFuture<>();
+        try (ExecutorService threads = Executors.newVirtualThreadPerTaskExecutor()) {
+            Future<Boolean> there = threads.submit(() -> database.inTenantTx(TENANT_A, tx -> {
+                opened.complete(null);
+                looked.orTimeout(10, TimeUnit.SECONDS).join();
+                return database.insideTx();
+            }));
+            opened.get(10, TimeUnit.SECONDS);
+            boolean here = database.insideTx();
+            looked.complete(null);
+
+            assertThat(here).isFalse();
+            assertThat(there.get(10, TimeUnit.SECONDS)).isTrue();
+        }
     }
 
     @Test

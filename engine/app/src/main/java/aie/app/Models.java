@@ -8,6 +8,7 @@ import aie.ports.ModelPort;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.function.BooleanSupplier;
 
 /**
  * The models of the engine and the routes to them (blueprint 8.3 and 8.4). There is only the fake model so far. When
@@ -33,8 +34,12 @@ final class Models {
         return Map.of(CUSTOMER_CHAT, new Route(List.of(FakeModel.MODEL), ANSWER_TIME));
     }
 
-    /** @throws IllegalArgumentException for a route to a model that is not in the registry */
-    static Gateway gateway() {
-        return new RoutingGateway(registry(), routes());
+    /**
+     * @param insideTx whether the calling thread is inside a database transaction, so that the gateway can refuse such a
+     *     call (A-14): {@code insideTx} of the role's pool
+     * @throws IllegalArgumentException for a route to a model that is not in the registry
+     */
+    static Gateway gateway(BooleanSupplier insideTx) {
+        return new RoutingGateway(registry(), routes(), insideTx);
     }
 }

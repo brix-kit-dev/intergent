@@ -135,6 +135,21 @@ class PgRuntimeTest {
         }
     }
 
+    @Test
+    void aPoolTellsWhetherTheThreadIsInATransaction() {
+        try (PgPool pool = PgRuntime.pool(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD, 1)) {
+            boolean before = pool.insideTx();
+            boolean inTenantTx = pool.inTenantTx("ten_a", tx -> pool.insideTx());
+            boolean inSystemTx = pool.inSystemTx(tx -> pool.insideTx());
+            boolean after = pool.insideTx();
+
+            assertThat(before).isFalse();
+            assertThat(inTenantTx).isTrue();
+            assertThat(inSystemTx).isTrue();
+            assertThat(after).isFalse();
+        }
+    }
+
     /** Twelve transactions at once on a pool of three: the rest wait for a connection instead of opening one. */
     @Test
     void aPoolHoldsNoMoreConnectionsThanItsSize() throws Exception {

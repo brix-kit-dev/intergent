@@ -48,8 +48,14 @@ public final class PgDatabase implements DatabasePort {
         return inTransaction(work);
     }
 
+    /** Spring keeps the transaction of each thread apart, so this answers for the calling thread alone. */
+    @Override
+    public boolean insideTx() {
+        return TransactionSynchronizationManager.isActualTransactionActive();
+    }
+
     private <T> T inTransaction(Function<Tx, T> work) {
-        if (TransactionSynchronizationManager.isActualTransactionActive()) {
+        if (insideTx()) {
             throw new IllegalStateException("Transactions do not nest");
         }
         try {

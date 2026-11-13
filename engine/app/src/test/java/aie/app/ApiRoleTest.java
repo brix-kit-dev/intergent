@@ -227,6 +227,19 @@ class ApiRoleTest {
         assertThat(pieces).hasSize(8).startsWith("Piece 1 of 8. ");
     }
 
+    /** A-14: the api's gateway asks the api's own pool, so a call from inside one of its transactions gets no answer. */
+    @Test
+    void theApiGatewayRefusesACallFromInsideATransaction() {
+        PgPool pool = context.getBean(PgPool.class);
+        Gateway gateway = context.getBean(Gateway.class);
+        List<String> pieces = new ArrayList<>();
+
+        assertThatThrownBy(() -> pool.inTenantTx("ten_a", tx -> gateway.answer(new Gateway.Request(
+                        Models.CUSTOMER_CHAT, List.of(new Gateway.Turn(Gateway.Role.USER, "Hello")), () -> false), pieces::add)))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("(A-14)");
+        assertThat(pieces).isEmpty();
+    }
+
     @Test
     void stoppingTheApiClosesItsConnections() {
         awaitOnlyTheClassPool();

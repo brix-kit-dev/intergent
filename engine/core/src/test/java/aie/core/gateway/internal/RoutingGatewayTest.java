@@ -22,6 +22,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.test.system.CapturedOutput;
@@ -30,6 +31,8 @@ import org.springframework.boot.test.system.OutputCaptureExtension;
 class RoutingGatewayTest {
 
     private static final Gateway.Cancellation NEVER = () -> false;
+    /** Not inside a database transaction. */
+    private static final BooleanSupplier OUTSIDE = () -> false;
     private static final Duration MINUTE = Duration.ofMinutes(1);
     private static final ModelPort.Result DONE = new ModelPort.Completed(new ModelPort.Usage(5, 2));
 
@@ -66,7 +69,7 @@ class RoutingGatewayTest {
     void itAnswersWithTheFirstModelOfTheTasksRoute() {
         Gateway gateway = new RoutingGateway(
                 Map.of("first", model("first", DONE, "a", "b"), "second", model("second", DONE, "x")),
-                Map.of("chat", route("first", "second")));
+                Map.of("chat", route("first", "second")), OUTSIDE);
 
         Result result = answer(gateway, ask("chat", "Hello"));
 
@@ -79,7 +82,7 @@ class RoutingGatewayTest {
     void eachTaskGoesToItsOwnRoute() {
         Gateway gateway = new RoutingGateway(
                 Map.of("one", model("one", DONE), "two", model("two", DONE)),
-                Map.of("chat", route("one"), "translate", route("two")));
+                Map.of("chat", route("one"), "translate", route("two")), OUTSIDE);
 
         answer(gateway, ask("translate", "Hello"));
         answer(gateway, ask("chat", "Hello"));
@@ -92,7 +95,7 @@ class RoutingGatewayTest {
     void everyCallCarriesTheTimeOfItsRoute() {
         Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of(
                 "quick", new Route(List.of("m"), Duration.ofSeconds(3)),
-                "slow", new Route(List.of("m"), Duration.ofSeconds(90))));
+                "slow", new Route(List.of("m"), Duration.ofSeconds(90))), OUTSIDE);
 
         answer(gateway, ask("quick", "Hello"));
         answer(gateway, ask("slow", "Hello"));
@@ -102,7 +105,7 @@ class RoutingGatewayTest {
 
     @Test
     void theModelGetsTheConversationAndTheCancel() {
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")));
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), OUTSIDE);
         AtomicBoolean cancel = new AtomicBoolean();
 
         answer(gateway, new Request("chat", List.of(
@@ -121,7 +124,7 @@ class RoutingGatewayTest {
         Gateway gateway = new RoutingGateway(Map.of(
                 "stops", model("stops", new ModelPort.Cancelled(new ModelPort.Usage(4, 1))),
                 "breaks", model("breaks", new ModelPort.Failed("the model's own words", 2, new ModelPort.Usage(4, 6)))),
-                Map.of("stop", route("stops"), "break", route("breaks")));
+                Map.of("stop", route("stops"), "break", route("breaks")), OUTSIDE);
 
         assertThat(answer(gateway, ask("stop", "Hello"))).isEqualTo(new Cancelled(new Usage(4, 1)));
         assertThat(answer(gateway, ask("break", "Hello"))).isEqualTo(new Failed(2, new Usage(4, 6)));
@@ -133,7 +136,7 @@ class RoutingGatewayTest {
     void aFailureIsLoggedWithTheModelsReason(CapturedOutput output) {
         Gateway gateway = new RoutingGateway(
                 Map.of("m", model("m", new ModelPort.Failed("the vendor is out of quota", 1, new ModelPort.Usage(5, 3)), "a")),
-                Map.of("chat", route("m")));
+                Map.of("chat", route("m")), OUTSIDE);
 
         Result result = answer(gateway, ask("chat", "Hello"));
 
@@ -143,7 +146,7 @@ class RoutingGatewayTest {
 
     @Test
     void aTaskWithoutARouteIsAMistake() {
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")));
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), OUTSIDE);
 
         assertThatThrownBy(() -> answer(gateway, ask("translate", "Hello")))
                 .isInstanceOf(IllegalArgumentException.class).hasMessage("No route answers the task translate");
@@ -154,7 +157,7 @@ class RoutingGatewayTest {
     @Test
     void aRequestThatIsNotWellFormedIsAMistake() {
         Checks noting = noting();
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), noting);
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), noting, OUTSIDE);
         Turn hello = new Turn(Role.USER, "Hello");
         List<Request> wrong = List.of(
                 new Request("chat", List.of(), NEVER),
@@ -174,7 +177,7 @@ class RoutingGatewayTest {
     /** Blueprint 8.2: the input check comes before the model, and the caller sees only what the output check passed. */
     @Test
     void theChecksStandBetweenTheCallerAndTheModel() {
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a", "b")), Map.of("chat", route("m")), noting());
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a", "b")), Map.of("chat", route("m")), noting(), OUTSIDE);
 
         answer(gateway, ask("chat", "Hello"));
 
@@ -194,17 +197,59 @@ class RoutingGatewayTest {
                 return piece;
             }
         };
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a")), Map.of("chat", route("m")), refusing);
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a")), Map.of("chat", route("m")), refusing, OUTSIDE);
 
         assertThatThrownBy(() -> answer(gateway, ask("chat", "Hello"))).hasMessage("not this one");
         assertThat(events).isEmpty();
+    }
+
+    /**
+     * A-14: from inside a transaction nothing is checked, chosen or called. Even a task without a route gets this answer,
+     * which shows that the gateway asks before anything else.
+     */
+    @Test
+    void aCallFromInsideATransactionIsRefusedBeforeAnything() {
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a")), Map.of("chat", route("m")), noting(), () -> true);
+
+        assertThatThrownBy(() -> answer(gateway, ask("chat", "Hello")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("No model is called inside a database transaction (A-14), so end it first");
+        assertThatThrownBy(() -> answer(gateway, ask("translate", "Hello"))).isInstanceOf(IllegalStateException.class);
+        assertThat(events).isEmpty();
+        assertThat(calls).isEmpty();
+    }
+
+    /** One gateway serves threads in and out of transactions, so it asks on every call. */
+    @Test
+    void itAsksAboutTheTransactionOnEveryCall() {
+        AtomicBoolean inside = new AtomicBoolean();
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), inside::get);
+
+        Result before = answer(gateway, ask("chat", "Hello"));
+        inside.set(true);
+        assertThatThrownBy(() -> answer(gateway, ask("chat", "Hello"))).isInstanceOf(IllegalStateException.class);
+        inside.set(false);
+        Result after = answer(gateway, ask("chat", "Hello"));
+
+        assertThat(before).isInstanceOf(Completed.class);
+        assertThat(after).isInstanceOf(Completed.class);
+        assertThat(events).containsExactly("model m", "model m");
+    }
+
+    @Test
+    void aGatewayCannotBeBuiltWithoutTheTransactionCheck() {
+        Map<String, ModelPort> models = Map.of("m", model("m", DONE));
+        Map<String, Route> routes = Map.of("chat", route("m"));
+
+        assertThatThrownBy(() -> new RoutingGateway(models, routes, null)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new RoutingGateway(models, routes, Checks.NONE, null)).isInstanceOf(NullPointerException.class);
     }
 
     @Test
     void aRouteToAModelTheGatewayWasNotGivenStopsIt() {
         Map<String, ModelPort> models = Map.of("m", model("m", DONE));
 
-        assertThatThrownBy(() -> new RoutingGateway(models, Map.of("chat", route("m", "missing"))))
+        assertThatThrownBy(() -> new RoutingGateway(models, Map.of("chat", route("m", "missing")), OUTSIDE))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("The route of chat names the model missing, which the gateway was not given");
     }
@@ -230,8 +275,8 @@ class RoutingGatewayTest {
         Map<String, Route> routes = new HashMap<>(Map.of("chat", route("m")));
         List<String> preference = new ArrayList<>(List.of("m"));
         Route route = new Route(preference, MINUTE);
-        Gateway gateway = new RoutingGateway(models, routes);
-        Gateway second = new RoutingGateway(models, Map.of("chat", route));
+        Gateway gateway = new RoutingGateway(models, routes, OUTSIDE);
+        Gateway second = new RoutingGateway(models, Map.of("chat", route), OUTSIDE);
 
         models.clear();
         routes.clear();

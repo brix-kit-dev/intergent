@@ -43,20 +43,21 @@ class ApiRole {
     }
 
     /**
-     * The session keys and the routes to the models are checked before the pool opens, so a missing or weak key or a
-     * route to a model that does not exist never gets as far as the database. The pool runs the self-check of blueprint
-     * 7.6 before its first connection, so a role that may not serve traffic never opens a port. The context closes the
-     * pool as it closes, because the pool is AutoCloseable. A context that fails before it has made its beans would
-     * not, so the role closes the pool itself then.
+     * The session keys are checked before the pool opens, so a missing or weak key never gets as far as the database.
+     * The pool runs the self-check of blueprint 7.6 before its first connection, so a role that may not serve traffic
+     * never opens a port. The gateway comes next, because it asks the pool whether a call comes from inside a
+     * transaction (A-14); a route to a model that does not exist still refuses startup. The context closes the pool as
+     * it closes, because the pool is AutoCloseable. A context that fails before it has made its beans would not, and
+     * neither would a gateway that refuses its routes, so the role closes the pool itself then.
      */
     static ConfigurableApplicationContext start(String... args) {
         RoleSettings settings = RoleSettings.read(args);
         String address = settings.required(RoleSettings.DATABASE_URL);
         String password = settings.required(RoleSettings.APP_PASSWORD);
         SessionTokens sessionTokens = SessionKeys.tokens(settings, Clock.systemUTC());
-        Gateway gateway = Models.gateway();
         PgPool database = PgRuntime.pool(address, password, POOL_SIZE);
         try {
+            Gateway gateway = Models.gateway(database::insideTx);
             return serve(context -> {
                 context.registerBean(PgPool.class, () -> database);
                 context.registerBean(ApiKeyLookup.class, () -> new DatabaseApiKeyLookup(database));

@@ -194,6 +194,11 @@ class ApiKeyLookupTest {
             public <T> T inSystemTx(Function<Tx, T> work) {
                 throw new AssertionError("A malformed key reached the database");
             }
+
+            @Override
+            public boolean insideTx() {
+                throw new AssertionError("A malformed key reached the database");
+            }
         };
 
         assertThat(new DatabaseApiKeyLookup(refusing).find(key)).isEmpty();

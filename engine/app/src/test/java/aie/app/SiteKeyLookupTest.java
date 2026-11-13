@@ -185,6 +185,11 @@ class SiteKeyLookupTest {
             public <T> T inSystemTx(Function<Tx, T> work) {
                 throw new AssertionError("A malformed site key reached the database");
             }
+
+            @Override
+            public boolean insideTx() {
+                throw new AssertionError("A malformed site key reached the database");
+            }
         };
 
         assertThat(new DatabaseSiteKeyLookup(refusing).check(key, SHOP)).isEqualTo(new Checked.Unknown());

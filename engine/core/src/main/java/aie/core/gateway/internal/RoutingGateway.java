@@ -4,13 +4,16 @@ import aie.core.gateway.api.Gateway;
 import aie.ports.ModelPort;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.function.BooleanSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  * {@link Gateway} by route table (blueprint 8.2 to 8.4). It is built once from the models and the routes, and refuses a
  * route to a model it was not given, so that such a mistake stops the role at startup instead of failing requests
- * later. Every call carries its route's time limit (A-9). Fallback, retries, budgets and prompts are not here yet.
+ * later. Every call carries its route's time limit (A-9). A call from inside a database transaction is refused before
+ * anything else (A-14). Fallback, retries, budgets and prompts are not here yet.
  */
 public final class RoutingGateway implements Gateway {
 
@@ -19,19 +22,24 @@ public final class RoutingGateway implements Gateway {
     private final Map<String, ModelPort> models;
     private final Map<String, Route> routes;
     private final Checks checks;
+    private final BooleanSupplier insideTx;
 
     /** With checks that pass everything, since there is no trust layer yet. */
-    public RoutingGateway(Map<String, ModelPort> models, Map<String, Route> routes) {
-        this(models, routes, Checks.NONE);
+    public RoutingGateway(Map<String, ModelPort> models, Map<String, Route> routes, BooleanSupplier insideTx) {
+        this(models, routes, Checks.NONE, insideTx);
     }
 
     /**
      * @param models the registry: each model's ID and the adapter that calls it
      * @param routes each task's route
      * @param checks the checks on the way to the model and back
+     * @param insideTx whether the calling thread is inside a database transaction, asked on every call; the role passes
+     *     {@link aie.ports.DatabasePort#insideTx} of its pool
      * @throws IllegalArgumentException for a route to a model that is not in the registry
      */
-    public RoutingGateway(Map<String, ModelPort> models, Map<String, Route> routes, Checks checks) {
+    public RoutingGateway(
+            Map<String, ModelPort> models, Map<String, Route> routes, Checks checks, BooleanSupplier insideTx) {
+        Objects.requireNonNull(insideTx, "A gateway needs to know whether a call comes from inside a transaction");
         routes.forEach((task, route) -> route.models().forEach(model -> {
             if (!models.containsKey(model)) {
                 throw new IllegalArgumentException(
@@ -41,11 +49,18 @@ public final class RoutingGateway implements Gateway {
         this.models = Map.copyOf(models);
         this.routes = Map.copyOf(routes);
         this.checks = checks;
+        this.insideTx = insideTx;
     }
 
-    /** The model's reason for a failure goes to the log alone, with the task, the model and the pieces sent. */
+    /**
+     * Refuses a call from inside a transaction first, because the input check may come to call a model too. The model's
+     * reason for a failure goes to the log alone, with the task, the model and the pieces sent.
+     */
     @Override
     public Result answer(Request request, Output output) {
+        if (insideTx.getAsBoolean()) {
+            throw new IllegalStateException("No model is called inside a database transaction (A-14), so end it first");
+        }
         Route route = routeOf(request);
         checks.input(request);
         String model = route.models().getFirst();

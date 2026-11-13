@@ -29,7 +29,7 @@ class ModelsTest {
     void theGatewayAnswersCustomerChatWithTheFakeModel() {
         List<String> pieces = new ArrayList<>();
 
-        Result result = Models.gateway().answer(
+        Result result = Models.gateway(() -> false).answer(
                 new Request(Models.CUSTOMER_CHAT, List.of(new Turn(Role.USER, "Hello")), () -> false), pieces::add);
 
         assertThat(pieces).hasSize(8).startsWith("Piece 1 of 8. ").endsWith("Piece 8 of 8. ");

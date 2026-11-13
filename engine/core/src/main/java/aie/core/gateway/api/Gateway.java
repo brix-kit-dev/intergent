@@ -15,6 +15,8 @@ public interface Gateway {
      *
      * @throws IllegalArgumentException for a task that no route answers, or a request that is not well formed; both
      *     are mistakes in the calling code. An exception from {@code output} also reaches the caller.
+     * @throws IllegalStateException for a call from inside a database transaction, before any model is asked (A-14):
+     *     an answer would hold the transaction's connection for as long as it takes
      */
     Result answer(Request request, Output output);
 
