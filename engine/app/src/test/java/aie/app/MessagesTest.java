@@ -166,8 +166,9 @@ class MessagesTest {
     /**
      * Each later row gets a smaller ID and an earlier time, so neither can give the order by chance. Then the first row is
      * written again, which moves it behind the others where they lie, so neither the order they lie in nor its reverse is
-     * the right one. The index on the conversation holds the rows in order already, so the test turns index scans off for
-     * engine_app: only ORDER BY can keep the order then, whatever plan the database picks.
+     * the right one; the table refuses any change, so the superuser writes it with triggers off. The index on the
+     * conversation holds the rows in order already, so the test turns index scans off for engine_app: only ORDER BY can
+     * keep the order then, whatever plan the database picks.
      */
     @Test
     void theOrderIsTheDatabasesOwnNumberAndNotTheIdTheTimeOrThePlace() throws SQLException {
@@ -181,7 +182,8 @@ class MessagesTest {
         database.inTenantTx(caller.tenantId(), tx -> tx.update(add, "msg_B", caller.tenantId(), conversation, "second", "1 hour"));
         database.inTenantTx(caller.tenantId(), tx -> tx.update(add, "msg_A", caller.tenantId(), conversation, "third", "2 hours"));
 
-        TestDatabase.asAdmin(DATABASE, "UPDATE engine.conversation_messages SET text = text WHERE message_id = 'msg_C'");
+        TestDatabase.asAdmin(DATABASE,
+                "SET session_replication_role = replica; UPDATE engine.conversation_messages SET text = text WHERE message_id = 'msg_C'");
         assertThat(TestDatabase.firstColumn(DATABASE, "SELECT message_id FROM engine.conversation_messages"))
                 .as("where the rows lie").containsExactly("msg_B", "msg_A", "msg_C");
 
@@ -355,7 +357,7 @@ class MessagesTest {
         assertThat(rows()).isEmpty();
     }
 
-    /** M2 deletes nothing, and an answer will change only through its events. */
+    /** M2 deletes nothing, and a message changes only through its events, which the table refuses to do by hand. */
     @Test
     void theEngineCanNeitherChangeNorDeleteAMessage() throws SQLException {
         Owner caller = newApplication();
@@ -364,7 +366,7 @@ class MessagesTest {
         messages.startAssistantMessage(caller, conversation);
 
         assertRefused(() -> database.inTenantTx(caller.tenantId(), tx -> tx.update("UPDATE conversation_messages SET text = 'Hi'")),
-                "permission denied");
+                "A message changes only through its events");
         assertRefused(() -> database.inTenantTx(caller.tenantId(), tx -> tx.update("DELETE FROM conversation_messages")),
                 "permission denied");
         assertThat(rows()).containsExactly(conversation + " user completed Hello", conversation + " assistant in_progress ");
