@@ -16,6 +16,8 @@ import aie.core.tenancy.internal.DatabaseEndUsers;
 import aie.core.tenancy.internal.DatabaseIdempotencyKeys;
 import aie.core.tenancy.internal.DatabaseLowerTenants;
 import aie.core.tenancy.internal.DatabaseSiteKeyLookup;
+import aie.modules.conversation.api.Conversations;
+import aie.modules.conversation.internal.DatabaseConversations;
 import aie.ports.DatabaseException;
 import java.time.Clock;
 import java.util.function.Consumer;
@@ -68,6 +70,7 @@ class ApiRole {
                 context.registerBean(SiteKeyLookup.class, () -> new DatabaseSiteKeyLookup(database));
                 context.registerBean(SessionTokens.class, () -> sessionTokens);
                 context.registerBean(Gateway.class, () -> gateway);
+                context.registerBean(Conversations.class, () -> new DatabaseConversations(database));
             }, args);
         } catch (RuntimeException e) {
             database.close();

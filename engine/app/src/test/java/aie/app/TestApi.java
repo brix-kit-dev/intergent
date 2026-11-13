@@ -11,6 +11,7 @@ import aie.core.tenancy.api.LowerTenants.Acting;
 import aie.core.tenancy.api.SessionTokens;
 import aie.core.tenancy.api.SiteKeyLookup;
 import aie.core.tenancy.internal.SignedSessionTokens;
+import aie.modules.conversation.api.Conversations;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Arrays;
@@ -87,6 +88,11 @@ final class TestApi {
 
     static ConfigurableApplicationContext start(
             ApiKeyLookup keys, ApiKeyManagement management, EndUsers endUsers, String... args) {
+        return start(keys, management, endUsers, new StandInConversations(), args);
+    }
+
+    static ConfigurableApplicationContext start(ApiKeyLookup keys, ApiKeyManagement management, EndUsers endUsers,
+            Conversations conversations, String... args) {
         return ApiRole.serve(context -> {
             context.registerBean(ApiKeyLookup.class, () -> keys);
             context.registerBean(ApiKeyManagement.class, () -> management);
@@ -95,6 +101,7 @@ final class TestApi {
             context.registerBean(EndUsers.class, () -> endUsers);
             context.registerBean(SiteKeyLookup.class, () -> SITE_KEYS);
             context.registerBean(SessionTokens.class, () -> SESSION_TOKENS);
+            context.registerBean(Conversations.class, () -> conversations);
         }, args);
     }
 
@@ -149,6 +156,35 @@ final class TestApi {
         public String anonymous(Owner caller) {
             calls.add(caller.tenantId() + "/" + caller.applicationId() + " makes an anonymous end user");
             return "eu_stand" + made.incrementAndGet();
+        }
+    }
+
+    /**
+     * Starts conversations with IDs it makes up, finds a conversation only for the application that started it, and
+     * remembers every call.
+     */
+    static final class StandInConversations implements Conversations {
+
+        static final Instant STARTED_AT = Instant.parse("2026-11-13T00:00:00Z");
+
+        final List<String> calls = new CopyOnWriteArrayList<>();
+        private final Map<String, Conversation> started = new ConcurrentHashMap<>();
+        private final AtomicInteger made = new AtomicInteger();
+
+        @Override
+        public Conversation start(Owner caller, String endUserId, String locale) {
+            String application = caller.tenantId() + "/" + caller.applicationId();
+            calls.add(application + " starts for " + endUserId + " in " + locale);
+            Conversation conversation = new Conversation("conv_stand" + made.incrementAndGet(), endUserId, locale, STARTED_AT);
+            started.put(application + " " + conversation.conversationId(), conversation);
+            return conversation;
+        }
+
+        @Override
+        public Optional<Conversation> find(Owner caller, String conversationId) {
+            String application = caller.tenantId() + "/" + caller.applicationId();
+            calls.add(application + " finds " + conversationId);
+            return Optional.ofNullable(started.get(application + " " + conversationId));
         }
     }
 

@@ -16,6 +16,7 @@ import aie.core.tenancy.api.SessionTokens.IdentityLevel;
 import aie.core.tenancy.api.SessionTokens.Session;
 import aie.core.tenancy.internal.DatabaseProvisioning;
 import aie.core.tenancy.internal.SignedSessionTokens;
+import aie.http.api.model.Conversation;
 import aie.http.api.model.CreatedApiKey;
 import java.io.IOException;
 import java.net.InetAddress;
@@ -376,6 +377,67 @@ class ApiRoleTest {
                         "SELECT tenant_id || ' ' || application_id FROM engine.tenancy_idempotency_keys WHERE idempotency_key = 'for-lower-1'"))
                 .containsExactly(lower + " " + lowerApplication);
         assertThat(onBehalfOf(at("/v1/test/caller"), platformKey.key(), unrelated).statusCode()).isEqualTo(403);
+    }
+
+    private static HttpResponse<String> startConversation(String key, String idempotencyKey, String body) throws Exception {
+        return HttpClient.newHttpClient().send(at("/v1/conversations").header("Authorization", "Bearer " + key)
+                .header("Idempotency-Key", idempotencyKey).header("Content-Type", "application/json")
+                .POST(BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    /**
+     * POST /v1/conversations on the real database (M2-4-2): tenancy makes the end user once, the conversation module
+     * keeps the conversation, and a retry with the same Idempotency-Key gets the same conversation, not a second one.
+     */
+    @Test
+    void aConversationStartsForTheHostsUserAndARetryGetsTheSameOne() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String application = provisioning.createApplication(tenant, "test", "internal");
+        String key = provisioning.createKey(tenant, application).key();
+        String body = "{\"external_user_id\":\"host-user-1\",\"locale\":\"ja-jp\"}";
+
+        HttpResponse<String> started = startConversation(key, "start-1", body);
+        HttpResponse<String> retry = startConversation(key, "start-1", body);
+        HttpResponse<String> another = startConversation(key, "start-2", body);
+
+        assertThat(started.statusCode()).isEqualTo(201);
+        Conversation first = JSON.readValue(started.body(), Conversation.class);
+        assertThat(first.getLocale()).isEqualTo("ja-JP");
+        assertThat(retry.statusCode()).isEqualTo(201);
+        assertThat(retry.body()).isEqualTo(started.body());
+        Conversation second = JSON.readValue(another.body(), Conversation.class);
+        assertThat(second.getId()).isNotEqualTo(first.getId());
+        assertThat(second.getEndUserId()).isEqualTo(first.getEndUserId());
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT conversation_id || ' ' || application_id || ' ' || end_user_id"
+                        + " || ' ' || locale FROM engine.conversation_conversations WHERE tenant_id = '" + tenant + "' ORDER BY created_at"))
+                .containsExactly(first.getId() + " " + application + " " + first.getEndUserId() + " ja-JP",
+                        second.getId() + " " + application + " " + first.getEndUserId() + " ja-JP");
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT end_user_id || ' ' || external_id FROM engine.tenancy_end_users"
+                        + " WHERE tenant_id = '" + tenant + "'"))
+                .containsExactly(first.getEndUserId() + " host-user-1");
+    }
+
+    /** On-Behalf-Of on the real database: the end user and the conversation belong to the lower tenant's application. */
+    @Test
+    void aPlatformStartsAConversationForItsLowerTenant() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String platform = provisioning.createTenant("jp1", null);
+        IssuedKey platformKey = provisioning.createKey(platform, provisioning.createApplication(platform, "test", "internal"));
+        String lower = provisioning.createTenant("jp1", platform);
+        String lowerApplication = provisioning.createApplication(lower, "test", "internal");
+
+        HttpResponse<String> started = onBehalfOf(at("/v1/conversations").header("Content-Type", "application/json")
+                .POST(BodyPublishers.ofString("{\"external_user_id\":\"host-user-1\"}")), platformKey.key(), lower);
+
+        assertThat(started.statusCode()).isEqualTo(201);
+        Conversation conversation = JSON.readValue(started.body(), Conversation.class);
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT tenant_id || ' ' || application_id FROM engine.conversation_conversations"
+                        + " WHERE conversation_id = '" + conversation.getId() + "'"))
+                .containsExactly(lower + " " + lowerApplication);
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT tenant_id || ' ' || application_id FROM engine.tenancy_end_users"
+                        + " WHERE end_user_id = '" + conversation.getEndUserId() + "'"))
+                .containsExactly(lower + " " + lowerApplication);
     }
 
     @Test
