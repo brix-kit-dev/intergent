@@ -12,6 +12,7 @@ import aie.modules.conversation.api.Conversations;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.ZoneOffset;
 import java.util.Objects;
+import java.util.regex.Pattern;
 import org.jspecify.annotations.Nullable;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -20,11 +21,16 @@ import org.springframework.web.server.ResponseStatusException;
 
 /**
  * The conversation operations of the contract. The generated interface has no defaults, so every operation has to be
- * here. Starting a conversation works; the others answer 404, as their paths did before this controller, until their
- * points of M2 come.
+ * here. Starting and reading a conversation work; the message operations answer 404, as their paths did before this
+ * controller, until their points of M2 come.
  */
 @RestController
 class ConversationController implements ConversationsApi {
+
+    /** The contract's ConversationId: this prefix, then letters and digits, at most 64 characters in all. */
+    private static final String CONVERSATION_PREFIX = "conv_";
+    private static final int MAX_CONVERSATION_ID = 64;
+    private static final Pattern CONVERSATION_ID = Pattern.compile(CONVERSATION_PREFIX + "[0-9A-Za-z]+");
 
     private final EndUsers endUsers;
     private final Conversations conversations;
@@ -51,16 +57,20 @@ class ConversationController implements ConversationsApi {
         String locale = SessionRequests.locale(body.getLocale());
         Owner caller = caller();
         Conversations.Conversation started = conversations.start(caller, endUsers.resolve(caller, externalId), locale);
-        Conversation answer = new Conversation(
-                        started.conversationId(), started.endUserId(), started.createdAt().atOffset(ZoneOffset.UTC))
-                .locale(started.locale());
-        return ResponseEntity.status(HttpStatus.CREATED).body(answer);
+        return ResponseEntity.status(HttpStatus.CREATED).body(answer(started));
     }
 
+    /**
+     * A conversation of the caller's application. One of another application or another tenant reads as missing, the
+     * same as one that does not exist, so a 404 tells nothing about other callers. For On-Behalf-Of, the caller is
+     * already the lower tenant's application.
+     */
     @Override
     public ResponseEntity<Conversation> getConversation(String conversationId, @Nullable String engineVersion,
             @Nullable String traceparent, @Nullable String onBehalfOf) {
-        throw notYet();
+        Conversations.Conversation found = conversations.find(caller(), conversationId(conversationId))
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
+        return ResponseEntity.ok(answer(found));
     }
 
     @Override
@@ -98,6 +108,24 @@ class ConversationController implements ConversationsApi {
                     "external_user_id must have 1 to " + SessionRequests.MAX_EXTERNAL_ID + " characters");
         }
         return externalId;
+    }
+
+    /**
+     * The conversation ID of the path, as the contract's ConversationId allows it. The whole ID has to match, so a line
+     * break at its end does not pass either.
+     */
+    private static String conversationId(String conversationId) {
+        if (!CONVERSATION_ID.matcher(conversationId).matches() || conversationId.length() > MAX_CONVERSATION_ID) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "conversation_id must be " + CONVERSATION_PREFIX
+                    + " followed by 1 to " + (MAX_CONVERSATION_ID - CONVERSATION_PREFIX.length()) + " letters or digits");
+        }
+        return conversationId;
+    }
+
+    private static Conversation answer(Conversations.Conversation conversation) {
+        return new Conversation(conversation.conversationId(), conversation.endUserId(),
+                        conversation.createdAt().atOffset(ZoneOffset.UTC))
+                .locale(conversation.locale());
     }
 
     /** An operation whose point of M2 has not come yet. */

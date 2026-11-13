@@ -440,6 +440,40 @@ class ApiRoleTest {
                 .containsExactly(lower + " " + lowerApplication);
     }
 
+    private static HttpResponse<String> readConversation(String key, String id) throws Exception {
+        return HttpClient.newHttpClient().send(at("/v1/conversations/" + id).header("Authorization", "Bearer " + key).build(),
+                HttpResponse.BodyHandlers.ofString());
+    }
+
+    /**
+     * GET /v1/conversations/{id} on the real database (M2-4-3): a conversation reads back as it was started, but only
+     * with a key of its own application. The tenant's live application, another tenant and an unknown ID all get the
+     * same 404.
+     */
+    @Test
+    void aConversationIsReadOnlyThroughItsOwnApplication() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String testKey = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "internal")).key();
+        String liveKey = provisioning.createKey(tenant, provisioning.createApplication(tenant, "live", "internal")).key();
+        String stranger = provisioning.createTenant("jp1", null);
+        String strangerKey = provisioning.createKey(stranger, provisioning.createApplication(stranger, "test", "internal")).key();
+        HttpResponse<String> started = startConversation(testKey, "read-1", "{\"external_user_id\":\"host-user-1\",\"locale\":\"ja-jp\"}");
+        String id = JSON.readValue(started.body(), Conversation.class).getId();
+
+        HttpResponse<String> read = readConversation(testKey, id);
+        HttpResponse<String> unknown = readConversation(testKey, "conv_" + "0".repeat(26));
+
+        assertThat(read.statusCode()).isEqualTo(200);
+        assertThat(read.body()).isEqualTo(started.body());
+        assertThat(unknown.statusCode()).isEqualTo(404);
+        for (String otherKey : List.of(liveKey, strangerKey)) {
+            HttpResponse<String> other = readConversation(otherKey, id);
+            assertThat(other.statusCode()).isEqualTo(404);
+            assertThat(other.body()).isEqualTo(unknown.body());
+        }
+    }
+
     @Test
     void missingTheAddressIsRefusedByName(CapturedOutput output) {
         assertThat(ApiRole.run("--engine.database.url=", password("x"))).isEqualTo(EngineApplication.EXIT_FAILED);
