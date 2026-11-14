@@ -211,8 +211,8 @@ final class TestApi {
     }
 
     /**
-     * Answers each ask the way a test tells it, and keeps every answer for StandInMessages to find: in progress first, then
-     * as it ended. Remembers every call.
+     * Answers each ask the way a test tells it, and keeps every answer and its events for StandInMessages to find: in
+     * progress first, then as it ended. Remembers every call.
      */
     static final class StandInAnswers implements Answers {
 
@@ -237,6 +237,7 @@ final class TestApi {
 
         final List<String> calls = new CopyOnWriteArrayList<>();
         final Map<String, Messages.Message> answers = new ConcurrentHashMap<>();
+        final Map<String, List<Messages.Event>> events = new ConcurrentHashMap<>();
         volatile Outcome outcome = Outcome.COMPLETED;
         private final AtomicInteger made = new AtomicInteger();
 
@@ -256,30 +257,51 @@ final class TestApi {
             Messages.Message started = new Messages.Message("msg_a" + number, conversationId, Messages.Role.ASSISTANT,
                     Messages.Status.IN_PROGRESS, "", null, null, ASKED_AT, null);
             answers.put(started.messageId(), started);
+            List<Messages.Event> log = new CopyOnWriteArrayList<>();
+            log.add(event(started, 1, Messages.EventType.MESSAGE_STARTED, null, null, null));
+            events.put(started.messageId(), log);
             CompletableFuture<Void> ended = new CompletableFuture<>();
             switch (now) {
                 case COMPLETED -> end(started, Messages.Status.COMPLETED, "Hello!", new Messages.Usage(6, 2), null, ended);
                 case FAILED -> end(started, Messages.Status.FAILED, "Hel", null, Messages.ErrorCode.MODEL_FAILED, ended);
                 case COMPLETES_SOON -> CompletableFuture.delayedExecutor(100, TimeUnit.MILLISECONDS).execute(() ->
                         end(started, Messages.Status.COMPLETED, "Hello!", new Messages.Usage(6, 2), null, ended));
-                default -> answers.put(started.messageId(), new Messages.Message(started.messageId(), conversationId,
-                        Messages.Role.ASSISTANT, Messages.Status.IN_PROGRESS, "Hel", null, null, ASKED_AT, null));
+                default -> {
+                    answers.put(started.messageId(), new Messages.Message(started.messageId(), conversationId,
+                            Messages.Role.ASSISTANT, Messages.Status.IN_PROGRESS, "Hel", null, null, ASKED_AT, null));
+                    log.add(event(started, 2, Messages.EventType.MESSAGE_DELTA, "Hel", null, null));
+                }
             }
             return new Start.Started(new Messages.Asked(question, started), ended);
         }
 
+        /** The delta, then the ending, into the log; then the answer as it ended. */
         private void end(Messages.Message started, Messages.Status status, String text, Messages.Usage usage,
                 Messages.ErrorCode code, CompletableFuture<Void> ended) {
+            List<Messages.Event> log = events.get(started.messageId());
+            log.add(event(started, 2, Messages.EventType.MESSAGE_DELTA, text, null, null));
+            log.add(code == null ? event(started, 3, Messages.EventType.MESSAGE_COMPLETED, null, usage, null)
+                    : event(started, 3, Messages.EventType.ERROR, null, null, code));
             answers.put(started.messageId(), new Messages.Message(started.messageId(), started.conversationId(),
                     Messages.Role.ASSISTANT, status, text, usage, code, ASKED_AT, ENDED_AT));
             ended.complete(null);
         }
+
+        private static Messages.Event event(Messages.Message answer, long seq, Messages.EventType type, String text,
+                Messages.Usage usage, Messages.ErrorCode code) {
+            return new Messages.Event(answer.messageId(), seq, type, text, usage, code, ASKED_AT);
+        }
     }
 
-    /** Finds the answers StandInAnswers made, each only in its own conversation. The web layer needs nothing else yet. */
+    /**
+     * Finds the answers StandInAnswers made, and their events, each only in its own conversation. The web layer needs
+     * nothing else yet. A test can make it fail after some reads of the log, as a database that goes away mid-stream.
+     */
     static final class StandInMessages implements Messages {
 
         private final StandInAnswers answers;
+        /** Reads of the log that still work; below 0, all of them do. */
+        final AtomicInteger readsLeft = new AtomicInteger(-1);
 
         StandInMessages(StandInAnswers answers) {
             this.answers = answers;
@@ -328,7 +350,14 @@ final class TestApi {
 
         @Override
         public List<Event> eventsAfter(Owner caller, String conversationId, String messageId, long after, int limit) {
-            throw notNeeded();
+            if (readsLeft.getAndDecrement() == 0) {
+                throw new IllegalStateException("The stand-in's database went away");
+            }
+            Message answer = answers.answers.get(messageId);
+            if (answer == null || !answer.conversationId().equals(conversationId)) {
+                return List.of();
+            }
+            return answers.events.get(messageId).stream().filter(event -> event.seq() > after).limit(limit).toList();
         }
 
         @Override

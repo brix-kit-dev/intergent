@@ -444,7 +444,10 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
   - 存任何东西之前先检查请求：会话号的格式；`text` 必须是 1 到 32000 个字符，不能含 NUL；`locale` 的格式；`data_class` 只能是契约列的四个值。不合格回答 400。`locale` 和 `data_class` 现在只查格式，不存也不用，到 M3 拼提示词和信任层时才用上。
   - 会话不在调用方的应用里：404，和读会话一样。
   - 实例满了（同时 64 个回答）：429 `rate_limited`，带 `Retry-After: 5`，什么都不存。因为 429 不占用 `Idempotency-Key`，等过 `Retry-After` 可以用同一个键再发。
-  - 流式在 M2-7。在那之前，只接受 `text/event-stream` 的请求回答 406 `invalid_request`，在存任何东西之前。同时也接受 JSON 的请求，照常拿到 JSON。
+  - **流式：** `Accept` 里写明 `text/event-stream`（权重大于 0）就发流，即使同时也写了 JSON；只写 `*/*`、`application/json` 或不带 `Accept` 的拿 JSON。只写 `text/*` 这类既不是 JSON、也没写明流的，回答 406 `invalid_request`，在存任何东西之前。
+    - 流从第 1 个事件 `message.started` 一直发到结束事件，用下面的事件流，回答的 `Content-Type` 是 `text/event-stream`，带 `Cache-Control: no-cache` 和 `X-Accel-Buffering: no`，免得代理把流攒着不发。
+    - 检查不过的（400、404、429）在流开始前回答普通的 problem。流开始后回答本身出错，是日志里的 `error` 事件；读日志出错，按第 34 点切断连接，不编造结束事件。
+    - 流式请求暂时不收 `Idempotency-Key`：带了就回答 400 `invalid_request`，在存任何东西之前。同一个键接上同一个流是 M2-10。
   - 带同一个 `Idempotency-Key` 重试，拿到同样的回答，不会再生成一次；还在生成时重试，回答 409 `idempotency_key_in_use`。接上同一个流是 M2-10。
   - 等回答的一方断开，不影响生成。api 停机时，正在生成的回答按“生成”里说的处理。
   - 只有服务端密钥能调用，`On-Behalf-Of` 照常。浏览器令牌在 M2-12。
@@ -452,7 +455,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
   - 每 200 毫秒查一次日志，一次最多读 100 个，读满了马上接着读。15 秒没发过东西，就发一行注释 `: heartbeat` 保持连接。
   - 发到结束事件就关闭。客户端断开就停，回答照样生成。读日志出错时往外抛，由调用它的一方处理（M2-7-2）。
   - 最长开 5 分钟，到时还没结束就关闭，不写结束事件，客户端用最后收到的序号续传（M2-8）。在 M2-11 的租约之前，生成方崩溃的回答一直不会结束，所以要有这个上限。
-  - 还没接到接口上：流式发消息是 M2-7-3。
+  - 流式发消息用它：在请求自己的线程上，从第 1 个事件发到结束事件。
 - **还没有的：** 读消息、取消和读事件的接口在之后的点里做，在那之前回答 404。
 
 ## 对外契约

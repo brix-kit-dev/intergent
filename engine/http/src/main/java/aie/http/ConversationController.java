@@ -13,6 +13,8 @@ import aie.modules.conversation.api.Answers;
 import aie.modules.conversation.api.Conversations;
 import aie.modules.conversation.api.Messages;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import java.io.IOException;
 import java.time.Duration;
 import java.time.ZoneOffset;
 import java.util.Collections;
@@ -33,6 +35,8 @@ import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.ErrorResponseException;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 import org.springframework.web.server.ResponseStatusException;
 
 /**
@@ -56,6 +60,7 @@ class ConversationController implements ConversationsApi {
     private final Messages messages;
     private final Duration wait;
     private final HttpServletRequest request;
+    private final EventStream stream;
 
     /** The wait is the contract's 120 seconds unless a test registers a shorter one. */
     ConversationController(EndUsers endUsers, Conversations conversations, Answers answers, Messages messages,
@@ -65,6 +70,7 @@ class ConversationController implements ConversationsApi {
         this.answers = answers;
         this.messages = messages;
         this.wait = wait.getIfAvailable(() -> AnswerWait.CONTRACT).limit();
+        this.stream = new EventStream(messages);
         this.request = request;
     }
 
@@ -100,25 +106,36 @@ class ConversationController implements ConversationsApi {
     }
 
     /**
-     * Stores what the end user said, starts the answer, and waits for it to end, for as long as the wait at most. Then
-     * the answer comes back as it is: whole once it ended, or in progress with its text so far, and it goes on. A failed
-     * answer is a 200 with its code, since the answer was stored before the model was asked.
+     * Stores what the end user said and starts the answer. A caller that names text/event-stream gets the answer as a
+     * stream of its events, from the first to the ending. Any other caller waits for it to end, for as long as the wait
+     * at most, and gets it as it is then: whole once it ended, or in progress with its text so far, and it goes on. A
+     * failed answer is a 200 with its code, or an error event, since the answer was stored before the model was asked.
      *
-     * <p>Everything about the request is checked before anything is stored. A full instance answers 429 and stores
-     * nothing, so the same Idempotency-Key may come back after Retry-After. Streaming comes in M2-7; until then a caller
-     * that takes no JSON gets 406. The locale is checked but not used yet: it is the language to answer in, which the
-     * prompts of M3 need. data_class is checked by its enum and waits for the trust layer of M3.
+     * <p>Everything about the request is checked before anything is stored, and a refusal is a plain problem, before any
+     * stream starts. A full instance answers 429 and stores nothing, so the same Idempotency-Key may come back after
+     * Retry-After. A streamed answer takes no Idempotency-Key yet: joining the same stream again comes in M2-10. The
+     * locale is checked but not used yet: it is the language to answer in, which the prompts of M3 need. data_class is
+     * checked by its enum and waits for the trust layer of M3.
      */
     @Override
     public ResponseEntity<Message> createMessage(String conversationId, CreateMessageRequest body,
             @Nullable String idempotencyKey, @Nullable String engineVersion, @Nullable String traceparent,
             @Nullable String onBehalfOf) {
-        takesJson();
+        List<MediaType> accepted = accepted();
+        boolean streamed = wantsStream(accepted);
+        if (!streamed) {
+            takesJson(accepted);
+        }
         String conversation = conversationId(conversationId);
         String text = messageText(body.getText());
         SessionRequests.locale(body.getLocale());
+        if (streamed && idempotencyKey != null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "A streamed answer takes no Idempotency-Key yet, so send the request without it, or ask for JSON");
+        }
         Owner caller = caller();
         return switch (answers.ask(caller, conversation, text)) {
+            case Answers.Start.Started started when streamed -> streamed(caller, conversation, started);
             case Answers.Start.Started started -> ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON)
                     .body(answered(caller, conversation, started));
             case Answers.Start.Busy busy -> throw full();
@@ -144,23 +161,56 @@ class ConversationController implements ConversationsApi {
         throw notYet();
     }
 
-    /**
-     * Until streaming comes, the answer is JSON. Spring turns away an Accept that none of the operation's types meet, but
-     * text/event-stream is one of them, so that one is turned away here, before anything is asked. The answer then says
-     * application/json itself: left to Spring, an Accept that names the stream first would pick it, and fail to write the
-     * answer only after it was generated.
-     */
-    private void takesJson() {
-        List<MediaType> accepted;
+    private List<MediaType> accepted() {
         try {
-            accepted = MediaType.parseMediaTypes(Collections.list(request.getHeaders(HttpHeaders.ACCEPT)));
+            return MediaType.parseMediaTypes(Collections.list(request.getHeaders(HttpHeaders.ACCEPT)));
         } catch (InvalidMediaTypeException e) {
             throw new ResponseStatusException(HttpStatus.NOT_ACCEPTABLE, "Accept is not a list of media types");
         }
+    }
+
+    /**
+     * A caller that names text/event-stream wants the stream, even when it takes JSON too (M2-7 decision 2). A wildcard
+     * names nothing, and a quality of 0 refuses.
+     */
+    private static boolean wantsStream(List<MediaType> accepted) {
+        return accepted.stream().anyMatch(type -> type.getType().equals("text") && type.getSubtype().equals("event-stream")
+                && type.getQualityValue() > 0);
+    }
+
+    /**
+     * Otherwise the answer is JSON. Spring turns away an Accept that none of the operation's types meet, but text/* meets
+     * the stream's, so that one is turned away here, before anything is asked. The answer then says application/json
+     * itself: left to Spring, an Accept that names the stream first would pick it, and fail to write the answer only
+     * after it was generated.
+     */
+    private static void takesJson(List<MediaType> accepted) {
         if (!accepted.isEmpty() && accepted.stream().noneMatch(type -> type.isCompatibleWith(MediaType.APPLICATION_JSON))) {
             throw new ResponseStatusException(HttpStatus.NOT_ACCEPTABLE,
-                    "The answer comes as application/json; it does not stream yet");
+                    "The answer comes as application/json, or as text/event-stream when Accept names it");
         }
+    }
+
+    /**
+     * The answer as Server-Sent Events, from its first event to its ending, written on this request's own thread. The
+     * response says that it streams before the first event goes out, and asks proxies not to hold it back. A caller that
+     * goes away stops the sending, not the answer. A failure from here on cannot become a problem: it leaves through
+     * ProblemAdvice to RequestIdFilter, which logs it once and cuts the connection (code point 34).
+     */
+    private @Nullable ResponseEntity<Message> streamed(Owner caller, String conversationId, Answers.Start.Started started) {
+        HttpServletResponse response = Objects.requireNonNull(
+                ((ServletRequestAttributes) RequestContextHolder.currentRequestAttributes()).getResponse(),
+                "A request in Spring MVC has its response");
+        response.setStatus(HttpServletResponse.SC_OK);
+        response.setContentType("text/event-stream;charset=UTF-8");
+        response.setHeader(HttpHeaders.CACHE_CONTROL, "no-cache");
+        response.setHeader("X-Accel-Buffering", "no");
+        try {
+            stream.send(caller, conversationId, started.asked().answer().messageId(), 0, response.getOutputStream());
+        } catch (IOException gone) {
+            // The caller went away before the first event; the answer goes on.
+        }
+        return null;
     }
 
     /** What the end user said, as the contract's CreateMessageRequest.text allows it and the database can store it. */

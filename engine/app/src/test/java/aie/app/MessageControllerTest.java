@@ -10,6 +10,7 @@ import aie.http.AnswerWait;
 import aie.http.api.model.Message;
 import aie.http.api.model.Problem;
 import aie.http.api.model.Usage;
+import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -22,8 +23,11 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.context.ConfigurableApplicationContext;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -31,6 +35,7 @@ import tools.jackson.databind.json.JsonMapper;
  * POST /v1/conversations/{id}/messages without streaming, on the real web stack, with a stand-in that answers the way
  * each test tells it. The wait is TestApi's short one.
  */
+@ExtendWith(OutputCaptureExtension.class)
 class MessageControllerTest {
 
     private static final JsonMapper JSON = JsonMapper.builder().build();
@@ -225,19 +230,107 @@ class MessageControllerTest {
         assertRefused(sendTo("conv_a-b", "{\"text\":\"Hi\"}"), ID_RULE);
     }
 
-    /** Streaming comes in M2-7: until then a caller that takes only the stream gets 406, and nothing is stored. */
+    private static String sse(long seq, String type, String data) {
+        return "id: " + seq + "\nevent: " + type + "\ndata: " + data + "\n\n";
+    }
+
     @Test
-    void aCallerThatTakesOnlyTheStreamIsTurnedAwayBeforeAnythingIsAsked() throws Exception {
+    void aCallerThatNamesTheStreamGetsTheEventsUntilTheEnding() throws Exception {
         HttpResponse<String> response = send("{\"text\":\"Hi\"}", "Accept", "text/event-stream");
 
-        assertThat(problem(response, 406, "invalid_request").getDetail()).isEqualTo("The answer comes as application/json; it does not stream yet");
-        assertThat(ANSWERS.calls).isEmpty();
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.headers().firstValue("Content-Type")).hasValueSatisfying(type -> assertThat(type).startsWith("text/event-stream"));
+        assertThat(response.headers().firstValue("Cache-Control")).contains("no-cache");
+        assertThat(response.headers().firstValue("X-Accel-Buffering")).contains("no");
+        assertThat(response.headers().firstValue("Request-Id")).isPresent();
+        String answer = ANSWERS.answers.keySet().iterator().next();
+        assertThat(response.body()).isEqualTo(sse(1, "message.started", "{\"message_id\":\"" + answer + "\"}")
+                + sse(2, "message.delta", "{\"message_id\":\"" + answer + "\",\"text\":\"Hello!\"}")
+                + sse(3, "message.completed", "{\"message_id\":\"" + answer + "\",\"usage\":{\"input_tokens\":6,\"output_tokens\":2}}"));
+        assertThat(ANSWERS.calls).containsExactly("ten_test/app_test asks in conv_1: Hi");
+    }
+
+    /** The model failed after the answer had started, so its stream ends with the error event, not with a problem. */
+    @Test
+    void aFailedAnswerStreamsItsError() throws Exception {
+        ANSWERS.outcome = Outcome.FAILED;
+
+        HttpResponse<String> response = send("{\"text\":\"Hi\"}", "Accept", "text/event-stream");
+
+        assertThat(response.statusCode()).isEqualTo(200);
+        String last = response.body().split("\n\n")[2];
+        assertThat(last).startsWith("id: 3\nevent: error\ndata: ").contains("\"code\":\"model_failed\"", "\"status\":502");
+    }
+
+    /** M2-7 decision 2: a caller that names text/event-stream wants the stream, even when it takes JSON too. */
+    @ParameterizedTest
+    @ValueSource(strings = {"text/event-stream", "text/event-stream, application/json", "application/json, text/event-stream",
+        "application/json;q=0.9, text/event-stream;q=0.1"})
+    void aCallerThatNamesTheStreamGetsIt(String accept) throws Exception {
+        HttpResponse<String> response = send("{\"text\":\"Hi\"}", "Accept", accept);
+
+        assertThat(response.headers().firstValue("Content-Type")).hasValueSatisfying(type -> assertThat(type).startsWith("text/event-stream"));
+        assertThat(response.body()).startsWith("id: 1\nevent: message.started\n");
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"text/event-stream, application/json", "*/*", "application/*", "application/json"})
+    @ValueSource(strings = {"*/*", "application/*", "application/json", "text/event-stream;q=0, application/json"})
     void aCallerThatTakesJsonGetsTheAnswer(String accept) throws Exception {
         assertThat(answered(send("{\"text\":\"Hi\"}", "Accept", accept)).getStatus()).isEqualTo("completed");
+    }
+
+    /** text/* meets the stream's type, yet names no stream, and it takes no JSON either. */
+    @Test
+    void aWildcardForTextIsTurnedAwayBeforeAnythingIsAsked() throws Exception {
+        HttpResponse<String> response = send("{\"text\":\"Hi\"}", "Accept", "text/*");
+
+        assertThat(problem(response, 406, "invalid_request").getDetail())
+                .isEqualTo("The answer comes as application/json, or as text/event-stream when Accept names it");
+        assertThat(ANSWERS.calls).isEmpty();
+    }
+
+    /** M2-7 decision 4: joining the same stream again comes in M2-10, so until then a stream takes no key. */
+    @Test
+    void aStreamWithAnIdempotencyKeyIsRefusedBeforeAnythingIsAsked() throws Exception {
+        HttpResponse<String> response = send("{\"text\":\"Hi\"}", "Accept", "text/event-stream", "Idempotency-Key", "s-1");
+
+        assertThat(problem(response, 400, "invalid_request").getDetail())
+                .isEqualTo("A streamed answer takes no Idempotency-Key yet, so send the request without it, or ask for JSON");
+        assertThat(ANSWERS.calls).isEmpty();
+    }
+
+    /** What is refused is refused before the stream starts, as a plain problem. */
+    @Test
+    void aRefusedStreamIsAPlainProblem() throws Exception {
+        assertRefused(send("{\"text\":\"\"}", "Accept", "text/event-stream"), TEXT_RULE);
+
+        ANSWERS.outcome = Outcome.MISSING;
+        problem(send("{\"text\":\"Hi\"}", "Accept", "text/event-stream"), 404, "not_found");
+
+        ANSWERS.outcome = Outcome.BUSY;
+        HttpResponse<String> full = send("{\"text\":\"Hi\"}", "Accept", "text/event-stream");
+        problem(full, 429, "rate_limited");
+        assertThat(full.headers().firstValue("Retry-After")).contains("5");
+    }
+
+    /**
+     * Code point 34: the log fails once the stream has started, so the stream is cut without an ending, and the failure is
+     * logged once. The client resumes later (M2-8).
+     */
+    @Test
+    void aFailureInTheMiddleOfTheStreamCutsIt(CapturedOutput output) throws Exception {
+        ANSWERS.outcome = Outcome.NEVER_ENDS;
+        TestApi.StandInMessages log = (TestApi.StandInMessages) context.getBean(aie.modules.conversation.api.Messages.class);
+        log.readsLeft.set(1);
+        try {
+            assertThatThrownBy(() -> send("{\"text\":\"Hi\"}", "Accept", "text/event-stream")).isInstanceOf(IOException.class);
+        } finally {
+            log.readsLeft.set(-1);
+        }
+
+        assertThat(output.getOut().lines().filter(line -> line.contains(" ERROR "))).singleElement().asString()
+                .contains("The request failed after its answer had started, so its connection is cut");
+        assertThat(output.getOut()).contains("The stand-in's database went away").doesNotContain("Servlet.service()");
     }
 
     @Test

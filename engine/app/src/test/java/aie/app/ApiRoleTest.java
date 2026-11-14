@@ -506,6 +506,29 @@ class ApiRoleTest {
                 + id + "' ORDER BY ordinal")).containsExactly("user completed", "assistant completed");
     }
 
+    /** The role's own generator, the fake model and the event stream: the answer streams from its log to its ending. */
+    @Test
+    void aStreamedMessageGoesOutAsItsEvents() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String key = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "internal")).key();
+        String id = JSON.readValue(startConversation(key, "stream-1", "{\"external_user_id\":\"host-user-1\"}").body(),
+                Conversation.class).getId();
+
+        HttpResponse<String> streamed = HttpClient.newHttpClient().send(at("/v1/conversations/" + id + "/messages")
+                .header("Authorization", "Bearer " + key).header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .POST(BodyPublishers.ofString("{\"text\":\"[fake pieces=2 delay=50ms] Hi\"}")).build(), HttpResponse.BodyHandlers.ofString());
+
+        assertThat(streamed.statusCode()).isEqualTo(200);
+        assertThat(streamed.headers().firstValue("Content-Type")).hasValueSatisfying(type -> assertThat(type).startsWith("text/event-stream"));
+        assertThat(java.util.Arrays.stream(streamed.body().split("\n\n")).map(event -> event.lines().skip(1).findFirst().orElse("")))
+                .containsExactly("event: message.started", "event: message.delta", "event: message.delta", "event: message.completed");
+        assertThat(streamed.body()).contains("\"text\":\"Piece 1 of 2. \"", "\"text\":\"Piece 2 of 2. \"");
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT role || ' ' || status FROM engine.conversation_messages WHERE conversation_id = '"
+                + id + "' ORDER BY ordinal")).containsExactly("user completed", "assistant completed");
+    }
+
     private static HttpResponse<String> sendMessage(String key, String idempotencyKey, String conversationId, String body)
             throws Exception {
         HttpRequest request = at("/v1/conversations/" + conversationId + "/messages")
