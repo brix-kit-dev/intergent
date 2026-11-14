@@ -17,6 +17,9 @@ public interface Messages {
     /** The contract's limit for what the end user says, in characters, counted as JSON Schema counts them. */
     int MAX_TEXT = 32000;
 
+    /** How many messages of a conversation the model is shown at most, with each answer it writes. */
+    int MAX_HISTORY = 50;
+
     /**
      * Stores what the end user said, completed as it is stored.
      *
@@ -33,6 +36,18 @@ public interface Messages {
      * @return the message, or empty when the conversation is not one of the caller's application
      */
     Optional<Message> startAssistantMessage(Owner caller, String conversationId);
+
+    /**
+     * Stores what the end user said and starts the answer to it, in one transaction: the user message, completed as it is
+     * stored, then the answer, in progress and empty, with its message.started event as number 1. Asks in one conversation
+     * take turns, so that each question comes right before its own answer.
+     *
+     * @return the question and its answer, or empty when the conversation is not one of the caller's application; then
+     *     nothing is stored
+     * @throws IllegalArgumentException for text that is empty, over {@link #MAX_TEXT} characters, or holds a NUL, which
+     *     the database cannot store
+     */
+    Optional<Asked> ask(Owner caller, String conversationId, String text);
 
     /**
      * Adds a message.delta event to an answer in progress. The database gives it the next number of the answer.
@@ -63,6 +78,16 @@ public interface Messages {
 
     /** The conversation's messages, oldest first. Empty for a conversation that is not one of the caller's application. */
     List<Message> list(Owner caller, String conversationId);
+
+    /**
+     * What the model is shown to write an answer: the messages before the answer, oldest first. Every user message counts,
+     * and so does an answer that completed or was cancelled with some text, since the end user saw that text. A failed
+     * answer, one still in progress and one without text do not count. Of those that count, only the last
+     * {@link #MAX_HISTORY} are shown, and they start with a user message.
+     *
+     * @return the messages, or empty when no answer has this ID in this conversation of the caller's application
+     */
+    List<Message> historyFor(Owner caller, String conversationId, String answerId);
 
     /** Who wrote a message. */
     enum Role {
@@ -105,6 +130,10 @@ public interface Messages {
                 throw new IllegalArgumentException("A usage counts tokens, so it is 0 or more");
             }
         }
+    }
+
+    /** What the end user asked, and the answer started for it. */
+    record Asked(Message question, Message answer) {
     }
 
     /** What became of an event written to an answer. */

@@ -6,6 +6,8 @@ import aie.modules.conversation.api.Messages;
 import aie.ports.DatabaseException;
 import aie.ports.DatabasePort;
 import aie.ports.Row;
+import aie.ports.Tx;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
@@ -38,6 +40,15 @@ public final class DatabaseMessages implements Messages {
             WHERE application_id = ? AND conversation_id = ?
             RETURNING %s
             """.formatted(RETURNED);
+    /**
+     * Asks in one conversation take turns on the conversation's row. This lock is the weakest that two asks cannot hold
+     * at once, and it leaves the row free for the key-share lock that each new message's foreign key takes.
+     */
+    private static final String TAKE_TURN = """
+            SELECT conversation_id FROM conversation_conversations
+            WHERE application_id = ? AND conversation_id = ?
+            FOR NO KEY UPDATE
+            """;
     private static final String ADD_STARTED = """
             INSERT INTO conversation_events (tenant_id, message_id, type) VALUES (?, ?, 'message.started')
             """;
@@ -82,6 +93,26 @@ public final class DatabaseMessages implements Messages {
             JOIN conversation_conversations c ON c.tenant_id = m.tenant_id AND c.conversation_id = m.conversation_id
             WHERE c.application_id = ? AND c.conversation_id = ?
             """;
+    /**
+     * The last messages before an answer that count for the model, at most the given number, oldest first. A user message
+     * is stored completed, so this takes every one, with the answers that completed or were cancelled with some text.
+     */
+    private static final String HISTORY = """
+            SELECT h.* FROM (
+                SELECT m.message_id, m.conversation_id, m.role, m.status, m.text, m.input_tokens IS NOT NULL AS has_usage,
+                    coalesce(m.input_tokens, 0) AS input_tokens, coalesce(m.output_tokens, 0) AS output_tokens, m.code,
+                    m.created_at, m.completed_at, m.ordinal
+                FROM conversation_messages a
+                JOIN conversation_conversations c ON c.tenant_id = a.tenant_id AND c.conversation_id = a.conversation_id
+                JOIN conversation_messages m ON m.tenant_id = a.tenant_id AND m.conversation_id = a.conversation_id
+                    AND m.ordinal < a.ordinal
+                WHERE c.application_id = ? AND c.conversation_id = ? AND a.message_id = ? AND a.role = 'assistant'
+                    AND m.status IN ('completed', 'cancelled') AND m.text <> ''
+                ORDER BY m.ordinal DESC
+                LIMIT ?
+            ) h
+            ORDER BY h.ordinal
+            """;
     private static final String FIND = OF_THE_APPLICATION + "AND m.message_id = ?";
     private static final String LIST = OF_THE_APPLICATION + "ORDER BY m.ordinal";
 
@@ -93,26 +124,51 @@ public final class DatabaseMessages implements Messages {
 
     @Override
     public Optional<Message> addUserMessage(Owner caller, String conversationId, String text) {
-        if (text == null || text.isEmpty() || text.codePointCount(0, text.length()) > MAX_TEXT) {
-            throw new IllegalArgumentException("A user message must have 1 to " + MAX_TEXT + " characters");
-        }
-        if (text.indexOf('\0') >= 0) {
-            throw new IllegalArgumentException("A user message cannot hold a NUL character");
-        }
+        userText(text);
         return database.inTenantTx(caller.tenantId(), tx -> tx.query(ADD_USER_MESSAGE, DatabaseMessages::message,
                 Ids.next("msg"), text, caller.applicationId(), conversationId)).stream().findFirst();
     }
 
     @Override
     public Optional<Message> startAssistantMessage(Owner caller, String conversationId) {
+        return database.inTenantTx(caller.tenantId(), tx -> start(tx, caller, conversationId)).stream().findFirst();
+    }
+
+    /**
+     * Takes the conversation's turn first, so that no other ask puts a message between the question and its answer. A
+     * conversation out of reach takes no lock, and nothing is stored.
+     */
+    @Override
+    public Optional<Asked> ask(Owner caller, String conversationId, String text) {
+        userText(text);
         return database.inTenantTx(caller.tenantId(), tx -> {
-            List<Message> started = tx.query(START_ASSISTANT_MESSAGE, DatabaseMessages::message,
-                    Ids.next("msg"), caller.applicationId(), conversationId);
-            for (Message answer : started) {
-                tx.update(ADD_STARTED, caller.tenantId(), answer.messageId());
+            if (tx.query(TAKE_TURN, row -> row.string("conversation_id"), caller.applicationId(), conversationId).isEmpty()) {
+                return Optional.<Asked>empty();
             }
-            return started;
-        }).stream().findFirst();
+            Message question = tx.query(ADD_USER_MESSAGE, DatabaseMessages::message, Ids.next("msg"), text,
+                    caller.applicationId(), conversationId).getFirst();
+            Message answer = start(tx, caller, conversationId).getFirst();
+            return Optional.of(new Asked(question, answer));
+        });
+    }
+
+    private static void userText(String text) {
+        if (text == null || text.isEmpty() || text.codePointCount(0, text.length()) > MAX_TEXT) {
+            throw new IllegalArgumentException("A user message must have 1 to " + MAX_TEXT + " characters");
+        }
+        if (text.indexOf('\0') >= 0) {
+            throw new IllegalArgumentException("A user message cannot hold a NUL character");
+        }
+    }
+
+    /** An answer in progress with its message.started event, or none when the conversation is out of reach. */
+    private static List<Message> start(Tx tx, Owner caller, String conversationId) {
+        List<Message> started = tx.query(START_ASSISTANT_MESSAGE, DatabaseMessages::message,
+                Ids.next("msg"), caller.applicationId(), conversationId);
+        for (Message answer : started) {
+            tx.update(ADD_STARTED, caller.tenantId(), answer.messageId());
+        }
+        return started;
     }
 
     @Override
@@ -212,6 +268,17 @@ public final class DatabaseMessages implements Messages {
     public List<Message> list(Owner caller, String conversationId) {
         return database.inTenantTx(caller.tenantId(), tx -> tx.query(
                 LIST, DatabaseMessages::message, caller.applicationId(), conversationId));
+    }
+
+    /** The database picks the last messages that count; the answers before the first user message among them go here. */
+    @Override
+    public List<Message> historyFor(Owner caller, String conversationId, String answerId) {
+        List<Message> history = new ArrayList<>(database.inTenantTx(caller.tenantId(), tx -> tx.query(
+                HISTORY, DatabaseMessages::message, caller.applicationId(), conversationId, answerId, MAX_HISTORY)));
+        while (!history.isEmpty() && history.getFirst().role() != Role.USER) {
+            history.removeFirst();
+        }
+        return List.copyOf(history);
     }
 
     private static Message message(Row row) {
