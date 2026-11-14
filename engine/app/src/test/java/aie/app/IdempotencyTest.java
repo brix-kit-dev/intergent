@@ -46,6 +46,7 @@ class IdempotencyTest {
 
     private static final JsonMapper JSON = JsonMapper.builder().build();
     private static final String RUN = "/v1/test/run";
+    private static final String WHEN_FREE = "/v1/test/run-when-free";
     private static final String BAD_HEADER = "Send one Idempotency-Key of 1 to 255 characters";
 
     @Container
@@ -85,6 +86,7 @@ class IdempotencyTest {
     @BeforeEach
     void countFromZero() {
         RequestProbes.RUNS.set(0);
+        RequestProbes.BUSY.set(0);
         RequestProbes.hold = new CountDownLatch(0);
     }
 
@@ -192,6 +194,46 @@ class IdempotencyTest {
         problem(retry, 500, "internal_error");
         assertThat(retry.body()).isEqualTo(first.body());
         assertThat(RequestProbes.RUNS).hasValue(1);
+    }
+
+    /**
+     * A 429 says that nothing ran. It is not stored and the key is let go, so a retry with the same key after Retry-After
+     * really runs, and the answer of that run is the one kept.
+     */
+    @Test
+    void aTurnAwayWith429KeepsNothingAndTheSameKeyRunsLater() throws Exception {
+        RequestProbes.BUSY.set(1);
+        String once = newKey();
+
+        HttpResponse<String> turnedAway = post(WHEN_FREE, key, once, "{}");
+        problem(turnedAway, 429, "rate_limited");
+        assertThat(turnedAway.headers().firstValue("Retry-After")).contains("5");
+        assertThat(rowsFor(once)).isEmpty();
+
+        HttpResponse<String> retry = post(WHEN_FREE, key, once, "{}");
+        HttpResponse<String> again = post(WHEN_FREE, key, once, "{}");
+
+        assertThat(retry.statusCode()).isEqualTo(201);
+        assertThat(retry.body()).isEqualTo("{\"run\":2}");
+        assertThat(again.statusCode()).isEqualTo(201);
+        assertThat(again.body()).isEqualTo(retry.body());
+        assertThat(RequestProbes.RUNS).hasValue(2);
+        assertThat(rowsFor(once)).singleElement().asString().contains(" 201 ");
+    }
+
+    /** Each 429 is a fresh try, never a replay of the last one. */
+    @Test
+    void a429IsNeverReplayed() throws Exception {
+        RequestProbes.BUSY.set(2);
+        String once = newKey();
+
+        problem(post(WHEN_FREE, key, once, "{}"), 429, "rate_limited");
+        problem(post(WHEN_FREE, key, once, "{}"), 429, "rate_limited");
+        HttpResponse<String> third = post(WHEN_FREE, key, once, "{}");
+
+        assertThat(third.statusCode()).isEqualTo(201);
+        assertThat(third.body()).isEqualTo("{\"run\":3}");
+        assertThat(RequestProbes.RUNS).hasValue(3);
     }
 
     @Test

@@ -224,6 +224,53 @@ class IdempotencyKeysTest {
         assertThat(keys.claim(KEY, REQUEST)).isEqualTo(new Claim.Finished(201, "{}"));
     }
 
+    /** Let go of, the key is as if it had never been used, so even another request may take it. */
+    @Test
+    void aKeyLetGoOfCanBeTakenAgain() throws SQLException {
+        keys.claim(KEY, REQUEST);
+
+        keys.release(KEY);
+
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT count(*)::text FROM engine.tenancy_idempotency_keys")).containsExactly("0");
+        assertThat(keys.claim(KEY, OTHER_REQUEST)).isEqualTo(ACQUIRED);
+        assertThat(keys.claim(KEY, OTHER_REQUEST)).isEqualTo(IN_USE);
+    }
+
+    @Test
+    void aStoredAnswerIsNotLetGo() {
+        keys.claim(KEY, REQUEST);
+        keys.finish(KEY, 201, "{}");
+
+        keys.release(KEY);
+
+        assertThat(keys.claim(KEY, REQUEST)).isEqualTo(new Claim.Finished(201, "{}"));
+    }
+
+    @Test
+    void lettingGoReachesOnlyItsOwnKey() {
+        Key otherApplication = new Key(TENANT_A, "app_a2", KEY.value());
+        Key otherTenant = new Key(TENANT_B, "app_b", KEY.value());
+        Key otherValue = new Key(TENANT_A, "app_a", "key_2");
+        keys.claim(KEY, REQUEST);
+        keys.claim(otherApplication, REQUEST);
+        keys.claim(otherTenant, REQUEST);
+        keys.claim(otherValue, REQUEST);
+
+        keys.release(KEY);
+
+        assertThat(keys.claim(otherApplication, REQUEST)).isEqualTo(IN_USE);
+        assertThat(keys.claim(otherTenant, REQUEST)).isEqualTo(IN_USE);
+        assertThat(keys.claim(otherValue, REQUEST)).isEqualTo(IN_USE);
+        assertThat(keys.claim(KEY, REQUEST)).isEqualTo(ACQUIRED);
+    }
+
+    @Test
+    void lettingGoOfAKeyNoOneHoldsDoesNothing() {
+        keys.release(KEY);
+
+        assertThat(keys.claim(KEY, REQUEST)).isEqualTo(ACQUIRED);
+    }
+
     @Test
     void theFirstAnswerStands() {
         keys.claim(KEY, REQUEST);

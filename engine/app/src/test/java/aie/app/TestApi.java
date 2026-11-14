@@ -69,6 +69,10 @@ final class TestApi {
         @Override
         public void finish(Key key, int status, String body) {
         }
+
+        @Override
+        public void release(Key key) {
+        }
     };
 
     private TestApi() {

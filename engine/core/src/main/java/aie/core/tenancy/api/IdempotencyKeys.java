@@ -16,6 +16,12 @@ public interface IdempotencyKeys {
     /** Stores the answer retries will get. The first answer stands, so a request that was overtaken cannot replace it. */
     void finish(Key key, int status, String body);
 
+    /**
+     * Lets go of a key whose request did nothing, such as one turned away with 429, so that a retry with it runs the
+     * request as if the key were new. Only a key still held is let go: a stored answer stands.
+     */
+    void release(Key key);
+
     /** A key is only unique within its tenant and application. */
     record Key(String tenantId, String applicationId, String value) {
     }

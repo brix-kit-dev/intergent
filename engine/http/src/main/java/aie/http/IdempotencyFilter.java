@@ -37,6 +37,9 @@ import tools.jackson.databind.node.ObjectNode;
  * key with a different request is refused. This runs after the key and version checks, so it knows the tenant and the
  * application, and a request those checks refuse leaves the key free.
  *
+ * <p>A 429 says that nothing ran and that the caller should come back after Retry-After, so it is not stored and the key
+ * is let go: a retry with the same key runs the request.
+ *
  * <p>The answer is stored after the controller has given it. A process that dies in between, or a request that ends
  * in an exception no controller turned into an answer, leaves the key claimed until its lease runs out; then a retry
  * runs the request again (see {@link IdempotencyKeys}).
@@ -50,6 +53,8 @@ class IdempotencyFilter extends OncePerRequestFilter {
     static final int MAX_KEY = 255;
     /** The fingerprint covers the whole body, so the body is read into memory, and only this much of it. */
     static final int MAX_BODY = 1024 * 1024;
+    /** rate_limited: nothing ran, so the answer is not one to replay. */
+    static final int TOO_MANY_REQUESTS = 429;
     /**
      * A request attribute a controller sets to the top-level fields of its JSON answer that must not be stored, such as
      * a new key's secret. A replay then leaves them out, so no secret is kept for the 24 hours of a key.
@@ -97,15 +102,23 @@ class IdempotencyFilter extends OncePerRequestFilter {
         }
     }
 
-    /** What the rest of the chain answers is stored first, then sent. A failure to store still sends it. */
+    /**
+     * What the rest of the chain answers is stored first, then sent; a 429 lets the key go instead. A failure to store
+     * still sends it.
+     */
     private void run(HttpServletRequest request, HttpServletResponse response, FilterChain chain, Key key)
             throws ServletException, IOException {
         ContentCachingResponseWrapper answer = new ContentCachingResponseWrapper(response);
         chain.doFilter(request, answer);
         try {
-            keys.finish(key, answer.getStatus(), storable(request, answer.getContentAsByteArray()));
+            if (answer.getStatus() == TOO_MANY_REQUESTS) {
+                keys.release(key);
+            } else {
+                keys.finish(key, answer.getStatus(), storable(request, answer.getContentAsByteArray()));
+            }
         } catch (RuntimeException e) {
-            LOG.error("The answer to an {} could not be stored, so a retry after the lease runs the request again", HEADER, e);
+            LOG.error("The answer to an {} could not be stored or let go, so a retry after the lease runs the request again",
+                    HEADER, e);
         }
         answer.copyBodyToResponse();
     }

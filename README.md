@@ -581,6 +581,7 @@ const answer = await fetch("https://引擎地址/v1/anonymous-sessions", {
 | 第一次 | 拿到键，执行请求 |
 | 上一次还在处理 | `idempotency_key_in_use`（409） |
 | 上一次已经完成 | 原样返回上一次的结果，失败也一样 |
+| 上一次回答了 429 `rate_limited` | 当作新键：429 表示这次什么都没做，所以结果不存，键也放开。等过 `Retry-After` 再用同一个键发，会真的执行 |
 | 请求内容不同 | `idempotency_key_reused`（422），不管上一次完成没有 |
 | 上一次的进程中途死了，5 分钟没有完成 | 这一次接管，重新执行 |
 | 超过 24 小时 | 当作新键 |

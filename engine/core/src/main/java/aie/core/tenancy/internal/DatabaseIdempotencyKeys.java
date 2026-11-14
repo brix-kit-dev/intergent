@@ -39,6 +39,11 @@ public final class DatabaseIdempotencyKeys implements IdempotencyKeys {
             WHERE tenant_id = ? AND application_id = ? AND idempotency_key = ? AND response_status IS NULL
             """;
 
+    private static final String RELEASE = """
+            DELETE FROM tenancy_idempotency_keys
+            WHERE tenant_id = ? AND application_id = ? AND idempotency_key = ? AND response_status IS NULL
+            """;
+
     private final DatabasePort database;
 
     public DatabaseIdempotencyKeys(DatabasePort database) {
@@ -76,6 +81,11 @@ public final class DatabaseIdempotencyKeys implements IdempotencyKeys {
     @Override
     public void finish(Key key, int status, String body) {
         database.inTenantTx(key.tenantId(), tx -> tx.update(FINISH, status, body, key.tenantId(), key.applicationId(), key.value()));
+    }
+
+    @Override
+    public void release(Key key) {
+        database.inTenantTx(key.tenantId(), tx -> tx.update(RELEASE, key.tenantId(), key.applicationId(), key.value()));
     }
 
     private record Held(String fingerprint, boolean finished, int status, String body, boolean expired, boolean abandoned) {

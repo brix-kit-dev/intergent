@@ -17,6 +17,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.annotation.Order;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -33,6 +34,8 @@ public final class RequestProbes {
 
     /** How often the /v1/test/run routes really ran, so a test can tell a replay from a second run. */
     public static final AtomicInteger RUNS = new AtomicInteger();
+    /** How many more times /v1/test/run-when-free turns a request away with 429. */
+    public static final AtomicInteger BUSY = new AtomicInteger();
     /** Holds /v1/test/run-slowly inside its controller until a test counts it down. */
     public static volatile CountDownLatch hold = new CountDownLatch(0);
 
@@ -138,6 +141,18 @@ public final class RequestProbes {
             int run = RUNS.incrementAndGet();
             request.setAttribute(IdempotencyFilter.NOT_STORED, Set.of("secret"));
             return "s3cret-" + run;
+        }
+
+        /** Turned away with 429 while BUSY counts down, as a full instance turns an ask away; then the work runs. */
+        @PostMapping("/v1/test/run-when-free")
+        ResponseEntity<Object> runWhenFree() {
+            int run = RUNS.incrementAndGet();
+            if (BUSY.getAndDecrement() > 0) {
+                HttpHeaders headers = new HttpHeaders();
+                headers.set(HttpHeaders.RETRY_AFTER, "5");
+                return Problems.response(429, "rate_limited", "Too much at once, so try again later", headers);
+            }
+            return ResponseEntity.status(201).body(Map.of("run", run));
         }
 
         @PostMapping("/v1/test/run-and-fail")
