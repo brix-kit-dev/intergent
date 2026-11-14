@@ -14,6 +14,7 @@ import aie.core.tenancy.internal.SignedSessionTokens;
 import aie.http.AnswerWait;
 import aie.modules.conversation.api.Answers;
 import aie.modules.conversation.api.Conversations;
+import aie.modules.conversation.api.EventSignals;
 import aie.modules.conversation.api.Messages;
 import java.time.Clock;
 import java.time.Duration;
@@ -120,6 +121,7 @@ final class TestApi {
             context.registerBean(Conversations.class, () -> conversations);
             context.registerBean(Answers.class, () -> answers);
             context.registerBean(Messages.class, () -> new StandInMessages(answers));
+            context.registerBean(EventSignals.class, () -> EventSignals.NONE);
             context.registerBean(AnswerWait.class, () -> WAIT);
         }, args);
     }

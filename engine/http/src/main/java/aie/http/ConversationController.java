@@ -11,6 +11,7 @@ import aie.http.api.model.MessageList;
 import aie.http.api.model.Usage;
 import aie.modules.conversation.api.Answers;
 import aie.modules.conversation.api.Conversations;
+import aie.modules.conversation.api.EventSignals;
 import aie.modules.conversation.api.Messages;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -62,15 +63,18 @@ class ConversationController implements ConversationsApi {
     private final HttpServletRequest request;
     private final EventStream stream;
 
-    /** The wait is the contract's 120 seconds unless a test registers a shorter one. */
+    /**
+     * The wait is the contract's 120 seconds unless a test registers a shorter one. The stream wakes on the signals the
+     * role's messages ring.
+     */
     ConversationController(EndUsers endUsers, Conversations conversations, Answers answers, Messages messages,
-            ObjectProvider<AnswerWait> wait, HttpServletRequest request) {
+            EventSignals signals, ObjectProvider<AnswerWait> wait, HttpServletRequest request) {
         this.endUsers = endUsers;
         this.conversations = conversations;
         this.answers = answers;
         this.messages = messages;
         this.wait = wait.getIfAvailable(() -> AnswerWait.CONTRACT).limit();
-        this.stream = new EventStream(messages);
+        this.stream = new EventStream(messages, signals);
         this.request = request;
     }
 

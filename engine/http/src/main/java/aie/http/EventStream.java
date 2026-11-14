@@ -8,6 +8,7 @@ import aie.http.api.model.MessageCompletedEvent;
 import aie.http.api.model.MessageDeltaEvent;
 import aie.http.api.model.MessageStartedEvent;
 import aie.http.api.model.Usage;
+import aie.modules.conversation.api.EventSignals;
 import aie.modules.conversation.api.Messages;
 import aie.modules.conversation.api.Messages.ErrorCode;
 import aie.modules.conversation.api.Messages.Event;
@@ -19,13 +20,18 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
  * Sends an answer's events as Server-Sent Events, read from its event log (blueprint 6.4): each event as its number,
- * its type and the contract's JSON for it, in order, until the ending event. The log is read every 200 milliseconds.
- * When no event has gone out for 15 seconds, a comment keeps the connection open. A caller that goes away stops the
- * sending, not the answer.
+ * its type and the contract's JSON for it, in order, until the ending event. The log is read every 200 milliseconds,
+ * or at once when an event is written in this instance (M2-7-4): the stream takes the answer's signal before each look
+ * and waits on it, so a missed signal costs no more than the next look. When no event has gone out for 15 seconds, a
+ * comment keeps the connection open. A caller that goes away stops the sending, not the answer.
  *
  * <p>A stream lasts 5 minutes at most, well past the route's 2 minutes: until the lease of M2-11, an answer whose
  * writer died stays in progress, and its stream would never end. At the limit the stream closes without an ending
@@ -51,34 +57,46 @@ final class EventStream {
         INTERRUPTED
     }
 
-    /** Waits. Tests pass one that only moves their clock. */
+    /** Waits for a signal, for so long at most. Tests pass one that only moves their clock. */
     @FunctionalInterface
-    interface Sleeper {
+    interface Waiter {
 
-        void sleep(Duration time) throws InterruptedException;
+        void await(CompletableFuture<Void> signal, Duration atMost) throws InterruptedException;
     }
+
+    /** Waits on the signal itself: a ring ends the wait at once. */
+    static final Waiter SIGNALS = (signal, atMost) -> {
+        try {
+            signal.get(atMost.toNanos(), TimeUnit.NANOSECONDS);
+        } catch (TimeoutException | ExecutionException noEvent) {
+            // Time for the next look, whatever woke the wait.
+        }
+    };
 
     private static final JsonMapper JSON = JsonMapper.builder().build();
     private static final byte[] HEARTBEAT_COMMENT = ": heartbeat\n\n".getBytes(UTF_8);
 
     private final Messages messages;
+    private final EventSignals signals;
     private final Duration poll;
     private final Duration heartbeat;
     private final Duration limit;
     private final Clock clock;
-    private final Sleeper sleeper;
+    private final Waiter waiter;
 
-    EventStream(Messages messages) {
-        this(messages, POLL, HEARTBEAT, LIMIT, Clock.systemUTC(), Thread::sleep);
+    EventStream(Messages messages, EventSignals signals) {
+        this(messages, signals, POLL, HEARTBEAT, LIMIT, Clock.systemUTC(), SIGNALS);
     }
 
-    EventStream(Messages messages, Duration poll, Duration heartbeat, Duration limit, Clock clock, Sleeper sleeper) {
+    EventStream(Messages messages, EventSignals signals, Duration poll, Duration heartbeat, Duration limit, Clock clock,
+            Waiter waiter) {
         this.messages = Objects.requireNonNull(messages, "A stream reads the log through Messages");
+        this.signals = Objects.requireNonNull(signals, "A stream needs the signals, or NONE");
         this.poll = positive(poll, "poll");
         this.heartbeat = positive(heartbeat, "heartbeat");
         this.limit = positive(limit, "limit");
         this.clock = Objects.requireNonNull(clock, "A stream needs a clock");
-        this.sleeper = Objects.requireNonNull(sleeper, "A stream needs a way to wait");
+        this.waiter = Objects.requireNonNull(waiter, "A stream needs a way to wait");
     }
 
     private static Duration positive(Duration time, String name) {
@@ -98,8 +116,10 @@ final class EventStream {
         Instant deadline = start.plus(limit);
         Instant beat = start.plus(heartbeat);
         long last = after;
+        CompletableFuture<Void> signal = null;
         try {
             while (true) {
+                signal = signals.next(messageId);
                 List<Event> events = messages.eventsAfter(caller, conversationId, messageId, last, BATCH);
                 for (Event event : events) {
                     out.write(sse(event));
@@ -126,13 +146,17 @@ final class EventStream {
                     beat = now.plus(heartbeat);
                 }
                 Duration left = Duration.between(now, deadline);
-                sleeper.sleep(left.compareTo(poll) < 0 ? left : poll);
+                waiter.await(signal, left.compareTo(poll) < 0 ? left : poll);
             }
         } catch (IOException gone) {
             return Ended.CALLER_GONE;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return Ended.INTERRUPTED;
+        } finally {
+            if (signal != null) {
+                signals.forget(messageId, signal);
+            }
         }
     }
 

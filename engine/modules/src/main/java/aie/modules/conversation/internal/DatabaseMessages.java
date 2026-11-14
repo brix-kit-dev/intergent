@@ -2,6 +2,7 @@ package aie.modules.conversation.internal;
 
 import aie.core.Ids;
 import aie.core.tenancy.api.ApiKeyLookup.Owner;
+import aie.modules.conversation.api.EventSignals;
 import aie.modules.conversation.api.Messages;
 import aie.ports.DatabaseException;
 import aie.ports.DatabasePort;
@@ -117,9 +118,17 @@ public final class DatabaseMessages implements Messages {
     private static final String LIST = OF_THE_APPLICATION + "ORDER BY m.ordinal";
 
     private final DatabasePort database;
+    private final EventSignals signals;
 
+    /** With no signals, for code that streams nothing. */
     public DatabaseMessages(DatabasePort database) {
+        this(database, EventSignals.NONE);
+    }
+
+    /** Each event that goes in rings its answer's signal, once its transaction has committed. */
+    public DatabaseMessages(DatabasePort database, EventSignals signals) {
         this.database = database;
+        this.signals = signals;
     }
 
     @Override
@@ -229,6 +238,7 @@ public final class DatabaseMessages implements Messages {
             throw refused;
         }
         if (!numbers.isEmpty()) {
+            signals.ring(messageId);
             return new Written.Added(numbers.getFirst());
         }
         Optional<Status> status = statusOf(caller, conversationId, messageId);

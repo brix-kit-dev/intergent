@@ -11,6 +11,7 @@ import aie.core.tenancy.api.Provisioning;
 import aie.core.tenancy.internal.DatabaseEndUsers;
 import aie.core.tenancy.internal.DatabaseProvisioning;
 import aie.modules.conversation.api.Conversations;
+import aie.modules.conversation.api.EventSignals;
 import aie.modules.conversation.api.Messages;
 import aie.modules.conversation.api.Messages.ErrorCode;
 import aie.modules.conversation.api.Messages.Event;
@@ -394,6 +395,43 @@ class AnswerEndingsTest {
             Thread.sleep(50);
         }
         throw new AssertionError("No writer came to wait on a lock");
+    }
+
+    /**
+     * M2-7-4: each event that goes in rings its answer's signal for the readers of this instance, after its transaction
+     * has committed. An event that does not go in rings nothing.
+     */
+    @Test
+    void eachEventThatGoesInRingsItsAnswerAndARefusedOneDoesNot() {
+        List<String> rung = new java.util.concurrent.CopyOnWriteArrayList<>();
+        EventSignals recording = new EventSignals() {
+
+            @Override
+            public java.util.concurrent.CompletableFuture<Void> next(String messageId) {
+                return new java.util.concurrent.CompletableFuture<>();
+            }
+
+            @Override
+            public void ring(String messageId) {
+                rung.add(messageId);
+            }
+
+            @Override
+            public void forget(String messageId, java.util.concurrent.CompletableFuture<Void> signal) {
+            }
+        };
+        Messages ringing = new DatabaseMessages(database, recording);
+        Owner caller = newApplication();
+        String conversation = newConversation(caller);
+        String answer = newAnswer(caller, conversation);
+
+        assertThat(ringing.addDelta(caller, conversation, answer, "Hi")).isEqualTo(new Added(2));
+        assertThat(ringing.complete(caller, conversation, answer, USAGE)).isEqualTo(new Added(3));
+        assertThat(ringing.addDelta(caller, conversation, answer, "late")).isEqualTo(new AlreadyEnded(Status.COMPLETED));
+        assertThat(ringing.fail(caller, conversation, "msg_00000000000000000000000000", ErrorCode.MODEL_FAILED))
+                .isEqualTo(new NotFound());
+
+        assertThat(rung).containsExactly(answer, answer);
     }
 
     @Test

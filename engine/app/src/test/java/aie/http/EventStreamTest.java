@@ -6,10 +6,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import aie.core.tenancy.api.ApiKeyLookup.Owner;
 import aie.http.EventStream.Ended;
+import aie.modules.conversation.api.EventSignals;
 import aie.modules.conversation.api.Messages;
 import aie.modules.conversation.api.Messages.ErrorCode;
 import aie.modules.conversation.api.Messages.Event;
 import aie.modules.conversation.api.Messages.EventType;
+import aie.modules.conversation.internal.LocalEventSignals;
 import aie.ports.DatabaseException;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -124,7 +126,13 @@ class EventStreamTest {
     }
 
     private EventStream stream() {
-        return new EventStream(log.messages(), EventStream.POLL, EventStream.HEARTBEAT, EventStream.LIMIT, time, time::sleep);
+        return new EventStream(log.messages(), EventSignals.NONE, EventStream.POLL, EventStream.HEARTBEAT, EventStream.LIMIT, time,
+                waitOnTheClock());
+    }
+
+    /** Waits on the clock alone, as if no signal ever rang. */
+    private EventStream.Waiter waitOnTheClock() {
+        return (signal, span) -> time.sleep(span);
     }
 
     private String send(long after) {
@@ -190,8 +198,8 @@ class EventStreamTest {
             Log one = new Log(time).at(Duration.ZERO, event(1, EventType.ERROR, null, null, code));
             ByteArrayOutputStream out = new ByteArrayOutputStream();
 
-            Ended ended = new EventStream(one.messages(), EventStream.POLL, EventStream.HEARTBEAT, EventStream.LIMIT, time,
-                    time::sleep).send(CALLER, CONVERSATION, ANSWER, 0, out);
+            Ended ended = new EventStream(one.messages(), EventSignals.NONE, EventStream.POLL, EventStream.HEARTBEAT,
+                    EventStream.LIMIT, time, waitOnTheClock()).send(CALLER, CONVERSATION, ANSWER, 0, out);
 
             assertThat(ended).isEqualTo(Ended.ENDING_SENT);
             String[] lines = out.toString(UTF_8).split("\n");
@@ -322,8 +330,8 @@ class EventStreamTest {
     @Test
     void anInterruptStopsTheStream() {
         log.at(Duration.ZERO, started(1));
-        EventStream interrupted = new EventStream(log.messages(), EventStream.POLL, EventStream.HEARTBEAT, EventStream.LIMIT,
-                time, span -> {
+        EventStream interrupted = new EventStream(log.messages(), EventSignals.NONE, EventStream.POLL, EventStream.HEARTBEAT,
+                EventStream.LIMIT, time, (signal, span) -> {
                     throw new InterruptedException("stopping");
                 });
 
@@ -341,6 +349,92 @@ class EventStreamTest {
         assertThatThrownBy(() -> send(0)).isSameAs(log.failure);
     }
 
+    /** A log that a test writes into while the stream reads it, on the real clock. */
+    private static Messages liveLog(List<Event> events) {
+        return (Messages) Proxy.newProxyInstance(Messages.class.getClassLoader(), new Class<?>[] {Messages.class},
+                (proxy, method, arguments) -> {
+                    if (!method.getName().equals("eventsAfter")) {
+                        throw new UnsupportedOperationException(method.getName());
+                    }
+                    long after = (long) arguments[3];
+                    return events.stream().filter(event -> event.seq() > after).limit((int) arguments[4]).toList();
+                });
+    }
+
+    /**
+     * M2-7-4: with a look at the log only every 10 seconds, the ending still goes out at once, because its writer rang
+     * the answer's signal.
+     */
+    @Test
+    void aRingWakesTheStreamAtOnce() throws Exception {
+        List<Event> events = new java.util.concurrent.CopyOnWriteArrayList<>(List.of(started(1)));
+        LocalEventSignals signals = new LocalEventSignals();
+        EventStream slow = new EventStream(liveLog(events), signals, Duration.ofSeconds(10), EventStream.HEARTBEAT,
+                EventStream.LIMIT, Clock.systemUTC(), EventStream.SIGNALS);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        java.util.concurrent.CompletableFuture<Ended> sending = java.util.concurrent.CompletableFuture.supplyAsync(
+                () -> slow.send(CALLER, CONVERSATION, ANSWER, 0, out));
+        long until = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+        while (signals.waiting() == 0 && System.nanoTime() < until) {
+            Thread.sleep(5);
+        }
+        Thread.sleep(100);
+
+        long start = System.nanoTime();
+        events.add(completed(2));
+        signals.ring(ANSWER);
+        Ended ended = sending.get(5, java.util.concurrent.TimeUnit.SECONDS);
+
+        assertThat(ended).isEqualTo(Ended.ENDING_SENT);
+        assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(2));
+        assertThat(out.toString(UTF_8)).contains("id: 2\nevent: message.completed\n");
+    }
+
+    /** The signal is taken before each look, so an event written after the look rings the signal the stream waits on. */
+    @Test
+    void theSignalIsTakenBeforeEachLook() {
+        LocalEventSignals signals = new LocalEventSignals();
+        List<Integer> waitingAtEachLook = new ArrayList<>();
+        Messages watched = (Messages) Proxy.newProxyInstance(Messages.class.getClassLoader(), new Class<?>[] {Messages.class},
+                (proxy, method, arguments) -> {
+                    waitingAtEachLook.add(signals.waiting());
+                    return method.invoke(log.messages(), arguments);
+                });
+        log.at(Duration.ZERO, started(1)).at(seconds(1), completed(2));
+
+        new EventStream(watched, signals, EventStream.POLL, EventStream.HEARTBEAT, EventStream.LIMIT, time, waitOnTheClock())
+                .send(CALLER, CONVERSATION, ANSWER, 0, new ByteArrayOutputStream());
+
+        assertThat(waitingAtEachLook).hasSize(6).containsOnly(1);
+    }
+
+    /** However the stream ends, it gives its signal back, so no signal is left behind for an answer no one rings. */
+    @Test
+    void theStreamGivesItsSignalBack() {
+        LocalEventSignals signals = new LocalEventSignals();
+        log.at(Duration.ZERO, started(1)).at(seconds(1), completed(2));
+        new EventStream(log.messages(), signals, EventStream.POLL, EventStream.HEARTBEAT, EventStream.LIMIT, time, waitOnTheClock())
+                .send(CALLER, CONVERSATION, ANSWER, 0, new ByteArrayOutputStream());
+        assertThat(signals.waiting()).isZero();
+
+        Log never = new Log(time).at(Duration.ZERO, started(1));
+        Ended timedOut = new EventStream(never.messages(), signals, EventStream.POLL, EventStream.HEARTBEAT, EventStream.LIMIT,
+                time, waitOnTheClock()).send(CALLER, CONVERSATION, ANSWER, 0, new ByteArrayOutputStream());
+        assertThat(timedOut).isEqualTo(Ended.TIMED_OUT);
+        assertThat(signals.waiting()).isZero();
+
+        OutputStream gone = new OutputStream() {
+            @Override
+            public void write(int b) throws IOException {
+                throw new IOException("Broken pipe");
+            }
+        };
+        Ended callerGone = new EventStream(never.messages(), signals, EventStream.POLL, EventStream.HEARTBEAT, EventStream.LIMIT,
+                time, waitOnTheClock()).send(CALLER, CONVERSATION, ANSWER, 0, gone);
+        assertThat(callerGone).isEqualTo(Ended.CALLER_GONE);
+        assertThat(signals.waiting()).isZero();
+    }
+
     @Test
     void theTimesAreTheApprovedOnes() {
         assertThat(EventStream.POLL).isEqualTo(Duration.ofMillis(200));
@@ -348,8 +442,8 @@ class EventStreamTest {
         assertThat(EventStream.LIMIT).isEqualTo(Duration.ofMinutes(5));
         assertThat(EventStream.BATCH).isEqualTo(100);
         for (Duration wrong : new Duration[] {Duration.ZERO, Duration.ofMillis(-1), null}) {
-            assertThatThrownBy(() -> new EventStream(log.messages(), wrong, EventStream.HEARTBEAT, EventStream.LIMIT, time,
-                    time::sleep)).isInstanceOf(IllegalArgumentException.class);
+            assertThatThrownBy(() -> new EventStream(log.messages(), EventSignals.NONE, wrong, EventStream.HEARTBEAT,
+                    EventStream.LIMIT, time, waitOnTheClock())).isInstanceOf(IllegalArgumentException.class);
         }
     }
 }

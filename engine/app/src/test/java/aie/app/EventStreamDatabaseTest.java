@@ -18,6 +18,7 @@ import aie.modules.conversation.api.Messages;
 import aie.modules.conversation.internal.DatabaseConversations;
 import aie.modules.conversation.internal.DatabaseMessages;
 import aie.modules.conversation.internal.GeneratingAnswers;
+import aie.modules.conversation.internal.LocalEventSignals;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.Arrays;
@@ -96,6 +97,29 @@ class EventStreamDatabaseTest {
         assertThat(idsAndTypes(sent)).containsExactly("1 message.started", "2 message.delta", "3 message.delta",
                 "4 message.delta", "5 message.completed");
         assertThat(sent).contains("\"text\":\"Piece 1 of 3. \"", "\"text\":\"Piece 3 of 3. \"");
+    }
+
+    /**
+     * M2-7-4 on the real scripts: the messages that the generator writes through ring the signals the stream waits on, so
+     * with a look at the log only every 10 seconds the stream still follows the answer as it is written.
+     */
+    @Test
+    void theSignalsOfTheWritesWakeTheStream() {
+        LocalEventSignals signals = new LocalEventSignals();
+        Messages ringing = new DatabaseMessages(pool, signals);
+        try (GeneratingAnswers ringingAnswers = new GeneratingAnswers(ringing, new RoutingGateway(Map.of(FakeModel.MODEL, new FakeModel()),
+                Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), Duration.ofSeconds(30))), pool::insideTx))) {
+            Started started = (Started) ringingAnswers.ask(caller, conversation, "[fake pieces=3 delay=200ms] Quick");
+
+            long start = System.nanoTime();
+            String sent = EventStreamProbe.send(ringing, signals, Duration.ofSeconds(10), caller, conversation,
+                    started.asked().answer().messageId(), 0);
+
+            assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(5));
+            assertThat(idsAndTypes(sent)).containsExactly("1 message.started", "2 message.delta", "3 message.delta",
+                    "4 message.delta", "5 message.completed");
+            assertThat(signals.waiting()).isZero();
+        }
     }
 
     @Test

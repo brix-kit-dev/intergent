@@ -9,6 +9,7 @@ import aie.adapters.storepg.PgRuntime;
 import aie.adapters.storepg.TestDatabase;
 import aie.core.gateway.api.Gateway;
 import aie.core.tenancy.api.ApiKeys;
+import aie.core.tenancy.api.ApiKeyLookup.Owner;
 import aie.core.tenancy.api.Provisioning;
 import aie.core.tenancy.api.Provisioning.IssuedKey;
 import aie.core.tenancy.api.SessionTokens;
@@ -504,6 +505,43 @@ class ApiRoleTest {
         assertThat(elsewhere.statusCode()).isEqualTo(404);
         assertThat(TestDatabase.firstColumn(DATABASE, "SELECT role || ' ' || status FROM engine.conversation_messages WHERE conversation_id = '"
                 + id + "' ORDER BY ordinal")).containsExactly("user completed", "assistant completed");
+    }
+
+    /** The role's messages ring the role's signals, which its stream waits on (M2-7-4). */
+    @Test
+    void theRolesMessagesRingTheRolesSignals() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String application = provisioning.createApplication(tenant, "test", "internal");
+        String key = provisioning.createKey(tenant, application).key();
+        String id = JSON.readValue(startConversation(key, "signals-1", "{\"external_user_id\":\"host-user-1\"}").body(),
+                Conversation.class).getId();
+        Owner caller = new Owner("key_unused", tenant, application);
+        aie.modules.conversation.api.Messages messages = context.getBean(aie.modules.conversation.api.Messages.class);
+        aie.modules.conversation.api.EventSignals signals = context.getBean(aie.modules.conversation.api.EventSignals.class);
+        String answer = messages.ask(caller, id, "Hello?").orElseThrow().answer().messageId();
+
+        java.util.concurrent.CompletableFuture<Void> signal = signals.next(answer);
+        messages.addDelta(caller, id, answer, "Hi");
+
+        assertThat(signals).isInstanceOf(aie.modules.conversation.internal.LocalEventSignals.class);
+        assertThat(signal).isDone();
+    }
+
+    /**
+     * The controller's stream waits on the very signals the role's messages ring. A stream on other signals would still
+     * work, only slower, so no request could tell; the wiring is checked where it is made.
+     */
+    @Test
+    void theRolesStreamWaitsOnTheRolesSignals() throws Exception {
+        Object controller = context.getBean(Class.forName("aie.http.ConversationController"));
+        java.lang.reflect.Field streamField = controller.getClass().getDeclaredField("stream");
+        streamField.setAccessible(true);
+        Object stream = streamField.get(controller);
+        java.lang.reflect.Field signalsField = stream.getClass().getDeclaredField("signals");
+        signalsField.setAccessible(true);
+
+        assertThat(signalsField.get(stream)).isSameAs(context.getBean(aie.modules.conversation.api.EventSignals.class));
     }
 
     /** The role's own generator, the fake model and the event stream: the answer streams from its log to its ending. */
