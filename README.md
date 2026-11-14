@@ -642,7 +642,9 @@ const answer = await fetch("https://引擎地址/v1/anonymous-sessions", {
 **一个失败只记一条：** 日志里一个失败只有一条 ERROR，带 `Request-Id` 和 trace ID。
 - 控制器里的失败由 `ProblemAdvice` 记。
 - 过滤器抛出的由 `RequestIdFilter` 接住，交给错误页，由 `ProblemErrorController` 记。要是让它冒到 Tomcat，Tomcat 会先记一条不带 ID 的，告警就会算两次。
-- 回答已经开始发送后才出错的，没法再变成 problem，照旧交给 Tomcat 处理。
+- 回答已经开始发送后才出错的（第 34 点），没法再变成 problem，也不能再往里写任何东西，否则回答就乱了。不管失败发生在过滤器还是控制器（比如流），都由 `RequestIdFilter` 记一条 ERROR，带 `Request-Id` 和 trace ID，然后切断连接：
+  - 控制器里的失败，`ProblemAdvice` 原样抛出，不记也不写，交给 `RequestIdFilter`。
+  - `RequestIdFilter` 记完日志，抛出 Tomcat 的 `ClientAbortException`，Tomcat 把它当成客户端走了：不再记日志，也不转错误页，并且直接关掉连接，不发最后的结束块。客户端因此知道回答断了；流式的客户端没收到结束事件，就该续传（蓝图 6.4）。
 
 **ID：** `aie.core.Ids` 生成蓝图 6.2 的 ID：类型前缀、时间、随机数。时间在前，所以后生成的排在后面；随机部分让人猜不到相邻的 ID。
 

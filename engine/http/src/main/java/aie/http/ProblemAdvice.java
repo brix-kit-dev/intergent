@@ -1,5 +1,6 @@
 package aie.http;
 
+import jakarta.servlet.http.HttpServletResponse;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,8 +51,19 @@ class ProblemAdvice extends ResponseEntityExceptionHandler {
         return failure instanceof ErrorResponse response ? response.getBody().getDetail() : null;
     }
 
+    /**
+     * Once the answer has started, no problem can follow it, so the failure leaves Spring as it came: RequestIdFilter
+     * logs it once and cuts the connection (code point 34).
+     */
     @ExceptionHandler(Exception.class)
-    ResponseEntity<Object> internalError(Exception failure) {
+    ResponseEntity<Object> failed(Exception failure, HttpServletResponse response) throws Exception {
+        if (response.isCommitted()) {
+            throw failure;
+        }
+        return internalError(failure);
+    }
+
+    private static ResponseEntity<Object> internalError(Exception failure) {
         LOG.error("The request failed", failure);
         return Problems.response(HttpStatus.INTERNAL_SERVER_ERROR.value(), null, HttpHeaders.EMPTY);
     }

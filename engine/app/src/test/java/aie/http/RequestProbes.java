@@ -92,6 +92,14 @@ public final class RequestProbes {
             throw new IllegalStateException("a failure inside a request");
         }
 
+        /** A controller that has started its answer, as a stream does, and then fails. */
+        @GetMapping("/test/fail-late")
+        void failLate(HttpServletResponse response) throws IOException {
+            response.getWriter().write("partial");
+            response.flushBuffer();
+            throw new IllegalStateException("a failure after the answer started");
+        }
+
         /** Spring itself fails here, while writing the response. */
         @GetMapping("/test/unwritable")
         Unwritable unwritable() {

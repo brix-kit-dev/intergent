@@ -7,6 +7,7 @@ import jakarta.servlet.FilterChain;
 import jakarta.servlet.RequestDispatcher;
 import java.io.IOException;
 import java.util.concurrent.atomic.AtomicReference;
+import org.apache.catalina.connector.ClientAbortException;
 import org.junit.jupiter.api.Test;
 import org.slf4j.MDC;
 import org.springframework.mock.web.MockHttpServletRequest;
@@ -56,16 +57,25 @@ class RequestIdFilterTest {
         assertThat(response.getHeader(RequestIdFilter.HEADER)).isNotNull();
     }
 
-    /** An answer that has started cannot become a problem any more, so the failure goes on to Tomcat. */
+    /**
+     * An answer that has started cannot become a problem any more (code point 34). The failure goes on to Tomcat as a
+     * client that went away, which Tomcat neither logs nor sends to the error page, and it cuts the connection. The
+     * failure itself is the cause, and nothing is set for the error page.
+     */
     @Test
-    void aFailureAfterTheAnswerStartedGoesOn() {
+    void aFailureAfterTheAnswerStartedCutsTheConnection() {
+        IllegalStateException failure = new IllegalStateException("late");
+        request.addHeader(TraceparentFilter.HEADER, "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
         FilterChain late = (unused, answer) -> {
             answer.flushBuffer();
-            throw new IllegalStateException("late");
+            throw failure;
         };
 
-        assertThatThrownBy(() -> filter.doFilter(request, response, late)).isInstanceOf(IllegalStateException.class).hasMessage("late");
+        assertThatThrownBy(() -> filter.doFilter(request, response, late)).isInstanceOf(ClientAbortException.class)
+                .hasCause(failure);
+        assertThat(request.getAttribute(RequestDispatcher.ERROR_EXCEPTION)).isNull();
         assertThat(MDC.get(RequestIdFilter.LOG_KEY)).isNull();
+        assertThat(MDC.get(TraceparentFilter.LOG_KEY)).isNull();
     }
 
     /** An I/O failure is mostly a client that went away, which Tomcat logs at debug level only. An Error stays its own. */

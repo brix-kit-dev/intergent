@@ -217,14 +217,25 @@ class ProblemJsonTest {
                 .singleElement().asString().contains("[" + id + "] [" + TRACE + "]", "The request failed");
     }
 
-    /** An answer that has started cannot become a problem, so Tomcat handles the failure as before, with its own cause. */
-    @Test
-    void aFailureAfterTheAnswerStartedKeepsItsCause(CapturedOutput output) throws Exception {
-        String response = raw(get("/test/filter-fails-late", "Host: x\r\n"));
+    /**
+     * Code point 34. An answer that has started cannot become a problem, and nothing may be written after it. The failure
+     * is logged once, with both IDs, and the connection is cut, so the answer ends without its last chunk and the client
+     * learns that it broke off. That holds for a filter and for a controller, such as a stream.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"/test/filter-fails-late", "/test/fail-late"})
+    void aFailureAfterTheAnswerStartedIsLoggedOnceAndCutsTheConnection(String path, CapturedOutput output) throws Exception {
+        String response = raw(get(path, "Host: x\r\ntraceparent: " + TRACEPARENT + "\r\n"));
 
-        assertThat(response).startsWith("HTTP/1.1 200").contains("partial");
+        assertThat(response).startsWith("HTTP/1.1 200").contains("Transfer-Encoding: chunked", "partial")
+                .doesNotContain("problem", "\r\n0\r\n\r\n");
+        String id = response.lines().filter(line -> line.startsWith("Request-Id: ")).findFirst().orElseThrow()
+                .substring("Request-Id: ".length());
+        assertThat(output.getOut().lines().filter(line -> line.contains(" ERROR "))).singleElement().asString()
+                .contains("[" + id + "] [" + TRACE + "]", "The request failed after its answer had started, so its connection is cut");
         assertThat(output.getOut()).contains("java.lang.IllegalStateException: a failure after the answer started")
-                .doesNotContain("Cannot call sendError()");
+                .doesNotContain("Servlet.service()", "getWriter() has already been called", "Cannot call sendError()",
+                        "Failure in @ExceptionHandler", "The request failed\n");
     }
 
     @Test
