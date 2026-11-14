@@ -192,7 +192,8 @@ final class EventStream {
         return new Usage(event.usage().inputTokens(), event.usage().outputTokens());
     }
 
-    private static boolean ending(EventType type) {
+    /** Whether an event of this type ends its answer, so that nothing can follow it. */
+    static boolean ending(EventType type) {
         return type == EventType.MESSAGE_COMPLETED || type == EventType.MESSAGE_CANCELLED || type == EventType.ERROR;
     }
 }

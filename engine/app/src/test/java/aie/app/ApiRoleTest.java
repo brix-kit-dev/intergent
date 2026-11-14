@@ -20,8 +20,12 @@ import aie.core.tenancy.internal.SignedSessionTokens;
 import aie.http.api.model.Conversation;
 import aie.http.api.model.CreatedApiKey;
 import aie.http.api.model.Message;
+import aie.http.api.model.MessageStartedEvent;
 import aie.http.api.model.Usage;
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
@@ -32,10 +36,12 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpRequest.BodyPublishers;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
@@ -565,6 +571,132 @@ class ApiRoleTest {
         assertThat(streamed.body()).contains("\"text\":\"Piece 1 of 2. \"", "\"text\":\"Piece 2 of 2. \"");
         assertThat(TestDatabase.firstColumn(DATABASE, "SELECT role || ' ' || status FROM engine.conversation_messages WHERE conversation_id = '"
                 + id + "' ORDER BY ordinal")).containsExactly("user completed", "assistant completed");
+    }
+
+    /** GET .../events of an answer from the api on this port, with Last-Event-ID only when one is given. */
+    private static HttpResponse<String> events(int apiPort, String key, String conversationId, String answerId,
+            String lastEventId) throws Exception {
+        HttpRequest.Builder request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + apiPort + "/v1/conversations/"
+                        + conversationId + "/messages/" + answerId + "/events"))
+                .header("Authorization", "Bearer " + key).timeout(Duration.ofSeconds(30));
+        if (lastEventId != null) {
+            request.header("Last-Event-ID", lastEventId);
+        }
+        return HttpClient.newHttpClient().send(request.build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    /** The events of an SSE body, each without the blank line that ends it. */
+    private static List<String> eventsOf(String body) {
+        return Arrays.stream(body.split("\n\n")).filter(event -> !event.isEmpty()).toList();
+    }
+
+    /** The first events of a stream as they arrive, each without its blank line, then the stream is dropped. */
+    private static List<String> firstEvents(InputStream stream, int count) throws IOException {
+        List<String> events = new ArrayList<>();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+            StringBuilder event = new StringBuilder();
+            while (events.size() < count) {
+                String line = reader.readLine();
+                assertThat(line).as("the stream goes on to event " + (events.size() + 1)).isNotNull();
+                if (line.isEmpty()) {
+                    events.add(event.toString());
+                    event.setLength(0);
+                } else {
+                    event.append(event.isEmpty() ? "" : "\n").append(line);
+                }
+            }
+        }
+        return events;
+    }
+
+    /** The line of each event that starts with the prefix, such as its id or its type. */
+    private static List<String> lines(List<String> events, String prefix) {
+        return events.stream().map(event -> event.lines().filter(line -> line.startsWith(prefix)).findFirst().orElse("")).toList();
+    }
+
+    /**
+     * Resuming on another instance (M2-8): a streamed answer is dropped after its third event here, and a second api on
+     * the same database sends the rest after Last-Event-ID 3, while the answer is still being written here. The two parts
+     * hold every event once, in order, and the answer completed although its first caller went away. Once it ended, the
+     * second api sends it again whole: the same events.
+     */
+    @Test
+    void aStreamResumesOnAnotherInstanceWithNothingRepeatedOrMissed() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String key = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "internal")).key();
+        String id = JSON.readValue(startConversation(key, "resume-1", "{\"external_user_id\":\"host-user-1\"}").body(),
+                Conversation.class).getId();
+        ConfigurableApplicationContext second =
+                ApiRole.start("--server.port=0", address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING);
+        try {
+            int secondPort = ((ServletWebServerApplicationContext) second).getWebServer().getPort();
+            HttpResponse<InputStream> streaming = HttpClient.newHttpClient().send(at("/v1/conversations/" + id + "/messages")
+                    .header("Authorization", "Bearer " + key).header("Content-Type", "application/json")
+                    .header("Accept", "text/event-stream")
+                    .POST(BodyPublishers.ofString("{\"text\":\"[fake pieces=6 delay=300ms] Hi\"}")).build(),
+                    HttpResponse.BodyHandlers.ofInputStream());
+            List<String> first = firstEvents(streaming.body(), 3);
+            String answer = JSON.readValue(first.getFirst().lines().filter(line -> line.startsWith("data: ")).findFirst()
+                    .orElseThrow().substring("data: ".length()), MessageStartedEvent.class).getMessageId();
+            assertThat(TestDatabase.firstColumn(DATABASE, "SELECT status FROM engine.conversation_messages WHERE message_id = '"
+                    + answer + "'")).as("the answer is still being written").containsExactly("in_progress");
+
+            HttpResponse<String> rest = events(secondPort, key, id, answer, "3");
+
+            assertThat(rest.statusCode()).isEqualTo(200);
+            List<String> whole = new ArrayList<>(first);
+            whole.addAll(eventsOf(rest.body()));
+            assertThat(lines(whole, "id: ")).containsExactly("id: 1", "id: 2", "id: 3", "id: 4", "id: 5", "id: 6", "id: 7", "id: 8");
+            assertThat(lines(whole, "event: ")).containsExactly("event: message.started", "event: message.delta",
+                    "event: message.delta", "event: message.delta", "event: message.delta", "event: message.delta",
+                    "event: message.delta", "event: message.completed");
+            assertThat(String.join("", whole)).contains("Piece 1 of 6. ", "Piece 3 of 6. ", "Piece 6 of 6. ");
+            assertThat(TestDatabase.firstColumn(DATABASE, "SELECT status || ' ' || text FROM engine.conversation_messages"
+                    + " WHERE message_id = '" + answer + "'")).containsExactly("completed Piece 1 of 6. Piece 2 of 6. Piece 3 of 6."
+                    + " Piece 4 of 6. Piece 5 of 6. Piece 6 of 6. ");
+            assertThat(events(secondPort, key, id, answer, null).body()).isEqualTo(String.join("\n\n", whole) + "\n\n");
+        } finally {
+            second.close();
+        }
+    }
+
+    /**
+     * GET .../events on the real database: only a key of the answer's own application reads its events. The tenant's
+     * live application, another tenant, a user message and an unknown message all get the same 404. A caller that has
+     * the ending gets nothing more, and an id beyond the log is refused.
+     */
+    @Test
+    void anAnswersEventsAreReadOnlyThroughItsOwnApplication() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String testKey = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "internal")).key();
+        String liveKey = provisioning.createKey(tenant, provisioning.createApplication(tenant, "live", "internal")).key();
+        String stranger = provisioning.createTenant("jp1", null);
+        String strangerKey = provisioning.createKey(stranger, provisioning.createApplication(stranger, "test", "internal")).key();
+        String id = JSON.readValue(startConversation(testKey, "events-1", "{\"external_user_id\":\"host-user-1\"}").body(),
+                Conversation.class).getId();
+        String answer = JSON.readValue(sendMessage(testKey, "events-2", id, "{\"text\":\"[fake pieces=2 delay=1ms] Hi\"}").body(),
+                Message.class).getId();
+        String question = TestDatabase.firstColumn(DATABASE, "SELECT message_id FROM engine.conversation_messages"
+                + " WHERE conversation_id = '" + id + "' AND role = 'user'").get(0);
+
+        HttpResponse<String> whole = events(port, testKey, id, answer, null);
+        HttpResponse<String> caughtUp = events(port, testKey, id, answer, "4");
+        HttpResponse<String> unknown = events(port, testKey, id, "msg_" + "0".repeat(26), null);
+
+        assertThat(whole.statusCode()).isEqualTo(200);
+        assertThat(lines(eventsOf(whole.body()), "event: "))
+                .containsExactly("event: message.started", "event: message.delta", "event: message.delta", "event: message.completed");
+        assertThat(caughtUp.statusCode()).isEqualTo(200);
+        assertThat(caughtUp.body()).isEmpty();
+        assertThat(events(port, testKey, id, answer, "5").statusCode()).isEqualTo(400);
+        assertThat(unknown.statusCode()).isEqualTo(404);
+        for (HttpResponse<String> other : List.of(events(port, liveKey, id, answer, null),
+                events(port, strangerKey, id, answer, null), events(port, testKey, id, question, null))) {
+            assertThat(other.statusCode()).isEqualTo(404);
+            assertThat(other.body()).isEqualTo(unknown.body());
+        }
     }
 
     private static HttpResponse<String> sendMessage(String key, String idempotencyKey, String conversationId, String body)

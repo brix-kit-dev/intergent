@@ -3,6 +3,7 @@ package aie.http;
 import aie.core.tenancy.api.ApiKeyLookup.Owner;
 import aie.core.tenancy.api.EndUsers;
 import aie.http.api.ConversationsApi;
+import aie.http.api.StreamsApi;
 import aie.http.api.model.Conversation;
 import aie.http.api.model.CreateConversationRequest;
 import aie.http.api.model.CreateMessageRequest;
@@ -29,6 +30,7 @@ import java.util.regex.Pattern;
 import org.jspecify.annotations.Nullable;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.InvalidMediaTypeException;
 import org.springframework.http.MediaType;
@@ -41,17 +43,27 @@ import org.springframework.web.context.request.ServletRequestAttributes;
 import org.springframework.web.server.ResponseStatusException;
 
 /**
- * The conversation operations of the contract. The generated interface has no defaults, so every operation has to be
- * here. Starting and reading a conversation work, and so does sending a message without streaming; the other message
- * operations answer 404, as their paths did before this controller, until their points of M2 come.
+ * The conversation operations of the contract, and the stream of an answer's events. The generated interfaces have no
+ * defaults, so every operation has to be here. Starting and reading a conversation work, and so do sending a message,
+ * with or without streaming, and resuming an answer's stream; the other message operations answer 404, as their paths
+ * did before this controller, until their points of M2 come.
  */
 @RestController
-class ConversationController implements ConversationsApi {
+class ConversationController implements ConversationsApi, StreamsApi {
 
     /** The contract's ConversationId: this prefix, then letters and digits, at most 64 characters in all. */
     private static final String CONVERSATION_PREFIX = "conv_";
     private static final int MAX_CONVERSATION_ID = 64;
     private static final Pattern CONVERSATION_ID = Pattern.compile(CONVERSATION_PREFIX + "[0-9A-Za-z]+");
+    /** The contract's MessageId, made the same way. */
+    private static final String MESSAGE_PREFIX = "msg_";
+    private static final int MAX_MESSAGE_ID = 64;
+    private static final Pattern MESSAGE_ID = Pattern.compile(MESSAGE_PREFIX + "[0-9A-Za-z]+");
+    /**
+     * An id the event stream sends: an event's number, from 1, in decimal without a sign or a leading zero. The database
+     * keeps the numbers as an integer, so ten digits hold every one of them.
+     */
+    private static final Pattern EVENT_ID = Pattern.compile("[1-9][0-9]{0,9}");
     /** Retry-After of a full instance: an answer takes seconds, so a slot is likely free by then. */
     static final Duration RETRY_AFTER = Duration.ofSeconds(5);
 
@@ -165,6 +177,38 @@ class ConversationController implements ConversationsApi {
         throw notYet();
     }
 
+    /**
+     * Resumes an answer's stream (blueprint 6.4): its events after the one the caller got last, until the ending, as
+     * Server-Sent Events. Without Last-Event-ID the stream starts from the first event, so an answer that ended is sent
+     * again whole. The log is in the database and its numbers never go back, so every instance sends the same events,
+     * with none repeated or missed. An instance other than the writer's finds each new event at its next look, within
+     * 200 milliseconds.
+     *
+     * <p>Everything is checked before the stream starts, and a refusal is a plain problem. A user message has no events,
+     * so it is as missing as an unknown message, one of another application and one of another tenant. Last-Event-ID
+     * must be an id the stream sent (M2-8 decision 1), and an empty one is none, as the SSE standard's last event ID is
+     * empty until the first event came. A caller that already has the ending gets the headers and nothing else (M2-8
+     * decision 2), and so does HEAD, which has no body to wait for.
+     */
+    @Override
+    public @Nullable ResponseEntity<String> streamMessageEvents(String conversationId, String messageId,
+            @Nullable String lastEventID, @Nullable String engineVersion, @Nullable String traceparent,
+            @Nullable String onBehalfOf) {
+        takesEvents(accepted());
+        String conversation = conversationId(conversationId);
+        String answer = messageId(messageId);
+        long after = lastEventId(lastEventID);
+        Owner caller = caller();
+        messages.find(caller, conversation, answer).filter(found -> found.role() == Messages.Role.ASSISTANT)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
+        boolean hasEnding = after > 0 && hasEnding(caller, conversation, answer, after);
+        HttpServletResponse response = eventStream();
+        if (!hasEnding && !HttpMethod.HEAD.matches(request.getMethod())) {
+            send(caller, conversation, answer, after, response);
+        }
+        return null;
+    }
+
     private List<MediaType> accepted() {
         try {
             return MediaType.parseMediaTypes(Collections.list(request.getHeaders(HttpHeaders.ACCEPT)));
@@ -196,12 +240,27 @@ class ConversationController implements ConversationsApi {
     }
 
     /**
-     * The answer as Server-Sent Events, from its first event to its ending, written on this request's own thread. The
-     * response says that it streams before the first event goes out, and asks proxies not to hold it back. A caller that
-     * goes away stops the sending, not the answer. A failure from here on cannot become a problem: it leaves through
-     * ProblemAdvice to RequestIdFilter, which logs it once and cuts the connection (code point 34).
+     * The events come as text/event-stream. Spring turns away an Accept that none of the operation's types meet, but
+     * application/problem+json alone meets one, so the stream's own type is checked here, and a quality of 0 refuses it.
      */
+    private static void takesEvents(List<MediaType> accepted) {
+        if (!accepted.isEmpty() && accepted.stream().noneMatch(type -> type.getQualityValue() > 0
+                && type.isCompatibleWith(MediaType.TEXT_EVENT_STREAM))) {
+            throw new ResponseStatusException(HttpStatus.NOT_ACCEPTABLE, "The events come as text/event-stream");
+        }
+    }
+
+    /** The answer as Server-Sent Events, from its first event to its ending. */
     private @Nullable ResponseEntity<Message> streamed(Owner caller, String conversationId, Answers.Start.Started started) {
+        send(caller, conversationId, started.asked().answer().messageId(), 0, eventStream());
+        return null;
+    }
+
+    /**
+     * Starts the response as Server-Sent Events. It says that it streams before the first event goes out, and asks
+     * proxies not to hold it back.
+     */
+    private static HttpServletResponse eventStream() {
         HttpServletResponse response = Objects.requireNonNull(
                 ((ServletRequestAttributes) RequestContextHolder.currentRequestAttributes()).getResponse(),
                 "A request in Spring MVC has its response");
@@ -209,12 +268,50 @@ class ConversationController implements ConversationsApi {
         response.setContentType("text/event-stream;charset=UTF-8");
         response.setHeader(HttpHeaders.CACHE_CONTROL, "no-cache");
         response.setHeader("X-Accel-Buffering", "no");
+        return response;
+    }
+
+    /**
+     * Sends an answer's events after number {@code after}, until its ending, on this request's own thread. A caller that
+     * goes away stops the sending, not the answer. A failure from here on cannot become a problem: it leaves through
+     * ProblemAdvice to RequestIdFilter, which logs it once and cuts the connection (code point 34).
+     */
+    private void send(Owner caller, String conversationId, String answerId, long after, HttpServletResponse response) {
         try {
-            stream.send(caller, conversationId, started.asked().answer().messageId(), 0, response.getOutputStream());
+            stream.send(caller, conversationId, answerId, after, response.getOutputStream());
         } catch (IOException gone) {
             // The caller went away before the first event; the answer goes on.
         }
-        return null;
+    }
+
+    /**
+     * The number of the event the caller got last, or 0 for none. Only an id the stream sent passes, so an id written
+     * another way, such as 05 for 5, is refused rather than read as a number.
+     */
+    private static long lastEventId(@Nullable String lastEventId) {
+        if (lastEventId == null || lastEventId.isEmpty()) {
+            return 0;
+        }
+        if (!EVENT_ID.matcher(lastEventId).matches()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Last-Event-ID must be the id of an event the stream sent, a number from 1");
+        }
+        return Long.parseLong(lastEventId);
+    }
+
+    /**
+     * Whether the caller has the answer's ending already: whether the event it got last is the ending, after which
+     * nothing comes. The numbers never go back, so a log that has not come as far as the id never sent it, and a stream
+     * after it would wait for a number that never comes. When content is withdrawn, its deltas go and the ending stays
+     * (blueprint 6.4), so an event the caller got may be gone while a later one is still to come.
+     */
+    private boolean hasEnding(Owner caller, String conversationId, String answerId, long received) {
+        List<Messages.Event> next = messages.eventsAfter(caller, conversationId, answerId, received - 1, 1);
+        if (next.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Last-Event-ID names no event of this answer");
+        }
+        Messages.Event event = next.getFirst();
+        return event.seq() == received && EventStream.ending(event.type());
     }
 
     /** What the end user said, as the contract's CreateMessageRequest.text allows it and the database can store it. */
@@ -288,6 +385,15 @@ class ConversationController implements ConversationsApi {
                     + " followed by 1 to " + (MAX_CONVERSATION_ID - CONVERSATION_PREFIX.length()) + " letters or digits");
         }
         return conversationId;
+    }
+
+    /** The message ID of the path, as the contract's MessageId allows it. The whole ID has to match here too. */
+    private static String messageId(String messageId) {
+        if (!MESSAGE_ID.matcher(messageId).matches() || messageId.length() > MAX_MESSAGE_ID) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "message_id must be " + MESSAGE_PREFIX
+                    + " followed by 1 to " + (MAX_MESSAGE_ID - MESSAGE_PREFIX.length()) + " letters or digits");
+        }
+        return messageId;
     }
 
     private static Conversation answer(Conversations.Conversation conversation) {

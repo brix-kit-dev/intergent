@@ -239,6 +239,8 @@ final class TestApi {
 
         final List<String> calls = new CopyOnWriteArrayList<>();
         final Map<String, Messages.Message> answers = new ConcurrentHashMap<>();
+        /** What was asked, which StandInMessages finds too, so that a test can name a user message. */
+        final Map<String, Messages.Message> questions = new ConcurrentHashMap<>();
         final Map<String, List<Messages.Event>> events = new ConcurrentHashMap<>();
         volatile Outcome outcome = Outcome.COMPLETED;
         private final AtomicInteger made = new AtomicInteger();
@@ -258,6 +260,7 @@ final class TestApi {
                     Messages.Status.COMPLETED, text, null, null, ASKED_AT, ASKED_AT);
             Messages.Message started = new Messages.Message("msg_a" + number, conversationId, Messages.Role.ASSISTANT,
                     Messages.Status.IN_PROGRESS, "", null, null, ASKED_AT, null);
+            questions.put(question.messageId(), question);
             answers.put(started.messageId(), started);
             List<Messages.Event> log = new CopyOnWriteArrayList<>();
             log.add(event(started, 1, Messages.EventType.MESSAGE_STARTED, null, null, null));
@@ -296,22 +299,31 @@ final class TestApi {
     }
 
     /**
-     * Finds the answers StandInAnswers made, and their events, each only in its own conversation. The web layer needs
-     * nothing else yet. A test can make it fail after some reads of the log, as a database that goes away mid-stream.
+     * Finds the answers StandInAnswers made, their questions and their events, each only in its own conversation. The
+     * web layer needs nothing else yet. A test can make it fail after some reads of the log, as a database that goes
+     * away mid-stream, and count the reads.
      */
     static final class StandInMessages implements Messages {
 
         private final StandInAnswers answers;
         /** Reads of the log that still work; below 0, all of them do. */
         final AtomicInteger readsLeft = new AtomicInteger(-1);
+        /** The reads of each message's log so far, kept apart so that one test's stream cannot add to another's. */
+        private final Map<String, AtomicInteger> reads = new ConcurrentHashMap<>();
 
         StandInMessages(StandInAnswers answers) {
             this.answers = answers;
         }
 
+        /** How often the log of this message was read. */
+        int reads(String messageId) {
+            AtomicInteger count = reads.get(messageId);
+            return count == null ? 0 : count.get();
+        }
+
         @Override
         public Optional<Message> find(Owner caller, String conversationId, String messageId) {
-            return Optional.ofNullable(answers.answers.get(messageId))
+            return Optional.ofNullable(answers.answers.getOrDefault(messageId, answers.questions.get(messageId)))
                     .filter(message -> message.conversationId().equals(conversationId));
         }
 
@@ -352,6 +364,7 @@ final class TestApi {
 
         @Override
         public List<Event> eventsAfter(Owner caller, String conversationId, String messageId, long after, int limit) {
+            reads.computeIfAbsent(messageId, unused -> new AtomicInteger()).incrementAndGet();
             if (readsLeft.getAndDecrement() == 0) {
                 throw new IllegalStateException("The stand-in's database went away");
             }
