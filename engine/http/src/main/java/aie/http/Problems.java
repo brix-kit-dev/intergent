@@ -48,7 +48,7 @@ final class Problems {
     }
 
     /**
-     * The codes a request can earn before any business logic runs. Blueprint 6.10 gives 401, 403 and 404 a code of
+     * The codes a request can earn before any business logic runs. Blueprint 6.10 gives 401, 403, 404 and 429 a code of
      * their own; the modules bring the rest.
      */
     private static String code(int status) {
@@ -56,6 +56,7 @@ final class Problems {
             case 401 -> "unauthorized";
             case 403 -> "forbidden";
             case 404 -> "not_found";
+            case 429 -> "rate_limited";
             default -> status < HttpStatus.INTERNAL_SERVER_ERROR.value() ? "invalid_request" : "internal_error";
         };
     }

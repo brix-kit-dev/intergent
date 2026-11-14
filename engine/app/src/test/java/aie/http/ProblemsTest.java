@@ -19,6 +19,7 @@ class ProblemsTest {
         "406, invalid_request, Not Acceptable",
         "413, invalid_request, Content Too Large",
         "415, invalid_request, Unsupported Media Type",
+        "429, rate_limited, Too Many Requests",
         "500, internal_error, Internal Server Error",
         "503, internal_error, Service Unavailable"
     })

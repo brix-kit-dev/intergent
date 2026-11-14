@@ -11,8 +11,12 @@ import aie.core.tenancy.api.LowerTenants.Acting;
 import aie.core.tenancy.api.SessionTokens;
 import aie.core.tenancy.api.SiteKeyLookup;
 import aie.core.tenancy.internal.SignedSessionTokens;
+import aie.http.AnswerWait;
+import aie.modules.conversation.api.Answers;
 import aie.modules.conversation.api.Conversations;
+import aie.modules.conversation.api.Messages;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.Base64;
@@ -20,8 +24,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.springframework.boot.web.server.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.context.ConfigurableApplicationContext;
@@ -97,6 +103,12 @@ final class TestApi {
 
     static ConfigurableApplicationContext start(ApiKeyLookup keys, ApiKeyManagement management, EndUsers endUsers,
             Conversations conversations, String... args) {
+        return start(keys, management, endUsers, conversations, new StandInAnswers(), args);
+    }
+
+    /** With the stand-in a test steers its answers through. Messages finds what that stand-in answered. */
+    static ConfigurableApplicationContext start(ApiKeyLookup keys, ApiKeyManagement management, EndUsers endUsers,
+            Conversations conversations, StandInAnswers answers, String... args) {
         return ApiRole.serve(context -> {
             context.registerBean(ApiKeyLookup.class, () -> keys);
             context.registerBean(ApiKeyManagement.class, () -> management);
@@ -106,8 +118,14 @@ final class TestApi {
             context.registerBean(SiteKeyLookup.class, () -> SITE_KEYS);
             context.registerBean(SessionTokens.class, () -> SESSION_TOKENS);
             context.registerBean(Conversations.class, () -> conversations);
+            context.registerBean(Answers.class, () -> answers);
+            context.registerBean(Messages.class, () -> new StandInMessages(answers));
+            context.registerBean(AnswerWait.class, () -> WAIT);
         }, args);
     }
+
+    /** Short, so that an answer that does not end in time costs a test a moment, not the contract's 120 seconds. */
+    static final AnswerWait WAIT = new AnswerWait(Duration.ofMillis(300));
 
     static int port(ConfigurableApplicationContext context) {
         return ((ServletWebServerApplicationContext) context).getWebServer().getPort();
@@ -189,6 +207,142 @@ final class TestApi {
             String application = caller.tenantId() + "/" + caller.applicationId();
             calls.add(application + " finds " + conversationId);
             return Optional.ofNullable(started.get(application + " " + conversationId));
+        }
+    }
+
+    /**
+     * Answers each ask the way a test tells it, and keeps every answer for StandInMessages to find: in progress first, then
+     * as it ended. Remembers every call.
+     */
+    static final class StandInAnswers implements Answers {
+
+        /** How the asks go from now on. */
+        enum Outcome {
+            /** "Hello!", at once. */
+            COMPLETED,
+            /** "Hel", then the model fails, at once. */
+            FAILED,
+            /** "Hello!", a tenth of a second after the ask. */
+            COMPLETES_SOON,
+            /** "Hel" so far, and no end. */
+            NEVER_ENDS,
+            /** The instance is full. */
+            BUSY,
+            /** No such conversation. */
+            MISSING
+        }
+
+        static final Instant ASKED_AT = Instant.parse("2026-11-14T00:00:00Z");
+        static final Instant ENDED_AT = Instant.parse("2026-11-14T00:00:01Z");
+
+        final List<String> calls = new CopyOnWriteArrayList<>();
+        final Map<String, Messages.Message> answers = new ConcurrentHashMap<>();
+        volatile Outcome outcome = Outcome.COMPLETED;
+        private final AtomicInteger made = new AtomicInteger();
+
+        @Override
+        public Start ask(Owner caller, String conversationId, String text) {
+            calls.add(caller.tenantId() + "/" + caller.applicationId() + " asks in " + conversationId + ": " + text);
+            Outcome now = outcome;
+            if (now == Outcome.BUSY) {
+                return new Start.Busy();
+            }
+            if (now == Outcome.MISSING) {
+                return new Start.NotFound();
+            }
+            String number = Integer.toString(made.incrementAndGet());
+            Messages.Message question = new Messages.Message("msg_q" + number, conversationId, Messages.Role.USER,
+                    Messages.Status.COMPLETED, text, null, null, ASKED_AT, ASKED_AT);
+            Messages.Message started = new Messages.Message("msg_a" + number, conversationId, Messages.Role.ASSISTANT,
+                    Messages.Status.IN_PROGRESS, "", null, null, ASKED_AT, null);
+            answers.put(started.messageId(), started);
+            CompletableFuture<Void> ended = new CompletableFuture<>();
+            switch (now) {
+                case COMPLETED -> end(started, Messages.Status.COMPLETED, "Hello!", new Messages.Usage(6, 2), null, ended);
+                case FAILED -> end(started, Messages.Status.FAILED, "Hel", null, Messages.ErrorCode.MODEL_FAILED, ended);
+                case COMPLETES_SOON -> CompletableFuture.delayedExecutor(100, TimeUnit.MILLISECONDS).execute(() ->
+                        end(started, Messages.Status.COMPLETED, "Hello!", new Messages.Usage(6, 2), null, ended));
+                default -> answers.put(started.messageId(), new Messages.Message(started.messageId(), conversationId,
+                        Messages.Role.ASSISTANT, Messages.Status.IN_PROGRESS, "Hel", null, null, ASKED_AT, null));
+            }
+            return new Start.Started(new Messages.Asked(question, started), ended);
+        }
+
+        private void end(Messages.Message started, Messages.Status status, String text, Messages.Usage usage,
+                Messages.ErrorCode code, CompletableFuture<Void> ended) {
+            answers.put(started.messageId(), new Messages.Message(started.messageId(), started.conversationId(),
+                    Messages.Role.ASSISTANT, status, text, usage, code, ASKED_AT, ENDED_AT));
+            ended.complete(null);
+        }
+    }
+
+    /** Finds the answers StandInAnswers made, each only in its own conversation. The web layer needs nothing else yet. */
+    static final class StandInMessages implements Messages {
+
+        private final StandInAnswers answers;
+
+        StandInMessages(StandInAnswers answers) {
+            this.answers = answers;
+        }
+
+        @Override
+        public Optional<Message> find(Owner caller, String conversationId, String messageId) {
+            return Optional.ofNullable(answers.answers.get(messageId))
+                    .filter(message -> message.conversationId().equals(conversationId));
+        }
+
+        @Override
+        public Optional<Message> addUserMessage(Owner caller, String conversationId, String text) {
+            throw notNeeded();
+        }
+
+        @Override
+        public Optional<Message> startAssistantMessage(Owner caller, String conversationId) {
+            throw notNeeded();
+        }
+
+        @Override
+        public Optional<Asked> ask(Owner caller, String conversationId, String text) {
+            throw notNeeded();
+        }
+
+        @Override
+        public Written addDelta(Owner caller, String conversationId, String messageId, String text) {
+            throw notNeeded();
+        }
+
+        @Override
+        public Written complete(Owner caller, String conversationId, String messageId, Usage usage) {
+            throw notNeeded();
+        }
+
+        @Override
+        public Written cancel(Owner caller, String conversationId, String messageId, Usage usage) {
+            throw notNeeded();
+        }
+
+        @Override
+        public Written fail(Owner caller, String conversationId, String messageId, ErrorCode code) {
+            throw notNeeded();
+        }
+
+        @Override
+        public List<Event> eventsAfter(Owner caller, String conversationId, String messageId, long after, int limit) {
+            throw notNeeded();
+        }
+
+        @Override
+        public List<Message> list(Owner caller, String conversationId) {
+            throw notNeeded();
+        }
+
+        @Override
+        public List<Message> historyFor(Owner caller, String conversationId, String answerId) {
+            throw notNeeded();
+        }
+
+        private static UnsupportedOperationException notNeeded() {
+            return new UnsupportedOperationException("The web layer does not use this yet");
         }
     }
 

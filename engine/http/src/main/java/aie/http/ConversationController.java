@@ -8,21 +8,37 @@ import aie.http.api.model.CreateConversationRequest;
 import aie.http.api.model.CreateMessageRequest;
 import aie.http.api.model.Message;
 import aie.http.api.model.MessageList;
+import aie.http.api.model.Usage;
+import aie.modules.conversation.api.Answers;
 import aie.modules.conversation.api.Conversations;
+import aie.modules.conversation.api.Messages;
 import jakarta.servlet.http.HttpServletRequest;
+import java.time.Duration;
 import java.time.ZoneOffset;
+import java.util.Collections;
+import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.regex.Pattern;
 import org.jspecify.annotations.Nullable;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.InvalidMediaTypeException;
+import org.springframework.http.MediaType;
+import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.ErrorResponseException;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
 /**
  * The conversation operations of the contract. The generated interface has no defaults, so every operation has to be
- * here. Starting and reading a conversation work; the message operations answer 404, as their paths did before this
- * controller, until their points of M2 come.
+ * here. Starting and reading a conversation work, and so does sending a message without streaming; the other message
+ * operations answer 404, as their paths did before this controller, until their points of M2 come.
  */
 @RestController
 class ConversationController implements ConversationsApi {
@@ -31,14 +47,24 @@ class ConversationController implements ConversationsApi {
     private static final String CONVERSATION_PREFIX = "conv_";
     private static final int MAX_CONVERSATION_ID = 64;
     private static final Pattern CONVERSATION_ID = Pattern.compile(CONVERSATION_PREFIX + "[0-9A-Za-z]+");
+    /** Retry-After of a full instance: an answer takes seconds, so a slot is likely free by then. */
+    static final Duration RETRY_AFTER = Duration.ofSeconds(5);
 
     private final EndUsers endUsers;
     private final Conversations conversations;
+    private final Answers answers;
+    private final Messages messages;
+    private final Duration wait;
     private final HttpServletRequest request;
 
-    ConversationController(EndUsers endUsers, Conversations conversations, HttpServletRequest request) {
+    /** The wait is the contract's 120 seconds unless a test registers a shorter one. */
+    ConversationController(EndUsers endUsers, Conversations conversations, Answers answers, Messages messages,
+            ObjectProvider<AnswerWait> wait, HttpServletRequest request) {
         this.endUsers = endUsers;
         this.conversations = conversations;
+        this.answers = answers;
+        this.messages = messages;
+        this.wait = wait.getIfAvailable(() -> AnswerWait.CONTRACT).limit();
         this.request = request;
     }
 
@@ -73,11 +99,31 @@ class ConversationController implements ConversationsApi {
         return ResponseEntity.ok(answer(found));
     }
 
+    /**
+     * Stores what the end user said, starts the answer, and waits for it to end, for as long as the wait at most. Then
+     * the answer comes back as it is: whole once it ended, or in progress with its text so far, and it goes on. A failed
+     * answer is a 200 with its code, since the answer was stored before the model was asked.
+     *
+     * <p>Everything about the request is checked before anything is stored. A full instance answers 429 and stores
+     * nothing, so the same Idempotency-Key may come back after Retry-After. Streaming comes in M2-7; until then a caller
+     * that takes no JSON gets 406. The locale is checked but not used yet: it is the language to answer in, which the
+     * prompts of M3 need. data_class is checked by its enum and waits for the trust layer of M3.
+     */
     @Override
     public ResponseEntity<Message> createMessage(String conversationId, CreateMessageRequest body,
             @Nullable String idempotencyKey, @Nullable String engineVersion, @Nullable String traceparent,
             @Nullable String onBehalfOf) {
-        throw notYet();
+        takesJson();
+        String conversation = conversationId(conversationId);
+        String text = messageText(body.getText());
+        SessionRequests.locale(body.getLocale());
+        Owner caller = caller();
+        return switch (answers.ask(caller, conversation, text)) {
+            case Answers.Start.Started started -> ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON)
+                    .body(answered(caller, conversation, started));
+            case Answers.Start.Busy busy -> throw full();
+            case Answers.Start.NotFound missing -> throw new ResponseStatusException(HttpStatus.NOT_FOUND);
+        };
     }
 
     @Override
@@ -96,6 +142,74 @@ class ConversationController implements ConversationsApi {
     public ResponseEntity<Message> cancelMessage(String conversationId, String messageId, @Nullable String idempotencyKey,
             @Nullable String engineVersion, @Nullable String traceparent, @Nullable String onBehalfOf) {
         throw notYet();
+    }
+
+    /**
+     * Until streaming comes, the answer is JSON. Spring turns away an Accept that none of the operation's types meet, but
+     * text/event-stream is one of them, so that one is turned away here, before anything is asked. The answer then says
+     * application/json itself: left to Spring, an Accept that names the stream first would pick it, and fail to write the
+     * answer only after it was generated.
+     */
+    private void takesJson() {
+        List<MediaType> accepted;
+        try {
+            accepted = MediaType.parseMediaTypes(Collections.list(request.getHeaders(HttpHeaders.ACCEPT)));
+        } catch (InvalidMediaTypeException e) {
+            throw new ResponseStatusException(HttpStatus.NOT_ACCEPTABLE, "Accept is not a list of media types");
+        }
+        if (!accepted.isEmpty() && accepted.stream().noneMatch(type -> type.isCompatibleWith(MediaType.APPLICATION_JSON))) {
+            throw new ResponseStatusException(HttpStatus.NOT_ACCEPTABLE,
+                    "The answer comes as application/json; it does not stream yet");
+        }
+    }
+
+    /** What the end user said, as the contract's CreateMessageRequest.text allows it and the database can store it. */
+    private static String messageText(@Nullable String text) {
+        if (text == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "text is required");
+        }
+        if (text.isEmpty() || text.codePointCount(0, text.length()) > Messages.MAX_TEXT) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "text must have 1 to " + Messages.MAX_TEXT + " characters");
+        }
+        if (text.indexOf('\0') >= 0) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "text cannot hold a NUL character");
+        }
+        return text;
+    }
+
+    /** The instance generates as many answers as it may. Nothing was stored, so the same Idempotency-Key may come back. */
+    private static ErrorResponseException full() {
+        ErrorResponseException full = new ErrorResponseException(HttpStatus.TOO_MANY_REQUESTS, ProblemDetail.forStatusAndDetail(
+                HttpStatus.TOO_MANY_REQUESTS, "This instance answers as many messages as it can, so try again after Retry-After"),
+                null);
+        full.getHeaders().set(HttpHeaders.RETRY_AFTER, Long.toString(RETRY_AFTER.toSeconds()));
+        return full;
+    }
+
+    /** Waits for the answer to end, for as long as the wait at most, then reads the answer as it is now. */
+    private Message answered(Owner caller, String conversationId, Answers.Start.Started started) {
+        try {
+            started.ended().toCompletableFuture().get(wait.toNanos(), TimeUnit.NANOSECONDS);
+        } catch (TimeoutException stillGoing) {
+            // The answer goes on without this caller, and comes back in progress.
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (ExecutionException e) {
+            throw new IllegalStateException("The end of an answer does not fail", e);
+        }
+        String answerId = started.asked().answer().messageId();
+        return message(messages.find(caller, conversationId, answerId)
+                .orElseThrow(() -> new IllegalStateException("Answer " + answerId + " was started, yet it cannot be found")));
+    }
+
+    private static Message message(Messages.Message message) {
+        Message answer = new Message(message.messageId(), message.conversationId(),
+                        message.role().name().toLowerCase(Locale.ROOT), message.status().name().toLowerCase(Locale.ROOT),
+                        message.text(), message.createdAt().atOffset(ZoneOffset.UTC))
+                .code(message.code() == null ? null : message.code().wireName())
+                .completedAt(message.completedAt() == null ? null : message.completedAt().atOffset(ZoneOffset.UTC));
+        return message.usage() == null ? answer
+                : answer.usage(new Usage(message.usage().inputTokens(), message.usage().outputTokens()));
     }
 
     /** The host's ID, as the contract's ExternalUserId allows it. The contract counts characters, not UTF-16 units. */

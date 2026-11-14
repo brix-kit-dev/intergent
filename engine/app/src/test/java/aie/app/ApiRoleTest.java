@@ -18,6 +18,8 @@ import aie.core.tenancy.internal.DatabaseProvisioning;
 import aie.core.tenancy.internal.SignedSessionTokens;
 import aie.http.api.model.Conversation;
 import aie.http.api.model.CreatedApiKey;
+import aie.http.api.model.Message;
+import aie.http.api.model.Usage;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -472,6 +474,47 @@ class ApiRoleTest {
             assertThat(other.statusCode()).isEqualTo(404);
             assertThat(other.body()).isEqualTo(unknown.body());
         }
+    }
+
+    /**
+     * The role's own generator and the fake model answer a message, and a retry with the same Idempotency-Key replays the
+     * answer instead of asking again. Another application's key does not reach the conversation.
+     */
+    @Test
+    void aMessageIsAnsweredWholeAndARetryReplaysIt() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String testKey = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "internal")).key();
+        String liveKey = provisioning.createKey(tenant, provisioning.createApplication(tenant, "live", "internal")).key();
+        String id = JSON.readValue(startConversation(testKey, "message-1", "{\"external_user_id\":\"host-user-1\"}").body(),
+                Conversation.class).getId();
+        String question = "[fake pieces=2 delay=1ms] Hi";
+
+        HttpResponse<String> sent = sendMessage(testKey, "message-2", id, "{\"text\":\"" + question + "\"}");
+        HttpResponse<String> retry = sendMessage(testKey, "message-2", id, "{\"text\":\"" + question + "\"}");
+        HttpResponse<String> elsewhere = sendMessage(liveKey, "message-3", id, "{\"text\":\"Hi\"}");
+
+        assertThat(sent.statusCode()).isEqualTo(200);
+        Message answer = JSON.readValue(sent.body(), Message.class);
+        assertThat(answer.getStatus()).isEqualTo("completed");
+        assertThat(answer.getText()).isEqualTo("Piece 1 of 2. Piece 2 of 2. ");
+        assertThat(answer.getUsage()).isEqualTo(new Usage((long) question.length(), 28L));
+        assertThat(retry.statusCode()).isEqualTo(200);
+        assertThat(retry.body()).isEqualTo(sent.body());
+        assertThat(elsewhere.statusCode()).isEqualTo(404);
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT role || ' ' || status FROM engine.conversation_messages WHERE conversation_id = '"
+                + id + "' ORDER BY ordinal")).containsExactly("user completed", "assistant completed");
+    }
+
+    private static HttpResponse<String> sendMessage(String key, String idempotencyKey, String conversationId, String body)
+            throws Exception {
+        HttpRequest request = at("/v1/conversations/" + conversationId + "/messages")
+                .header("Authorization", "Bearer " + key)
+                .header("Idempotency-Key", idempotencyKey)
+                .header("Content-Type", "application/json")
+                .POST(BodyPublishers.ofString(body))
+                .build();
+        return HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
     }
 
     @Test

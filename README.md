@@ -439,7 +439,16 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
   - 每个实例同时最多生成 64 个回答（`Answers.MAX_RUNNING`）。满了，提问在存任何东西之前就被拒绝（`Busy`），发消息接口据此回答 429。
   - 等回答的一方断开，不影响生成。
   - 停机时（`close`）不再接新的提问。正在生成的回答最多再等 10 秒，还没结束的就停下，写 `error`（`stream_interrupted`），再给它们最多 5 秒写完。停下之前模型已经完成的回答，照样算完成。
-- **还没有的：** 消息相关的四个接口在之后的点里做，在那之前回答 404。
+- **发消息：** `POST /v1/conversations/{id}/messages`，不要流式时等回答结束，回答 200 和这条回答：状态、整段文字、用量；失败的回答带 `code`（比如 `model_failed`），因为回答在调模型之前就已经存下了。
+  - 最多等 120 秒（`aie.http.AnswerWait`）。到时还没结束，就返回 `status: in_progress` 和目前的文字，回答照样往下生成。`customer_chat` 的路由时限也是 2 分钟，所以现在只有模型一直卡到时限，才会遇到返回 `in_progress`。
+  - 存任何东西之前先检查请求：会话号的格式；`text` 必须是 1 到 32000 个字符，不能含 NUL；`locale` 的格式；`data_class` 只能是契约列的四个值。不合格回答 400。`locale` 和 `data_class` 现在只查格式，不存也不用，到 M3 拼提示词和信任层时才用上。
+  - 会话不在调用方的应用里：404，和读会话一样。
+  - 实例满了（同时 64 个回答）：429 `rate_limited`，带 `Retry-After: 5`，什么都不存。因为 429 不占用 `Idempotency-Key`，等过 `Retry-After` 可以用同一个键再发。
+  - 流式在 M2-7。在那之前，只接受 `text/event-stream` 的请求回答 406 `invalid_request`，在存任何东西之前。同时也接受 JSON 的请求，照常拿到 JSON。
+  - 带同一个 `Idempotency-Key` 重试，拿到同样的回答，不会再生成一次；还在生成时重试，回答 409 `idempotency_key_in_use`。接上同一个流是 M2-10。
+  - 等回答的一方断开，不影响生成。api 停机时，正在生成的回答按“生成”里说的处理。
+  - 只有服务端密钥能调用，`On-Behalf-Of` 照常。浏览器令牌在 M2-12。
+- **还没有的：** 读消息、取消和读事件的接口在之后的点里做，在那之前回答 404。
 
 ## 对外契约
 
@@ -609,6 +618,7 @@ const answer = await fetch("https://引擎地址/v1/anonymous-sessions", {
 | 请求格式不对：参数、JSON、方法、媒体类型、请求体太大 | 400、405、406、413、415 | `invalid_request` |
 | 同一个 `Idempotency-Key` 的请求还在处理 | 409 | `idempotency_key_in_use` |
 | 同一个 `Idempotency-Key` 配了不同的请求 | 422 | `idempotency_key_reused` |
+| 实例同时生成的回答已满 | 429 | `rate_limited`，带 `Retry-After` |
 | Tomcat 自己拒绝：路径非法、请求行错误、缺 `Host`、请求头过大 | 400 | `invalid_request` |
 | 引擎内部出错 | 500 | `internal_error` |
 

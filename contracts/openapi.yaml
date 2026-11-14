@@ -267,7 +267,9 @@ paths:
       summary: Send a message and get the answer.
       description: |
         With `Accept: text/event-stream` the answer streams, see `x-stream-events`.
-        Otherwise the call returns the finished answer.
+        Otherwise the call waits for the answer to end, for up to 120 seconds, and returns it.
+        An answer that takes longer comes back with `status: in_progress` and its text so far.
+        It goes on, and can be read later or followed through its events.
 
         A retry with the same `Idempotency-Key` does not generate again. It joins the stream
         while the answer is being generated, and replays the same events once it has ended.

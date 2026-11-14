@@ -344,11 +344,12 @@ class ConversationControllerTest {
         assertThat(CONVERSATIONS.calls).isEmpty();
     }
 
-    /** The message operations come in later points of M2, so their paths still answer 404, and nothing is looked up. */
+    /**
+     * Reading messages and cancelling come in later points of M2, so their paths still answer 404, and nothing is looked
+     * up. Sending a message works, see MessageControllerTest.
+     */
     @Test
-    void theMessageOperationsAreNotHereYet() throws Exception {
-        assertProblem(send(request("/v1/conversations/conv_1/messages").header("Authorization", TestApi.AUTHORIZATION)
-                .header("Content-Type", "application/json").POST(BodyPublishers.ofString("{\"text\":\"Hi\"}"))), 404, "not_found");
+    void theOtherMessageOperationsAreNotHereYet() throws Exception {
         assertProblem(send(request("/v1/conversations/conv_1/messages").header("Authorization", TestApi.AUTHORIZATION)), 404, "not_found");
         assertProblem(send(request("/v1/conversations/conv_1/messages/msg_1").header("Authorization", TestApi.AUTHORIZATION)), 404, "not_found");
         assertProblem(send(request("/v1/conversations/conv_1/messages/msg_1/cancel").header("Authorization", TestApi.AUTHORIZATION)
