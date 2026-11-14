@@ -1,0 +1,124 @@
+package aie.app;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import aie.adapters.modelfake.FakeModel;
+import aie.adapters.storepg.PgPool;
+import aie.adapters.storepg.PgRuntime;
+import aie.adapters.storepg.TestDatabase;
+import aie.core.gateway.internal.Route;
+import aie.core.gateway.internal.RoutingGateway;
+import aie.core.tenancy.api.ApiKeyLookup.Owner;
+import aie.core.tenancy.internal.DatabaseEndUsers;
+import aie.core.tenancy.internal.DatabaseProvisioning;
+import aie.http.EventStreamProbe;
+import aie.modules.conversation.api.Answers;
+import aie.modules.conversation.api.Answers.Start.Started;
+import aie.modules.conversation.api.Messages;
+import aie.modules.conversation.internal.DatabaseConversations;
+import aie.modules.conversation.internal.DatabaseMessages;
+import aie.modules.conversation.internal.GeneratingAnswers;
+import java.io.IOException;
+import java.time.Duration;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.postgresql.PostgreSQLContainer;
+
+/**
+ * The real event stream on the real scripts: it follows an answer that the real generator and the fake model write
+ * while it reads, and replays one that has ended.
+ */
+@Testcontainers
+@Timeout(value = 60, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+class EventStreamDatabaseTest {
+
+    @Container
+    private static final PostgreSQLContainer DATABASE = TestDatabase.container();
+
+    private static PgPool pool;
+    private static Messages messages;
+    private static GeneratingAnswers answers;
+    private static Owner caller;
+    private static String conversation;
+
+    @BeforeAll
+    static void migrateAndStartAConversation() throws IOException, InterruptedException {
+        assertThat(TestDatabase.createRoles(
+                        DATABASE, "owner_password=" + TestDatabase.OWNER_PASSWORD, "app_password=" + TestDatabase.APP_PASSWORD)
+                .getExitCode()).isZero();
+        assertThat(MigrateRole.run(
+                        "--engine.database.url=" + DATABASE.getJdbcUrl(), "--engine.owner.password=" + TestDatabase.OWNER_PASSWORD))
+                .isZero();
+        pool = PgRuntime.pool(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD, 4);
+        messages = new DatabaseMessages(pool);
+        answers = new GeneratingAnswers(messages, new RoutingGateway(Map.of(FakeModel.MODEL, new FakeModel()),
+                Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), Duration.ofSeconds(30))), pool::insideTx));
+        DatabaseProvisioning provisioning = new DatabaseProvisioning(pool);
+        String tenant = provisioning.createTenant("jp1", null);
+        caller = new Owner("key_unused", tenant, provisioning.createApplication(tenant, "test", "internal"));
+        conversation = new DatabaseConversations(pool).start(caller, new DatabaseEndUsers(pool).resolve(caller, "user-1"), null)
+                .conversationId();
+    }
+
+    @AfterAll
+    static void close() {
+        answers.close();
+        pool.close();
+    }
+
+    private static Started ask(String text) {
+        return (Started) answers.ask(caller, conversation, text);
+    }
+
+    /** Each event's id and type, from the SSE text. */
+    private static List<String> idsAndTypes(String sent) {
+        return Arrays.stream(sent.split("\n\n"))
+                .map(event -> event.lines().filter(line -> line.startsWith("id: ") || line.startsWith("event: "))
+                        .map(line -> line.substring(line.indexOf(' ') + 1)).reduce((id, type) -> id + " " + type).orElse(""))
+                .toList();
+    }
+
+    /** The stream starts while the model still writes, so it waits on the log and follows it to the ending. */
+    @Test
+    void theStreamFollowsAnAnswerWhileItIsWritten() {
+        Started started = ask("[fake pieces=3 delay=150ms] Hello");
+
+        String sent = EventStreamProbe.send(messages, caller, conversation, started.asked().answer().messageId(), 0);
+
+        assertThat(idsAndTypes(sent)).containsExactly("1 message.started", "2 message.delta", "3 message.delta",
+                "4 message.delta", "5 message.completed");
+        assertThat(sent).contains("\"text\":\"Piece 1 of 3. \"", "\"text\":\"Piece 3 of 3. \"");
+    }
+
+    @Test
+    void anAnswerThatHasEndedIsSentWholeAtOnce() throws Exception {
+        Started started = ask("[fake pieces=2 delay=1ms] Hi");
+        started.ended().toCompletableFuture().get(20, TimeUnit.SECONDS);
+
+        long start = System.nanoTime();
+        String sent = EventStreamProbe.send(messages, caller, conversation, started.asked().answer().messageId(), 0);
+
+        assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(2));
+        assertThat(idsAndTypes(sent)).containsExactly("1 message.started", "2 message.delta", "3 message.delta",
+                "4 message.completed");
+    }
+
+    @Test
+    void aFailedAnswerEndsItsStreamWithItsError() throws Exception {
+        Started started = ask("[fake pieces=3 fail-after=1 delay=1ms] Fail");
+        started.ended().toCompletableFuture().get(20, TimeUnit.SECONDS);
+
+        String sent = EventStreamProbe.send(messages, caller, conversation, started.asked().answer().messageId(), 1);
+
+        assertThat(idsAndTypes(sent)).containsExactly("2 message.delta", "3 error");
+        assertThat(sent).contains("\"code\":\"model_failed\"", "\"status\":502");
+    }
+}
