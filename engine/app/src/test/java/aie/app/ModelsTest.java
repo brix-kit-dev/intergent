@@ -10,6 +10,7 @@ import aie.core.gateway.api.Gateway.Role;
 import aie.core.gateway.api.Gateway.Turn;
 import aie.core.gateway.api.Gateway.Usage;
 import aie.core.gateway.internal.Route;
+import aie.modules.conversation.api.Answers;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -23,6 +24,13 @@ class ModelsTest {
         assertThat(Models.registry()).containsOnlyKeys("fake");
         assertThat(Models.registry().get("fake")).isInstanceOf(FakeModel.class);
         assertThat(Models.routes()).isEqualTo(Map.of("customer_chat", new Route(List.of("fake"), Duration.ofMinutes(2))));
+    }
+
+    /** The conversation module names its task, so the route table has to answer that very name. */
+    @Test
+    void theRouteTableAnswersTheTaskTheConversationModuleNames() {
+        assertThat(Models.routes()).containsKey(Answers.TASK);
+        assertThat(Models.CUSTOMER_CHAT).isEqualTo(Answers.TASK);
     }
 
     @Test

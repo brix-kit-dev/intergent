@@ -4,6 +4,7 @@ import aie.adapters.modelfake.FakeModel;
 import aie.core.gateway.api.Gateway;
 import aie.core.gateway.internal.Route;
 import aie.core.gateway.internal.RoutingGateway;
+import aie.modules.conversation.api.Answers;
 import aie.ports.ModelPort;
 import java.time.Duration;
 import java.util.List;
@@ -16,8 +17,8 @@ import java.util.function.BooleanSupplier;
  */
 final class Models {
 
-    /** The task of answering in a conversation, the example of blueprint 2.1. */
-    static final String CUSTOMER_CHAT = "customer_chat";
+    /** The task of answering in a conversation, the example of blueprint 2.1, named by the conversation module. */
+    static final String CUSTOMER_CHAT = Answers.TASK;
     /** The longest one answer may take. */
     static final Duration ANSWER_TIME = Duration.ofMinutes(2);
 
