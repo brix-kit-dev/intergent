@@ -45,8 +45,8 @@ import org.springframework.web.server.ResponseStatusException;
 /**
  * The conversation operations of the contract, and the stream of an answer's events. The generated interfaces have no
  * defaults, so every operation has to be here. Starting and reading a conversation work, and so do sending a message,
- * with or without streaming, and resuming an answer's stream; the other message operations answer 404, as their paths
- * did before this controller, until their points of M2 come.
+ * with or without streaming, resuming an answer's stream and cancelling an answer; reading messages answers 404, as its
+ * paths did before this controller, until its point of M2 comes.
  */
 @RestController
 class ConversationController implements ConversationsApi, StreamsApi {
@@ -66,6 +66,11 @@ class ConversationController implements ConversationsApi, StreamsApi {
     private static final Pattern EVENT_ID = Pattern.compile("[1-9][0-9]{0,9}");
     /** Retry-After of a full instance: an answer takes seconds, so a slot is likely free by then. */
     static final Duration RETRY_AFTER = Duration.ofSeconds(5);
+    /**
+     * How long a cancel waits for the answer to end (M2-9 decision 3). A writer stops at once on this instance, and at its
+     * next piece on another, so the ending comes well within it, unless the model has gone quiet.
+     */
+    static final Duration CANCEL_WAIT = Duration.ofSeconds(5);
 
     private final EndUsers endUsers;
     private final Conversations conversations;
@@ -140,7 +145,7 @@ class ConversationController implements ConversationsApi, StreamsApi {
         List<MediaType> accepted = accepted();
         boolean streamed = wantsStream(accepted);
         if (!streamed) {
-            takesJson(accepted);
+            takesJson(accepted, "The answer comes as application/json, or as text/event-stream when Accept names it");
         }
         String conversation = conversationId(conversationId);
         String text = messageText(body.getText());
@@ -171,10 +176,30 @@ class ConversationController implements ConversationsApi, StreamsApi {
         throw notYet();
     }
 
+    /**
+     * Stops the generation of an answer (blueprint 6.4), whichever instance writes it, and returns the answer. The request
+     * is kept with the answer, so its writer stops: at once on this instance, at its next piece on another. This call then
+     * waits for the ending, for as long as the cancel wait at most (M2-9 decision 3), and returns the answer as it is
+     * then: cancelled with what was generated and its usage, or still in progress when its writer has not ended it yet,
+     * which it will. An answer that had ended comes back as it ended, unchanged, so the call is safe to repeat.
+     *
+     * <p>Everything is checked before the request is kept, and a refusal is a plain problem. A user message is no answer,
+     * so it is as missing as an unknown message, one of another application and one of another tenant. A retry with the
+     * same Idempotency-Key gets the first answer, as for any POST.
+     */
     @Override
     public ResponseEntity<Message> cancelMessage(String conversationId, String messageId, @Nullable String idempotencyKey,
             @Nullable String engineVersion, @Nullable String traceparent, @Nullable String onBehalfOf) {
-        throw notYet();
+        takesJson(accepted(), "The answer comes as application/json");
+        String conversation = conversationId(conversationId);
+        String answer = messageId(messageId);
+        Owner caller = caller();
+        Messages.Message now = switch (answers.cancel(caller, conversation, answer)) {
+            case Messages.CancelRequest.NotFound missing -> throw new ResponseStatusException(HttpStatus.NOT_FOUND);
+            case Messages.CancelRequest.AlreadyEnded ended -> found(caller, conversation, answer);
+            case Messages.CancelRequest.Recorded recorded -> awaitEnding(caller, conversation, answer);
+        };
+        return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(message(now));
     }
 
     /**
@@ -232,10 +257,9 @@ class ConversationController implements ConversationsApi, StreamsApi {
      * itself: left to Spring, an Accept that names the stream first would pick it, and fail to write the answer only
      * after it was generated.
      */
-    private static void takesJson(List<MediaType> accepted) {
+    private static void takesJson(List<MediaType> accepted, String detail) {
         if (!accepted.isEmpty() && accepted.stream().noneMatch(type -> type.isCompatibleWith(MediaType.APPLICATION_JSON))) {
-            throw new ResponseStatusException(HttpStatus.NOT_ACCEPTABLE,
-                    "The answer comes as application/json, or as text/event-stream when Accept names it");
+            throw new ResponseStatusException(HttpStatus.NOT_ACCEPTABLE, detail);
         }
     }
 
@@ -351,6 +375,33 @@ class ConversationController implements ConversationsApi, StreamsApi {
         String answerId = started.asked().answer().messageId();
         return message(messages.find(caller, conversationId, answerId)
                 .orElseThrow(() -> new IllegalStateException("Answer " + answerId + " was started, yet it cannot be found")));
+    }
+
+    /**
+     * Waits for a cancelled answer to end, for as long as the cancel wait at most, and returns it as it is then. It looks
+     * every 200 milliseconds, as the event stream does, so an ending is seen as soon after as on any instance.
+     */
+    private Messages.Message awaitEnding(Owner caller, String conversationId, String answerId) {
+        long deadline = System.nanoTime() + CANCEL_WAIT.toNanos();
+        while (true) {
+            Messages.Message now = found(caller, conversationId, answerId);
+            long left = deadline - System.nanoTime();
+            if (now.status() != Messages.Status.IN_PROGRESS || left <= 0) {
+                return now;
+            }
+            try {
+                Thread.sleep(Duration.ofNanos(Math.min(left, EventStream.POLL.toNanos())));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return found(caller, conversationId, answerId);
+            }
+        }
+    }
+
+    /** A message the database has just said is there, as cancelling it found it. */
+    private Messages.Message found(Owner caller, String conversationId, String messageId) {
+        return messages.find(caller, conversationId, messageId).orElseThrow(() -> new IllegalStateException(
+                "Answer " + messageId + " was there for its cancel, yet it cannot be found"));
     }
 
     private static Message message(Messages.Message message) {

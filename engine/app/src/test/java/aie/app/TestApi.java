@@ -214,7 +214,7 @@ final class TestApi {
 
     /**
      * Answers each ask the way a test tells it, and keeps every answer and its events for StandInMessages to find: in
-     * progress first, then as it ended. Remembers every call.
+     * progress first, then as it ended. Cancels an answer in progress the way a test tells it too. Remembers every call.
      */
     static final class StandInAnswers implements Answers {
 
@@ -234,6 +234,16 @@ final class TestApi {
             MISSING
         }
 
+        /** How a cancel of an answer in progress goes from now on. Each answer ends at most once. */
+        enum Cancelling {
+            /** Its writer ends it as cancelled at once, as a writer on this instance does. */
+            AT_ONCE,
+            /** Its writer ends it as cancelled 300 ms later, as one on another instance does at its next piece. */
+            SOON,
+            /** The request is kept, but its writer does not end the answer, as one whose model went quiet. */
+            NEVER
+        }
+
         static final Instant ASKED_AT = Instant.parse("2026-11-14T00:00:00Z");
         static final Instant ENDED_AT = Instant.parse("2026-11-14T00:00:01Z");
 
@@ -243,11 +253,39 @@ final class TestApi {
         final Map<String, Messages.Message> questions = new ConcurrentHashMap<>();
         final Map<String, List<Messages.Event>> events = new ConcurrentHashMap<>();
         volatile Outcome outcome = Outcome.COMPLETED;
+        volatile Cancelling cancelling = Cancelling.AT_ONCE;
+        /** The answers a cancel was asked for, each once. */
+        final Set<String> requested = ConcurrentHashMap.newKeySet();
         private final AtomicInteger made = new AtomicInteger();
 
         @Override
         public Messages.CancelRequest cancel(Owner caller, String conversationId, String messageId) {
-            throw new UnsupportedOperationException("The web layer does not cancel yet");
+            calls.add(caller.tenantId() + "/" + caller.applicationId() + " cancels " + messageId + " in " + conversationId);
+            Messages.Message answer = answers.get(messageId);
+            if (answer == null || !answer.conversationId().equals(conversationId)) {
+                return new Messages.CancelRequest.NotFound();
+            }
+            if (answer.status() != Messages.Status.IN_PROGRESS) {
+                return new Messages.CancelRequest.AlreadyEnded(answer.status());
+            }
+            if (requested.add(messageId)) {
+                switch (cancelling) {
+                    case AT_ONCE -> cancelled(answer);
+                    case SOON -> CompletableFuture.delayedExecutor(300, TimeUnit.MILLISECONDS).execute(() -> cancelled(answer));
+                    case NEVER -> {
+                    }
+                }
+            }
+            return new Messages.CancelRequest.Recorded();
+        }
+
+        /** message.cancelled into the log, with what the answer had; then the answer as it ended. */
+        private void cancelled(Messages.Message answer) {
+            List<Messages.Event> log = events.get(answer.messageId());
+            Messages.Usage usage = new Messages.Usage(6, 3);
+            log.add(event(answer, log.size() + 1, Messages.EventType.MESSAGE_CANCELLED, answer.text(), usage, null));
+            answers.put(answer.messageId(), new Messages.Message(answer.messageId(), answer.conversationId(),
+                    Messages.Role.ASSISTANT, Messages.Status.CANCELLED, answer.text(), usage, null, ASKED_AT, ENDED_AT));
         }
 
         @Override

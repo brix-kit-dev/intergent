@@ -46,6 +46,8 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -697,6 +699,124 @@ class ApiRoleTest {
             assertThat(other.statusCode()).isEqualTo(404);
             assertThat(other.body()).isEqualTo(unknown.body());
         }
+    }
+
+    /** POST .../cancel of an answer, to the api on this port, with an Idempotency-Key when one is given. */
+    private static HttpResponse<String> cancel(int apiPort, String key, String conversationId, String answerId,
+            String idempotencyKey) throws Exception {
+        HttpRequest.Builder request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + apiPort + "/v1/conversations/"
+                        + conversationId + "/messages/" + answerId + "/cancel"))
+                .header("Authorization", "Bearer " + key).timeout(Duration.ofSeconds(30));
+        if (idempotencyKey != null) {
+            request.header("Idempotency-Key", idempotencyKey);
+        }
+        return HttpClient.newHttpClient().send(request.POST(BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    /** The conversation's answer, once its log holds this many events. */
+    private static String answerWithEvents(String conversationId, int count) throws Exception {
+        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+        while (System.nanoTime() < until) {
+            List<String> found = TestDatabase.firstColumn(DATABASE, "SELECT m.message_id FROM engine.conversation_messages m"
+                    + " WHERE m.conversation_id = '" + conversationId + "' AND m.role = 'assistant' AND (SELECT count(*)"
+                    + " FROM engine.conversation_events e WHERE e.message_id = m.message_id) >= " + count);
+            if (!found.isEmpty()) {
+                return found.getFirst();
+            }
+            Thread.sleep(20);
+        }
+        throw new AssertionError("No answer of " + conversationId + " reached " + count + " events");
+    }
+
+    /**
+     * Cancelling on another instance (M2-9-3): an answer streams here, and a second api on the same database cancels it.
+     * The writer here stops at its next piece and ends the answer as cancelled; the cancel waits for that and returns
+     * the answer, with its text so far and the usage of every piece the model made, the refused one too. The stream here
+     * ends with message.cancelled. A cancel here afterwards finds the answer ended and returns it the same.
+     */
+    @Test
+    void aCancelOnAnotherInstanceStopsTheAnswer() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String key = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "internal")).key();
+        String id = JSON.readValue(startConversation(key, "cancel-1", "{\"external_user_id\":\"host-user-1\"}").body(),
+                Conversation.class).getId();
+        ConfigurableApplicationContext second =
+                ApiRole.start("--server.port=0", address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING);
+        try {
+            int secondPort = ((ServletWebServerApplicationContext) second).getWebServer().getPort();
+            CompletableFuture<HttpResponse<String>> streaming = HttpClient.newHttpClient().sendAsync(
+                    at("/v1/conversations/" + id + "/messages").header("Authorization", "Bearer " + key)
+                            .header("Content-Type", "application/json").header("Accept", "text/event-stream")
+                            .POST(BodyPublishers.ofString("{\"text\":\"[fake pieces=50 delay=200ms] Long\"}")).build(),
+                    HttpResponse.BodyHandlers.ofString());
+            String answer = answerWithEvents(id, 3);
+
+            long start = System.nanoTime();
+            HttpResponse<String> cancelled = cancel(secondPort, key, id, answer, null);
+            Duration took = Duration.ofNanos(System.nanoTime() - start);
+
+            assertThat(cancelled.statusCode()).isEqualTo(200);
+            assertThat(took).isLessThan(Duration.ofSeconds(3));
+            Message body = JSON.readValue(cancelled.body(), Message.class);
+            assertThat(body.getId()).isEqualTo(answer);
+            assertThat(body.getStatus()).isEqualTo("cancelled");
+            int pieces = body.getText().split("Piece ", -1).length - 1;
+            assertThat(pieces).isPositive();
+            assertThat(body.getText()).startsWith("Piece 1 of 50. ").endsWith("Piece " + pieces + " of 50. ");
+            assertThat(body.getUsage().getOutputTokens())
+                    .isEqualTo(body.getText().length() + ("Piece " + (pieces + 1) + " of 50. ").length());
+            HttpResponse<String> stream = streaming.get(20, TimeUnit.SECONDS);
+            assertThat(lines(eventsOf(stream.body()), "event: ").getLast()).isEqualTo("event: message.cancelled");
+            assertThat(stream.body()).contains("\"text\":\"" + body.getText() + "\"");
+            assertThat(cancel(port, key, id, answer, null).body()).isEqualTo(cancelled.body());
+            assertThat(TestDatabase.firstColumn(DATABASE, "SELECT m.status FROM engine.conversation_messages m"
+                    + " JOIN engine.conversation_cancel_requests r ON r.message_id = m.message_id WHERE m.message_id = '"
+                    + answer + "'")).containsExactly("cancelled");
+        } finally {
+            second.close();
+        }
+    }
+
+    /**
+     * POST .../cancel on the real database: only a key of the answer's own application cancels it. The tenant's live
+     * application, another tenant, a user message and an unknown message all get the same 404. An answer that ended
+     * comes back as it ended, and keeps no request. A retry with the same Idempotency-Key gets the first answer, and the
+     * same key on another message is refused, as for any POST.
+     */
+    @Test
+    void anAnswerIsCancelledOnlyThroughItsOwnApplication() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String testKey = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "internal")).key();
+        String liveKey = provisioning.createKey(tenant, provisioning.createApplication(tenant, "live", "internal")).key();
+        String stranger = provisioning.createTenant("jp1", null);
+        String strangerKey = provisioning.createKey(stranger, provisioning.createApplication(stranger, "test", "internal")).key();
+        String id = JSON.readValue(startConversation(testKey, "cancel-2", "{\"external_user_id\":\"host-user-1\"}").body(),
+                Conversation.class).getId();
+        HttpResponse<String> sent = sendMessage(testKey, "cancel-3", id, "{\"text\":\"[fake pieces=2 delay=1ms] Hi\"}");
+        String answer = JSON.readValue(sent.body(), Message.class).getId();
+        String question = TestDatabase.firstColumn(DATABASE, "SELECT message_id FROM engine.conversation_messages"
+                + " WHERE conversation_id = '" + id + "' AND role = 'user'").get(0);
+
+        HttpResponse<String> unknown = cancel(port, testKey, id, "msg_" + "0".repeat(26), null);
+        HttpResponse<String> first = cancel(port, testKey, id, answer, "cancel-4");
+        HttpResponse<String> retry = cancel(port, testKey, id, answer, "cancel-4");
+        HttpResponse<String> elsewhere = cancel(port, testKey, id, question, "cancel-4");
+
+        assertThat(unknown.statusCode()).isEqualTo(404);
+        for (HttpResponse<String> other : List.of(cancel(port, liveKey, id, answer, null),
+                cancel(port, strangerKey, id, answer, null), cancel(port, testKey, id, question, null))) {
+            assertThat(other.statusCode()).isEqualTo(404);
+            assertThat(other.body()).isEqualTo(unknown.body());
+        }
+        assertThat(first.statusCode()).isEqualTo(200);
+        assertThat(first.body()).isEqualTo(sent.body());
+        assertThat(retry.statusCode()).isEqualTo(200);
+        assertThat(retry.body()).isEqualTo(first.body());
+        assertThat(elsewhere.statusCode()).isEqualTo(422);
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT message_id FROM engine.conversation_cancel_requests"
+                + " WHERE message_id = '" + answer + "'")).isEmpty();
     }
 
     private static HttpResponse<String> sendMessage(String key, String idempotencyKey, String conversationId, String body)
