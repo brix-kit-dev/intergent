@@ -2,13 +2,14 @@ package aie.modules.conversation.api;
 
 import aie.core.tenancy.api.ApiKeyLookup.Owner;
 import aie.modules.conversation.api.Messages.Asked;
+import aie.modules.conversation.api.Messages.CancelRequest;
 import java.util.concurrent.CompletionStage;
 
 /**
  * Answering what the end user says (blueprint 6.4). An ask stores the question and starts its answer, as
  * {@link Messages#ask} does. Then the answer is generated in the background: the model is called outside any
  * transaction, and each piece is written as an event in a short transaction of its own. The answer does not depend on
- * whoever asked: a caller that stops waiting does not stop it.
+ * whoever asked: a caller that stops waiting does not stop it. Only a cancel does, from any instance.
  */
 public interface Answers {
 
@@ -26,6 +27,16 @@ public interface Answers {
      * @throws IllegalArgumentException for text that {@link Messages#ask} refuses
      */
     Start ask(Owner caller, String conversationId, String text);
+
+    /**
+     * Asks for an answer to be cancelled (blueprint 6.4): the request is kept with the answer, as
+     * {@link Messages#requestCancel} keeps it. When this instance writes the answer, its model is told to stop at once;
+     * an instance that writes it elsewhere learns at its next write. The writer then ends the answer with
+     * message.cancelled, which carries what its log holds and the usage the model reports.
+     *
+     * @return what became of the request: recorded, or the answer had ended already, or it is not found
+     */
+    CancelRequest cancel(Owner caller, String conversationId, String messageId);
 
     /** What became of an ask. */
     sealed interface Start {

@@ -5,15 +5,16 @@ import aie.core.tenancy.api.ApiKeyLookup.Owner;
 import aie.modules.conversation.api.Answers;
 import aie.modules.conversation.api.Messages;
 import aie.modules.conversation.api.Messages.Asked;
+import aie.modules.conversation.api.Messages.CancelRequest;
 import aie.modules.conversation.api.Messages.ErrorCode;
 import aie.modules.conversation.api.Messages.Role;
 import aie.modules.conversation.api.Messages.Usage;
 import aie.modules.conversation.api.Messages.Written;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -36,6 +37,12 @@ import org.slf4j.LoggerFactory;
  *   <li>The writer itself went wrong, for instance a write did not go through, or the instance stopped it while
  *       stopping: the model is stopped, then error with stream_interrupted is written. When even that cannot be
  *       written, the answer stays in progress until a reader ends it once the writer's lease has run out (M2-11).
+ *   <li>Someone asked to cancel it: on this instance the model is told to stop at once, and an instance that writes it
+ *       elsewhere learns at its next write. Then message.cancelled is written, with what the log holds and the usage the
+ *       model reports, which counts the pieces the log refused too. A request that came after the model ended still
+ *       wins, because the database takes no other ending then; so does one that came while the instance stopped. When
+ *       the writer itself went wrong, the model's usage went with the failure, so nothing is written, and a reader ends
+ *       the answer once the writer's lease has run out (M2-11).
  *   <li>Someone else ended the answer first: the model is stopped, and nothing more is written.
  * </ul>
  */
@@ -53,7 +60,8 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
     private final int maxRunning;
     private final Duration drain;
     private final Semaphore slots;
-    private final Set<Answer> running = ConcurrentHashMap.newKeySet();
+    /** The answers under way, by their message ID. */
+    private final Map<String, Answer> running = new ConcurrentHashMap<>();
     private final ExecutorService threads = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("answer-", 0).factory());
     private final AtomicBoolean closing = new AtomicBoolean();
 
@@ -99,7 +107,7 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
             throw e;
         }
         Answer answer = new Answer(caller, conversationId, asked);
-        running.add(answer);
+        running.put(answer.id(), answer);
         threads.execute(() -> generate(answer));
         return new Start.Started(asked, answer.ended.minimalCompletionStage());
     }
@@ -116,10 +124,26 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
             LOG.error("Answer {} went wrong before its end, so it ends as interrupted", answer.id(), e);
             answer.interrupt();
         } finally {
-            running.remove(answer);
+            running.remove(answer.id());
             slots.release();
             answer.ended.complete(null);
         }
+    }
+
+    /**
+     * The request goes to the database first, so every instance learns of it. Only a request that was kept stops the
+     * model here: one for an answer that had ended changes nothing.
+     */
+    @Override
+    public CancelRequest cancel(Owner caller, String conversationId, String messageId) {
+        CancelRequest request = messages.requestCancel(caller, conversationId, messageId);
+        if (request instanceof CancelRequest.Recorded) {
+            Answer local = running.get(messageId);
+            if (local != null) {
+                local.cancel();
+            }
+        }
+        return request;
     }
 
     /** What the model is shown: the history before the answer, which ends with its question. */
@@ -141,7 +165,7 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
         }
         try {
             if (!slots.tryAcquire(maxRunning, drain.toNanos(), TimeUnit.NANOSECONDS)) {
-                running.forEach(Answer::stop);
+                running.values().forEach(Answer::stop);
                 if (!slots.tryAcquire(maxRunning, STOPPING.toNanos(), TimeUnit.NANOSECONDS)) {
                     LOG.warn("{} answer(s) did not end in time, so they stay in progress until a reader ends them",
                             running.size());
@@ -165,6 +189,8 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
         private volatile boolean stopped;
         /** Set once a write learned that the answer had ended already. */
         private volatile boolean endedElsewhere;
+        /** Set once someone asked to cancel the answer, here or on another instance, so that the model stops too. */
+        private volatile boolean cancelRequested;
 
         Answer(Owner caller, String conversationId, Asked asked) {
             this.caller = caller;
@@ -177,40 +203,62 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
         }
 
         boolean stopRequested() {
-            return stopped || endedElsewhere;
+            return stopped || endedElsewhere || cancelRequested;
         }
 
         void stop() {
             stopped = true;
         }
 
-        /** The next piece, as a delta. An empty piece adds nothing, and the database takes no empty delta. */
+        void cancel() {
+            cancelRequested = true;
+        }
+
+        /**
+         * The next piece, as a delta. An empty piece adds nothing, and the database takes no empty delta. A delta refused
+         * for a cancel request tells this writer of the request.
+         */
         void write(String piece) {
             if (piece.isEmpty() || endedElsewhere) {
                 return;
             }
-            if (!(messages.addDelta(caller, conversationId, id(), piece) instanceof Written.Added)) {
-                endedElsewhere = true;
+            switch (messages.addDelta(caller, conversationId, id(), piece)) {
+                case Written.Added added -> {
+                }
+                case Written.CancelRequested refused -> cancelRequested = true;
+                default -> endedElsewhere = true;
             }
         }
 
         /**
          * The ending the model's result calls for. A model that completed keeps its answer whole, even while the instance
-         * stops. Any other result of a stopped answer is the instance's doing, not the model's.
+         * stops. Any other result of a stopped answer is the instance's doing, not the model's. An answer someone asked to
+         * cancel ends as cancelled, whatever the model did, with the usage it reports; so does one whose request only
+         * shows when its ending is refused.
          */
         void end(Gateway.Result result) {
-            switch (result) {
-                case Gateway.Completed done -> messages.complete(caller, conversationId, id(), usage(done.usage()));
+            Usage usage = usage(result.usage());
+            Written ending = cancelRequested ? new Written.CancelRequested() : switch (result) {
+                case Gateway.Completed done -> messages.complete(caller, conversationId, id(), usage);
                 case Gateway.Failed failed when !stopped -> messages.fail(caller, conversationId, id(), ErrorCode.MODEL_FAILED);
                 default -> messages.fail(caller, conversationId, id(), ErrorCode.STREAM_INTERRUPTED);
+            };
+            if (ending instanceof Written.CancelRequested) {
+                messages.cancel(caller, conversationId, id(), usage);
             }
         }
 
-        /** The writer went wrong: the model stops if it still runs, and the answer ends as interrupted if it can. */
+        /**
+         * The writer went wrong: the model stops if it still runs, and the answer ends as interrupted if it can. An answer
+         * to be cancelled takes no such ending, and the model's usage went with the failure, so it is left to a reader.
+         */
         void interrupt() {
             stopped = true;
             try {
-                messages.fail(caller, conversationId, id(), ErrorCode.STREAM_INTERRUPTED);
+                if (messages.fail(caller, conversationId, id(), ErrorCode.STREAM_INTERRUPTED) instanceof Written.CancelRequested) {
+                    LOG.error("Answer {} was to be cancelled, but its writer went wrong and lost the model's usage, so it stays"
+                            + " in progress until a reader ends it", id());
+                }
             } catch (RuntimeException e) {
                 LOG.error("Answer {} could not be ended either, so it stays in progress until a reader ends it", id(), e);
             }

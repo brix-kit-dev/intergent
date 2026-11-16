@@ -246,6 +246,11 @@ final class TestApi {
         private final AtomicInteger made = new AtomicInteger();
 
         @Override
+        public Messages.CancelRequest cancel(Owner caller, String conversationId, String messageId) {
+            throw new UnsupportedOperationException("The web layer does not cancel yet");
+        }
+
+        @Override
         public Start ask(Owner caller, String conversationId, String text) {
             calls.add(caller.tenantId() + "/" + caller.applicationId() + " asks in " + conversationId + ": " + text);
             Outcome now = outcome;

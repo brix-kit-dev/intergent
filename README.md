@@ -429,7 +429,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
   - 请求记下之后，这条回答不再收增量，结束事件也只收 `message.cancelled`。`addDelta`、`complete` 和 `fail` 都拿到 `Written.CancelRequested`，什么都不写。`cancel` 照常写 `message.cancelled`，带已生成的增量和用量。
   - 先到先得：请求和事件一样，先锁住这条回答再检查。回答已经结束，请求就不记，回答保持原样。请求先记下，回答就只能以 `message.cancelled` 结束，即使模型随后正好完成或失败。
   - 表自己也守这些规则，绕过 `Messages` 直接写 SQL 也一样：已经结束的回答和用户消息不收请求，有请求的回答只收 `message.cancelled`。
-  - 现在只有 `Messages.requestCancel` 能记下请求，还没有接口调用它。生成方拿到 `CancelRequested` 时，现在只会停下模型，不写结束事件，回答留在进行中。M2-9-2 让生成方写 `message.cancelled`，M2-9-3 加取消接口。
+  - 生成方怎么得知请求、怎么结束回答，见下面“生成”里的取消。取消接口在 M2-9-3，在那之前还没有接口记请求。
 - **提问：** `Messages.ask` 在一个事务里存用户消息、建回答、写 `message.started`。中途失败什么都不留，不会有没有回答的问题，也不会有没有开始事件的回答。
   - 提问先锁住会话这一行，同一个会话的提问排队写入，所以每个问题后面紧跟着它自己的回答。锁用的是 `FOR NO KEY UPDATE`：两个提问不能同时拿到它，别的新消息的外键检查却不受影响。
   - 会话不在调用方的应用里，什么都不存。文字的规则和用户消息一样。
@@ -443,9 +443,16 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
   - 模型完成，写 `message.completed`，带用量；模型失败或超时，写 `error`（`model_failed`）。
   - 生成方自己出了问题，比如写库失败，就先停下模型，再写 `error`（`stream_interrupted`）。连这也写不进去，就留给 M2-11 的租约。
   - 写的时候发现回答已经被别人结束了，就停下模型，不再写。
+  - **取消：** `Answers.cancel` 先像 `Messages.requestCancel` 一样把请求记进数据库，结果也一样。只有请求记下了，才停这条回答的模型；回答已经结束或者找不到，什么都不动。
+    - 生成方就在本实例上：立即让模型停下，不用等下一段。
+    - 生成方在别的实例上：它写下一段增量时被拒收（`CancelRequested`），由此得知，再让模型停下。模型一般每秒出好几段，所以几乎马上就停。
+    - 停下之后写 `message.cancelled`：文字是日志里已有的增量；用量是模型报的实际用量，被拒收、没进日志的那一段也算在内，因为它也花了钱。
+    - 请求先到，模型随后正好完成或失败，照样写 `message.cancelled`，用模型报的用量，不算模型的错。实例停机时有请求的回答也一样，不写 `stream_interrupted`。
+    - 模型一直不出新段时，别的实例上的请求传不到它。M2-11 的租约每 5 秒续一次，到时顺带检查；在那之前，要等到路由时限（2 分钟）或停机。
+    - 生成方自己出了问题（比如写库失败）时，模型的用量随异常丢了，回答又只收 `message.cancelled`，所以什么都不写，留给 M2-11 的读取方结束。用量怎么记在 M2-11 里定。
   - 每个实例同时最多生成 64 个回答（`Answers.MAX_RUNNING`）。满了，提问在存任何东西之前就被拒绝（`Busy`），发消息接口据此回答 429。
   - 等回答的一方断开，不影响生成。
-  - 停机时（`close`）不再接新的提问。正在生成的回答最多再等 10 秒，还没结束的就停下，写 `error`（`stream_interrupted`），再给它们最多 5 秒写完。停下之前模型已经完成的回答，照样算完成。
+  - 停机时（`close`）不再接新的提问。正在生成的回答最多再等 10 秒，还没结束的就停下，写 `error`（`stream_interrupted`），有取消请求的写 `message.cancelled`，再给它们最多 5 秒写完。停下之前模型已经完成的回答，照样算完成。
 - **发消息：** `POST /v1/conversations/{id}/messages`，不要流式时等回答结束，回答 200 和这条回答：状态、整段文字、用量；失败的回答带 `code`（比如 `model_failed`），因为回答在调模型之前就已经存下了。
   - 最多等 120 秒（`aie.http.AnswerWait`）。到时还没结束，就返回 `status: in_progress` 和目前的文字，回答照样往下生成。`customer_chat` 的路由时限也是 2 分钟，所以现在只有模型一直卡到时限，才会遇到返回 `in_progress`。
   - 存任何东西之前先检查请求：会话号的格式；`text` 必须是 1 到 32000 个字符，不能含 NUL；`locale` 的格式；`data_class` 只能是契约列的四个值。不合格回答 400。`locale` 和 `data_class` 现在只查格式，不存也不用，到 M3 拼提示词和信任层时才用上。
