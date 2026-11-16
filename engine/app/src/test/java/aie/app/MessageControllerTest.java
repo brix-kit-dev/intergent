@@ -289,14 +289,15 @@ class MessageControllerTest {
         assertThat(ANSWERS.calls).isEmpty();
     }
 
-    /** M2-7 decision 4: joining the same stream again comes in M2-10, so until then a stream takes no key. */
+    /** M2-10-2: a stream takes a key now. StreamedRetriesTest checks what the key keeps, and the retries. */
     @Test
-    void aStreamWithAnIdempotencyKeyIsRefusedBeforeAnythingIsAsked() throws Exception {
+    void aStreamWithAnIdempotencyKeyStreams() throws Exception {
         HttpResponse<String> response = send("{\"text\":\"Hi\"}", "Accept", "text/event-stream", "Idempotency-Key", "s-1");
 
-        assertThat(problem(response, 400, "invalid_request").getDetail())
-                .isEqualTo("A streamed answer takes no Idempotency-Key yet, so send the request without it, or ask for JSON");
-        assertThat(ANSWERS.calls).isEmpty();
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.headers().firstValue("Content-Type")).hasValueSatisfying(type -> assertThat(type).startsWith("text/event-stream"));
+        assertThat(response.body()).contains("event: message.started", "event: message.completed");
+        assertThat(ANSWERS.calls).containsExactly("ten_test/app_test asks in conv_1: Hi");
     }
 
     /** What is refused is refused before the stream starts, as a plain problem. */

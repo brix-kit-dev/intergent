@@ -17,6 +17,7 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,6 +44,12 @@ import tools.jackson.databind.node.ObjectNode;
  * <p>The answer is stored after the controller has given it. A process that dies in between, or a request that ends
  * in an exception no controller turned into an answer, leaves the key claimed until its lease runs out; then a retry
  * runs the request again (see {@link IdempotencyKeys}).
+ *
+ * <p>An answer that streams cannot be stored as a body, since a retry may come while it is still being written
+ * (M2-10-2). The controller hands its message to {@link #STREAMING} before the first event: the key keeps that message,
+ * and the stream goes out unbuffered. A retry then sends that message's events again from the first, following the
+ * answer while it is written, and runs nothing. A request that asks for a stream is another request than the same one
+ * asking for JSON, so the same key on both is refused.
  */
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE + 5)
@@ -60,6 +67,16 @@ class IdempotencyFilter extends OncePerRequestFilter {
      * a new key's secret. A replay then leaves them out, so no secret is kept for the 24 hours of a key.
      */
     static final String NOT_STORED = "aie.http.idempotency.not-stored";
+    /**
+     * A request attribute this filter sets to a {@link Streaming} for each request whose key it took. A controller that
+     * streams its answer calls it before the first event.
+     */
+    static final String STREAMING = "aie.http.idempotency.streaming";
+    /**
+     * A request attribute this filter sets for a retry of a request whose answer streamed: the ID of that message, whose
+     * events the controller sends again, from the first, instead of running the request.
+     */
+    static final String RESEND = "aie.http.idempotency.resend";
 
     private static final JsonMapper JSON = JsonMapper.builder().build();
 
@@ -92,26 +109,39 @@ class IdempotencyFilter extends OncePerRequestFilter {
         }
         Owner caller = Objects.requireNonNull((Owner) request.getAttribute(ApiKeyFilter.CALLER), "No caller on a /v1 request");
         Key key = new Key(caller.tenantId(), caller.applicationId(), values.getFirst());
-        switch (keys.claim(key, fingerprint(request, body))) {
+        switch (keys.claim(key, fingerprint(request, body, StreamedRequests.wanted(request)))) {
             case Claim.Acquired acquired -> run(new CachedBodyRequest(request, body), response, chain, key);
             case Claim.InUse inUse -> refuse(request, response, HttpServletResponse.SC_CONFLICT,
                     "idempotency_key_in_use", "A request with this " + HEADER + " is still running");
             case Claim.Reused reused -> refuse(request, response, 422,
                     "idempotency_key_reused", "This " + HEADER + " belongs to a different request");
             case Claim.Finished(int status, String answer) -> replay(response, status, answer);
-            case Claim.Streamed streamed -> throw new IllegalStateException(
-                    "The answer to an " + HEADER + " is a stream, which this engine does not send again yet (M2-10-2)");
+            case Claim.Streamed(String messageId) -> resend(new CachedBodyRequest(request, body), response, chain, messageId);
         }
     }
 
     /**
      * What the rest of the chain answers is stored first, then sent; a 429 lets the key go instead. A failure to store
-     * still sends it.
+     * still sends it. An answer that streams is kept as its message instead, and goes out as it is written.
      */
     private void run(HttpServletRequest request, HttpServletResponse response, FilterChain chain, Key key)
             throws ServletException, IOException {
         ContentCachingResponseWrapper answer = new ContentCachingResponseWrapper(response);
+        AtomicBoolean streamed = new AtomicBoolean();
+        request.setAttribute(STREAMING, (Streaming) messageId -> {
+            streamed.set(true);
+            try {
+                keys.finishStreamed(key, messageId);
+            } catch (RuntimeException e) {
+                LOG.error("The streamed answer to an {} could not be stored, so a retry after the lease runs the request again",
+                        HEADER, e);
+            }
+            return response;
+        });
         chain.doFilter(request, answer);
+        if (streamed.get()) {
+            return;
+        }
         try {
             if (answer.getStatus() == TOO_MANY_REQUESTS) {
                 keys.release(key);
@@ -142,6 +172,16 @@ class IdempotencyFilter extends OncePerRequestFilter {
         return "";
     }
 
+    /**
+     * A retry of a request whose answer streamed: the controller sends that message's events again, from the first, and
+     * follows the answer while it is still written. Nothing runs again, nothing is stored, and nothing is buffered.
+     */
+    private static void resend(HttpServletRequest request, HttpServletResponse response, FilterChain chain, String messageId)
+            throws ServletException, IOException {
+        request.setAttribute(RESEND, messageId);
+        chain.doFilter(request, response);
+    }
+
     /** The first answer again. Only this request's own Request-Id differs. */
     private static void replay(HttpServletResponse response, int status, String answer) throws IOException {
         if (answer.isEmpty() && status >= HttpServletResponse.SC_BAD_REQUEST) {
@@ -165,6 +205,17 @@ class IdempotencyFilter extends OncePerRequestFilter {
     }
 
     /** Null when the body is over the limit. A stated length is checked before anything is read. */
+    /** What a controller calls to answer an idempotent request as a stream. */
+    @FunctionalInterface
+    interface Streaming {
+
+        /**
+         * Keeps the answer's message with the key, and returns the response to stream it through, unbuffered. A failure to
+         * keep it is logged, and the stream goes out all the same.
+         */
+        HttpServletResponse start(String messageId);
+    }
+
     private static byte @Nullable [] body(HttpServletRequest request) throws IOException {
         if (request.getContentLengthLong() > MAX_BODY) {
             return null;
@@ -173,10 +224,15 @@ class IdempotencyFilter extends OncePerRequestFilter {
         return body.length > MAX_BODY ? null : body;
     }
 
-    /** The method, the path and the body: the same key on another operation is another request. */
-    private static String fingerprint(HttpServletRequest request, byte[] body) {
+    /**
+     * The method, the path and the body: the same key on another operation is another request. A request that asks for a
+     * stream is another request than the same one asking for JSON (M2-10 decision 1), so its fingerprint says so; that of
+     * any other request is as it was before streams took a key, so the keys stored before still match.
+     */
+    private static String fingerprint(HttpServletRequest request, byte[] body, boolean streamed) {
         String query = request.getQueryString();
-        String target = request.getMethod() + " " + request.getServletPath() + (query == null ? "" : "?" + query) + "\n";
+        String target = (streamed ? "stream\n" : "") + request.getMethod() + " " + request.getServletPath()
+                + (query == null ? "" : "?" + query) + "\n";
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             digest.update(target.getBytes(StandardCharsets.UTF_8));

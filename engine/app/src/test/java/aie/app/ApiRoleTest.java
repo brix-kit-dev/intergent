@@ -819,6 +819,64 @@ class ApiRoleTest {
                 + " WHERE message_id = '" + answer + "'")).isEmpty();
     }
 
+    /** A streamed message with an Idempotency-Key, to the api on this port. */
+    private static HttpRequest streamedWithKey(int apiPort, String key, String idempotencyKey, String conversationId, String body) {
+        return HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + apiPort + "/v1/conversations/" + conversationId + "/messages"))
+                .header("Authorization", "Bearer " + key).header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream").header("Idempotency-Key", idempotencyKey)
+                .timeout(Duration.ofSeconds(30)).POST(BodyPublishers.ofString(body)).build();
+    }
+
+    /**
+     * Retrying a streamed message (M2-10-2): the answer streams here with an Idempotency-Key, and the same request with the
+     * same key comes to a second api on the same database while the answer is still being written. The retry asks
+     * nothing: it follows the same answer from its first event to its ending, so both streams hold the same events. Once
+     * the answer ended, another retry replays it. The same key asking for JSON, or with another body, is another request.
+     */
+    @Test
+    void aStreamedRetryFollowsTheSameAnswer() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String key = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "internal")).key();
+        String id = JSON.readValue(startConversation(key, "retry-1", "{\"external_user_id\":\"host-user-1\"}").body(),
+                Conversation.class).getId();
+        String body = "{\"text\":\"[fake pieces=6 delay=300ms] Hi\"}";
+        ConfigurableApplicationContext second =
+                ApiRole.start("--server.port=0", address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING);
+        try {
+            int secondPort = ((ServletWebServerApplicationContext) second).getWebServer().getPort();
+            CompletableFuture<HttpResponse<String>> first = HttpClient.newHttpClient().sendAsync(
+                    streamedWithKey(port, key, "stream-1", id, body), HttpResponse.BodyHandlers.ofString());
+            String answer = answerWithEvents(id, 2);
+
+            HttpResponse<String> retry = HttpClient.newHttpClient().send(
+                    streamedWithKey(secondPort, key, "stream-1", id, body), HttpResponse.BodyHandlers.ofString());
+
+            HttpResponse<String> original = first.get(30, TimeUnit.SECONDS);
+            assertThat(original.statusCode()).isEqualTo(200);
+            assertThat(retry.statusCode()).isEqualTo(200);
+            assertThat(retry.headers().firstValue("Content-Type")).hasValueSatisfying(
+                    type -> assertThat(type).startsWith("text/event-stream"));
+            assertThat(lines(eventsOf(retry.body()), "id: ")).containsExactly(
+                    "id: 1", "id: 2", "id: 3", "id: 4", "id: 5", "id: 6", "id: 7", "id: 8");
+            assertThat(retry.body()).isEqualTo(original.body());
+            assertThat(retry.body()).contains("\"message_id\":\"" + answer + "\"");
+            assertThat(TestDatabase.firstColumn(DATABASE, "SELECT role || ' ' || status FROM engine.conversation_messages"
+                    + " WHERE conversation_id = '" + id + "' ORDER BY ordinal")).containsExactly("user completed", "assistant completed");
+
+            HttpResponse<String> replay = HttpClient.newHttpClient().send(
+                    streamedWithKey(port, key, "stream-1", id, body), HttpResponse.BodyHandlers.ofString());
+            assertThat(replay.body()).isEqualTo(original.body());
+            assertThat(sendMessage(key, "stream-1", id, body).statusCode()).isEqualTo(422);
+            assertThat(HttpClient.newHttpClient().send(streamedWithKey(port, key, "stream-1", id, "{\"text\":\"other\"}"),
+                    HttpResponse.BodyHandlers.ofString()).statusCode()).isEqualTo(422);
+            assertThat(TestDatabase.firstColumn(DATABASE, "SELECT streamed_message_id FROM engine.tenancy_idempotency_keys"
+                    + " WHERE idempotency_key = 'stream-1'")).containsExactly(answer);
+        } finally {
+            second.close();
+        }
+    }
+
     private static HttpResponse<String> sendMessage(String key, String idempotencyKey, String conversationId, String body)
             throws Exception {
         HttpRequest request = at("/v1/conversations/" + conversationId + "/messages")

@@ -114,10 +114,16 @@ final class TestApi {
     /** With the stand-in a test steers its answers through. Messages finds what that stand-in answered. */
     static ConfigurableApplicationContext start(ApiKeyLookup keys, ApiKeyManagement management, EndUsers endUsers,
             Conversations conversations, StandInAnswers answers, String... args) {
+        return start(keys, management, endUsers, conversations, answers, NO_REPLAYS, args);
+    }
+
+    /** With the Idempotency-Keys a test gives too, such as ones that remember what the filter asked of them. */
+    static ConfigurableApplicationContext start(ApiKeyLookup keys, ApiKeyManagement management, EndUsers endUsers,
+            Conversations conversations, StandInAnswers answers, IdempotencyKeys idempotency, String... args) {
         return ApiRole.serve(context -> {
             context.registerBean(ApiKeyLookup.class, () -> keys);
             context.registerBean(ApiKeyManagement.class, () -> management);
-            context.registerBean(IdempotencyKeys.class, () -> NO_REPLAYS);
+            context.registerBean(IdempotencyKeys.class, () -> idempotency);
             context.registerBean(LowerTenants.class, () -> LOWER_TENANTS);
             context.registerBean(EndUsers.class, () -> endUsers);
             context.registerBean(SiteKeyLookup.class, () -> SITE_KEYS);

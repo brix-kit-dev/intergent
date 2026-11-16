@@ -134,27 +134,28 @@ class ConversationController implements ConversationsApi, StreamsApi {
      *
      * <p>Everything about the request is checked before anything is stored, and a refusal is a plain problem, before any
      * stream starts. A full instance answers 429 and stores nothing, so the same Idempotency-Key may come back after
-     * Retry-After. A streamed answer takes no Idempotency-Key yet: joining the same stream again comes in M2-10. The
-     * locale is checked but not used yet: it is the language to answer in, which the prompts of M3 need. data_class is
-     * checked by its enum and waits for the trust layer of M3.
+     * Retry-After. A streamed answer is kept with its Idempotency-Key as its message, and a retry with the key gets the
+     * same answer's events again, from the first, without asking anything (M2-10-2). The locale is checked but not used
+     * yet: it is the language to answer in, which the prompts of M3 need. data_class is checked by its enum and waits for
+     * the trust layer of M3.
      */
     @Override
     public ResponseEntity<Message> createMessage(String conversationId, CreateMessageRequest body,
             @Nullable String idempotencyKey, @Nullable String engineVersion, @Nullable String traceparent,
             @Nullable String onBehalfOf) {
         List<MediaType> accepted = accepted();
-        boolean streamed = wantsStream(accepted);
+        boolean streamed = StreamedRequests.wanted(accepted);
         if (!streamed) {
             takesJson(accepted, "The answer comes as application/json, or as text/event-stream when Accept names it");
         }
         String conversation = conversationId(conversationId);
         String text = messageText(body.getText());
         SessionRequests.locale(body.getLocale());
-        if (streamed && idempotencyKey != null) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "A streamed answer takes no Idempotency-Key yet, so send the request without it, or ask for JSON");
-        }
         Owner caller = caller();
+        if (request.getAttribute(IdempotencyFilter.RESEND) instanceof String answer) {
+            send(caller, conversation, answer, 0, eventStream(currentResponse()));
+            return null;
+        }
         return switch (answers.ask(caller, conversation, text)) {
             case Answers.Start.Started started when streamed -> streamed(caller, conversation, started);
             case Answers.Start.Started started -> ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON)
@@ -227,7 +228,7 @@ class ConversationController implements ConversationsApi, StreamsApi {
         messages.find(caller, conversation, answer).filter(found -> found.role() == Messages.Role.ASSISTANT)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
         boolean hasEnding = after > 0 && hasEnding(caller, conversation, answer, after);
-        HttpServletResponse response = eventStream();
+        HttpServletResponse response = eventStream(currentResponse());
         if (!hasEnding && !HttpMethod.HEAD.matches(request.getMethod())) {
             send(caller, conversation, answer, after, response);
         }
@@ -240,15 +241,6 @@ class ConversationController implements ConversationsApi, StreamsApi {
         } catch (InvalidMediaTypeException e) {
             throw new ResponseStatusException(HttpStatus.NOT_ACCEPTABLE, "Accept is not a list of media types");
         }
-    }
-
-    /**
-     * A caller that names text/event-stream wants the stream, even when it takes JSON too (M2-7 decision 2). A wildcard
-     * names nothing, and a quality of 0 refuses.
-     */
-    private static boolean wantsStream(List<MediaType> accepted) {
-        return accepted.stream().anyMatch(type -> type.getType().equals("text") && type.getSubtype().equals("event-stream")
-                && type.getQualityValue() > 0);
     }
 
     /**
@@ -274,20 +266,31 @@ class ConversationController implements ConversationsApi, StreamsApi {
         }
     }
 
-    /** The answer as Server-Sent Events, from its first event to its ending. */
+    /**
+     * The answer as Server-Sent Events, from its first event to its ending. With an Idempotency-Key, the key keeps the
+     * answer's message before the first event, and the events go out unbuffered (M2-10-2).
+     */
     private @Nullable ResponseEntity<Message> streamed(Owner caller, String conversationId, Answers.Start.Started started) {
-        send(caller, conversationId, started.asked().answer().messageId(), 0, eventStream());
+        String answer = started.asked().answer().messageId();
+        HttpServletResponse response = currentResponse();
+        if (request.getAttribute(IdempotencyFilter.STREAMING) instanceof IdempotencyFilter.Streaming streaming) {
+            response = streaming.start(answer);
+        }
+        send(caller, conversationId, answer, 0, eventStream(response));
         return null;
+    }
+
+    /** The response of this request, as Spring MVC holds it. */
+    private static HttpServletResponse currentResponse() {
+        return Objects.requireNonNull(((ServletRequestAttributes) RequestContextHolder.currentRequestAttributes()).getResponse(),
+                "A request in Spring MVC has its response");
     }
 
     /**
      * Starts the response as Server-Sent Events. It says that it streams before the first event goes out, and asks
      * proxies not to hold it back.
      */
-    private static HttpServletResponse eventStream() {
-        HttpServletResponse response = Objects.requireNonNull(
-                ((ServletRequestAttributes) RequestContextHolder.currentRequestAttributes()).getResponse(),
-                "A request in Spring MVC has its response");
+    private static HttpServletResponse eventStream(HttpServletResponse response) {
         response.setStatus(HttpServletResponse.SC_OK);
         response.setContentType("text/event-stream;charset=UTF-8");
         response.setHeader(HttpHeaders.CACHE_CONTROL, "no-cache");

@@ -540,8 +540,10 @@ components:
       name: Idempotency-Key
       in: header
       description: |
-        Kept for 24 hours, separately for each tenant and application. The same key with a
-        different body returns `idempotency_key_reused`.
+        Kept for 24 hours, separately for each tenant and application. The same key on a
+        different request returns `idempotency_key_reused`: another body, another operation, or
+        a stream (`Accept: text/event-stream`) where the first request asked for JSON, or the
+        other way round.
       schema:
         type: string
         minLength: 1
