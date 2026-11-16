@@ -80,6 +80,10 @@ class TenantIsolationTest {
                     """),
             Sample.appendOnly("conversation_cancel_requests", """
                     INSERT INTO conversation_cancel_requests (tenant_id, message_id) VALUES ('{tenant}', 'msg_{tenant}')
+                    """),
+            Sample.keptAndChanged("conversation_answer_leases", """
+                    INSERT INTO conversation_answer_leases (tenant_id, message_id, expires_at)
+                    VALUES ('{tenant}', 'msg_{tenant}', now() + interval '30 seconds')
                     """));
 
     private static final String TENANT_TABLES = """
@@ -101,6 +105,8 @@ class TenantIsolationTest {
     private enum Writes {
         /** Change and delete them, its own rows only. */
         OWN_ROWS,
+        /** Change them, its own rows only, but never delete them: the table grants engine_app UPDATE and no DELETE. */
+        CHANGES_OWN_ROWS,
         /** Neither: the table grants engine_app no UPDATE and no DELETE. */
         ADD_ONLY,
         /**
@@ -126,6 +132,10 @@ class TenantIsolationTest {
 
         static Sample refusingChanges(String table, String insert, String refusal) {
             return new Sample(table, insert, Writes.REFUSES_CHANGES, refusal);
+        }
+
+        static Sample keptAndChanged(String table, String insert) {
+            return new Sample(table, insert, Writes.CHANGES_OWN_ROWS, "permission denied");
         }
 
         boolean grantsUpdate() {
@@ -179,13 +189,22 @@ class TenantIsolationTest {
                 .toList();
     }
 
-    /** The tenant tables whose rows engine_app may change and delete, each tenant its own. */
+    /** The tenant tables whose rows engine_app may change, each tenant its own. */
     static List<String> changeableTables() throws SQLException {
-        return tenantTables().stream().filter(table -> sampleOf(table).writes() == Writes.OWN_ROWS).toList();
+        return tenantTables().stream().filter(table -> isChangeable(sampleOf(table).writes())).toList();
     }
 
     static List<String> unchangeableTables() throws SQLException {
-        return tenantTables().stream().filter(table -> sampleOf(table).writes() != Writes.OWN_ROWS).toList();
+        return tenantTables().stream().filter(table -> !isChangeable(sampleOf(table).writes())).toList();
+    }
+
+    /** The tenant tables whose rows engine_app may never delete, not even its own. */
+    static List<String> undeletableTables() throws SQLException {
+        return tenantTables().stream().filter(table -> !sampleOf(table).grantsDelete()).toList();
+    }
+
+    private static boolean isChangeable(Writes writes) {
+        return writes == Writes.OWN_ROWS || writes == Writes.CHANGES_OWN_ROWS;
     }
 
     /** What is really in the table, whatever row-level security lets the engine see. */
@@ -310,6 +329,15 @@ class TenantIsolationTest {
 
         assertRefused(() -> asTenant(TENANT_A, "UPDATE " + table + " SET tenant_id = 'ten_a'"), sample.refusal());
         assertRefused(() -> asTenant(TENANT_A, "UPDATE " + table + " SET tenant_id = 'ten_b'"), sample.refusal());
+        assertRefused(() -> asTenant(TENANT_A, "DELETE FROM " + table), "permission denied");
+
+        assertThat(rowsIn(table)).containsExactly(TENANT_A, TENANT_B);
+    }
+
+    /** Not even its own rows, also where it may change them: the grant is missing. */
+    @ParameterizedTest
+    @MethodSource("undeletableTables")
+    void anUndeletableTableRefusesEveryDelete(String table) throws SQLException {
         assertRefused(() -> asTenant(TENANT_A, "DELETE FROM " + table), "permission denied");
 
         assertThat(rowsIn(table)).containsExactly(TENANT_A, TENANT_B);

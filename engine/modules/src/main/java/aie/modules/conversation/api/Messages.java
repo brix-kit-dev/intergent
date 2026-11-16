@@ -1,6 +1,7 @@
 package aie.modules.conversation.api;
 
 import aie.core.tenancy.api.ApiKeyLookup.Owner;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Locale;
@@ -21,6 +22,12 @@ public interface Messages {
     int MAX_HISTORY = 50;
 
     /**
+     * How long the writer of an answer holds its lease without renewing it (blueprint 6.4, M2 decision 3). It is far longer
+     * than the writer's renewals, so that a pause of the machine or a slow start does not end a sound answer.
+     */
+    Duration LEASE = Duration.ofSeconds(30);
+
+    /**
      * Stores what the end user said, completed as it is stored.
      *
      * @return the message, or empty when the conversation is not one of the caller's application
@@ -30,8 +37,8 @@ public interface Messages {
     Optional<Message> addUserMessage(Owner caller, String conversationId, String text);
 
     /**
-     * Starts an answer: an assistant message, in progress and empty, with its message.started event as number 1, both in
-     * one transaction.
+     * Starts an answer: an assistant message, in progress and empty, with its message.started event as number 1 and its
+     * writer's lease for {@link #LEASE}, all in one transaction.
      *
      * @return the message, or empty when the conversation is not one of the caller's application
      */
@@ -39,8 +46,8 @@ public interface Messages {
 
     /**
      * Stores what the end user said and starts the answer to it, in one transaction: the user message, completed as it is
-     * stored, then the answer, in progress and empty, with its message.started event as number 1. Asks in one conversation
-     * take turns, so that each question comes right before its own answer.
+     * stored, then the answer, in progress and empty, with its message.started event as number 1 and its writer's lease for
+     * {@link #LEASE}. Asks in one conversation take turns, so that each question comes right before its own answer.
      *
      * @return the question and its answer, or empty when the conversation is not one of the caller's application; then
      *     nothing is stored
@@ -75,6 +82,22 @@ public interface Messages {
      * request and an ending, the one that comes first wins: an answer that ended before stays as it ended.
      */
     CancelRequest requestCancel(Owner caller, String conversationId, String messageId);
+
+    /**
+     * Renews the lease of an answer in progress for {@link #LEASE} from now, as its writer does while it writes (blueprint
+     * 6.4). An answer that has ended has no lease to renew. The renewal tells the writer whether someone asked to cancel the
+     * answer, so that a writer whose model writes nothing for a while still learns of it.
+     */
+    Renewal renew(Owner caller, String conversationId, String messageId);
+
+    /**
+     * Ends an answer whose writer's lease has run out, as a reader does for a writer that has gone away (blueprint 6.4):
+     * with an error event and stream_interrupted, or with message.cancelled when someone asked to cancel it. No one knows
+     * then what the model used, so that ending counts no tokens (M2-11 decision 2). While the lease still runs, or once
+     * the answer has ended, nothing happens. A renewal and this call take the lease in turn, so a writer that renews in
+     * time keeps its answer.
+     */
+    Expiry endIfExpired(Owner caller, String conversationId, String messageId);
 
     /**
      * The events of an answer with a number above {@code after}, in order, at most {@code limit} of them. Empty when the
@@ -167,6 +190,42 @@ public interface Messages {
 
         /** No answer has this ID in this conversation of the caller's application. */
         record NotFound() implements Written {
+        }
+    }
+
+    /** What became of a renewal of an answer's lease. */
+    sealed interface Renewal {
+
+        /** The lease runs for {@link #LEASE} from now. The writer learns too whether someone asked to cancel the answer. */
+        record Renewed(boolean cancelRequested) implements Renewal {
+        }
+
+        /** The answer had ended already, in this status, so there was no lease to renew. */
+        record AlreadyEnded(Status status) implements Renewal {
+        }
+
+        /** No answer has this ID in this conversation of the caller's application. */
+        record NotFound() implements Renewal {
+        }
+    }
+
+    /** What became of an answer whose lease a reader looked at. */
+    sealed interface Expiry {
+
+        /** The lease had run out, and this call ended the answer with this ending. */
+        record Ended(EventType ending) implements Expiry {
+        }
+
+        /** The lease still runs, so the writer is taken to be there, and nothing was written. */
+        record Running() implements Expiry {
+        }
+
+        /** The answer had ended already, in this status. */
+        record AlreadyEnded(Status status) implements Expiry {
+        }
+
+        /** No answer has this ID in this conversation of the caller's application. */
+        record NotFound() implements Expiry {
         }
     }
 

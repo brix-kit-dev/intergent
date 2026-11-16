@@ -12,13 +12,15 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * {@link Messages} on the database. Each write takes the conversation from the caller's application in the same
  * statement, so a conversation of another application adds nothing, and row-level security keeps each tenant to its own
  * rows. The tables hold the rules themselves as well, for SQL that goes around this class: the database numbers the
- * events, ends an answer once, changes a message only through its events, and lets an answer with a cancel request end
- * only as cancelled.
+ * events, ends an answer once, changes a message only through its events, lets an answer with a cancel request end
+ * only as cancelled, and keeps a lease with each answer in progress alone.
  */
 public final class DatabaseMessages implements Messages {
 
@@ -53,6 +55,41 @@ public final class DatabaseMessages implements Messages {
             """;
     private static final String ADD_STARTED = """
             INSERT INTO conversation_events (tenant_id, message_id, type) VALUES (?, ?, 'message.started')
+            """;
+    /** The lease as long as {@link Messages#LEASE}, as an interval the database reads. */
+    private static final String LEASE_INTERVAL = LEASE.toSeconds() + " seconds";
+    private static final String ADD_LEASE = """
+            INSERT INTO conversation_answer_leases (tenant_id, message_id, expires_at) VALUES (?, ?, now() + ?::interval)
+            """;
+    /**
+     * An answer that has ended is left out here; the database would refuse the renewal anyway. A request to cancel comes
+     * back with the renewal, as the statement saw it.
+     */
+    private static final String RENEW = """
+            UPDATE conversation_answer_leases l
+            SET expires_at = now() + ?::interval
+            FROM conversation_messages m
+            JOIN conversation_conversations c ON c.tenant_id = m.tenant_id AND c.conversation_id = m.conversation_id
+            WHERE l.tenant_id = m.tenant_id AND l.message_id = m.message_id
+                AND c.application_id = ? AND c.conversation_id = ? AND m.message_id = ? AND m.role = 'assistant'
+                AND m.status = 'in_progress'
+            RETURNING EXISTS (
+                SELECT FROM conversation_cancel_requests r WHERE r.tenant_id = l.tenant_id AND r.message_id = l.message_id)
+                AS cancel_requested
+            """;
+    /**
+     * The lease of an answer, locked, so that a renewal waits until this transaction ends, and one that came first is seen
+     * here. Whether it has run out is read after the lock.
+     */
+    private static final String HOLD_LEASE = """
+            SELECT m.status, l.expires_at <= now() AS expired, EXISTS (
+                    SELECT FROM conversation_cancel_requests r WHERE r.tenant_id = m.tenant_id AND r.message_id = m.message_id)
+                AS cancel_requested
+            FROM conversation_answer_leases l
+            JOIN conversation_messages m ON m.tenant_id = l.tenant_id AND m.message_id = l.message_id
+            JOIN conversation_conversations c ON c.tenant_id = m.tenant_id AND c.conversation_id = m.conversation_id
+            WHERE c.application_id = ? AND c.conversation_id = ? AND l.message_id = ? AND m.role = 'assistant'
+            FOR UPDATE OF l
             """;
     /**
      * An answer that has ended is left out here, and so is one with a cancel request, for any event but
@@ -140,6 +177,8 @@ public final class DatabaseMessages implements Messages {
     private static final String FIND = OF_THE_APPLICATION + "AND m.message_id = ?";
     private static final String LIST = OF_THE_APPLICATION + "ORDER BY m.ordinal";
 
+    private static final Logger LOG = LoggerFactory.getLogger(DatabaseMessages.class);
+
     private final DatabasePort database;
     private final EventSignals signals;
 
@@ -193,12 +232,16 @@ public final class DatabaseMessages implements Messages {
         }
     }
 
-    /** An answer in progress with its message.started event, or none when the conversation is out of reach. */
+    /**
+     * An answer in progress with its message.started event and its writer's lease, or none when the conversation is out of
+     * reach.
+     */
     private static List<Message> start(Tx tx, Owner caller, String conversationId) {
         List<Message> started = tx.query(START_ASSISTANT_MESSAGE, DatabaseMessages::message,
                 Ids.next("msg"), caller.applicationId(), conversationId);
         for (Message answer : started) {
             tx.update(ADD_STARTED, caller.tenantId(), answer.messageId());
+            tx.update(ADD_LEASE, caller.tenantId(), answer.messageId(), LEASE_INTERVAL);
         }
         return started;
     }
@@ -305,6 +348,119 @@ public final class DatabaseMessages implements Messages {
             throw new IllegalStateException("Answer " + messageId + " is in progress, yet it took no cancel request");
         }
         return new CancelRequest.Recorded();
+    }
+
+    /**
+     * Renews under the answer's lock, as an event goes in. An answer that ended before this renewal began is left out by
+     * the statement; one that ends while it waits for the lock makes the database refuse it, and a fresh look then tells
+     * that refusal from any other failure.
+     */
+    @Override
+    public Renewal renew(Owner caller, String conversationId, String messageId) {
+        List<Boolean> renewed;
+        try {
+            renewed = database.inTenantTx(caller.tenantId(), tx -> tx.query(RENEW, row -> row.flag("cancel_requested"),
+                    LEASE_INTERVAL, caller.applicationId(), conversationId, messageId));
+        } catch (DatabaseException refused) {
+            Optional<AnswerState> state = stateOf(caller, conversationId, messageId);
+            if (state.isPresent() && state.get().status() != Status.IN_PROGRESS) {
+                return new Renewal.AlreadyEnded(state.get().status());
+            }
+            throw refused;
+        }
+        if (!renewed.isEmpty()) {
+            return new Renewal.Renewed(renewed.getFirst());
+        }
+        Optional<AnswerState> state = stateOf(caller, conversationId, messageId);
+        if (state.isEmpty()) {
+            return new Renewal.NotFound();
+        }
+        if (state.get().status() == Status.IN_PROGRESS) {
+            throw new IllegalStateException("Answer " + messageId + " is in progress, yet it has no lease to renew");
+        }
+        return new Renewal.AlreadyEnded(state.get().status());
+    }
+
+    /**
+     * Looks at the lease and writes the ending in one transaction, with the lease locked: a renewal that came first is
+     * seen, and one that comes now waits, then finds the answer ended. A request to cancel that comes while this call
+     * writes leaves message.cancelled as the only ending; when it comes too late for even that, the answer goes on, and a
+     * later look ends it.
+     */
+    @Override
+    public Expiry endIfExpired(Owner caller, String conversationId, String messageId) {
+        Optional<Expiry> outcome;
+        try {
+            outcome = database.inTenantTx(caller.tenantId(), tx -> endExpired(tx, caller, conversationId, messageId));
+        } catch (DatabaseException refused) {
+            Optional<AnswerState> state = stateOf(caller, conversationId, messageId);
+            if (state.isPresent() && state.get().status() != Status.IN_PROGRESS) {
+                return new Expiry.AlreadyEnded(state.get().status());
+            }
+            if (state.isPresent() && state.get().cancelRequested()) {
+                return new Expiry.Running();
+            }
+            throw refused;
+        }
+        if (outcome.isPresent()) {
+            if (outcome.get() instanceof Expiry.Ended ended) {
+                signals.ring(messageId);
+                if (ended.ending() == EventType.MESSAGE_CANCELLED) {
+                    LOG.warn("Answer {} was cancelled after its writer's lease ran out, so what its model used is not known"
+                            + " and counts as 0", messageId);
+                }
+            }
+            return outcome.get();
+        }
+        Optional<AnswerState> state = stateOf(caller, conversationId, messageId);
+        if (state.isEmpty()) {
+            return new Expiry.NotFound();
+        }
+        if (state.get().status() == Status.IN_PROGRESS) {
+            throw new IllegalStateException("Answer " + messageId + " is in progress, yet it has no lease");
+        }
+        return new Expiry.AlreadyEnded(state.get().status());
+    }
+
+    /** Empty when the answer has no lease, or ended while this transaction wrote; a fresh look tells which. */
+    private static Optional<Expiry> endExpired(Tx tx, Owner caller, String conversationId, String messageId) {
+        List<Lease> held = tx.query(HOLD_LEASE, Lease::of, caller.applicationId(), conversationId, messageId);
+        if (held.isEmpty()) {
+            return Optional.empty();
+        }
+        Lease lease = held.getFirst();
+        if (lease.status() != Status.IN_PROGRESS) {
+            return Optional.of(new Expiry.AlreadyEnded(lease.status()));
+        }
+        if (!lease.expired()) {
+            return Optional.of(new Expiry.Running());
+        }
+        if (!lease.cancelRequested() && addEnding(tx, caller, conversationId, messageId, EventType.ERROR)) {
+            return Optional.of(new Expiry.Ended(EventType.ERROR));
+        }
+        if (addEnding(tx, caller, conversationId, messageId, EventType.MESSAGE_CANCELLED)) {
+            return Optional.of(new Expiry.Ended(EventType.MESSAGE_CANCELLED));
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * The ending a reader writes: error with stream_interrupted, or message.cancelled with what the log holds and no
+     * tokens, since the writer that knew them is gone. False when the statement left the answer out.
+     */
+    private static boolean addEnding(Tx tx, Owner caller, String conversationId, String messageId, EventType ending) {
+        boolean cancelled = ending == EventType.MESSAGE_CANCELLED;
+        return !tx.query(ADD_EVENT, row -> row.number("seq"), ending.wireName(), null, cancelled ? 0L : null,
+                cancelled ? 0L : null, cancelled ? null : ErrorCode.STREAM_INTERRUPTED.wireName(),
+                caller.applicationId(), conversationId, messageId, ending.wireName()).isEmpty();
+    }
+
+    /** An answer's lease as a reader holds it. */
+    private record Lease(Status status, boolean expired, boolean cancelRequested) {
+
+        static Lease of(Row row) {
+            return new Lease(DatabaseMessages.status(row.string("status")), row.flag("expired"), row.flag("cancel_requested"));
+        }
     }
 
     private Optional<AnswerState> stateOf(Owner caller, String conversationId, String messageId) {
