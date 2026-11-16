@@ -7,6 +7,7 @@ import aie.modules.conversation.api.Messages;
 import aie.modules.conversation.api.Messages.Asked;
 import aie.modules.conversation.api.Messages.CancelRequest;
 import aie.modules.conversation.api.Messages.ErrorCode;
+import aie.modules.conversation.api.Messages.Renewal;
 import aie.modules.conversation.api.Messages.Role;
 import aie.modules.conversation.api.Messages.Usage;
 import aie.modules.conversation.api.Messages.Written;
@@ -19,6 +20,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -29,6 +31,8 @@ import org.slf4j.LoggerFactory;
  * {@link Answers} with a virtual thread for each answer. An ask takes one of the instance's slots before it stores
  * anything, so a full instance stores nothing. The answer's thread reads its history, asks the gateway outside any
  * transaction (A-14), and writes each piece as a delta, then the ending, each write a short transaction of its own.
+ * While it writes, the instance renews the answer's lease every 5 seconds, so that a reader ends the answer only once its
+ * writer has gone (blueprint 6.4).
  *
  * <p>How an answer ends:
  * <ul>
@@ -52,6 +56,11 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
     public static final Duration DRAIN = Duration.ofSeconds(10);
     /** How long the answers that {@link #close} stopped have to write their ending. */
     static final Duration STOPPING = Duration.ofSeconds(5);
+    /**
+     * How often the lease of each answer under way is renewed (M2 decision 3). The lease is far longer, so a renewal that
+     * comes late, or fails once, costs nothing.
+     */
+    public static final Duration RENEWAL = Duration.ofSeconds(5);
 
     private static final Logger LOG = LoggerFactory.getLogger(GeneratingAnswers.class);
 
@@ -63,6 +72,8 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
     /** The answers under way, by their message ID. */
     private final Map<String, Answer> running = new ConcurrentHashMap<>();
     private final ExecutorService threads = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("answer-", 0).factory());
+    private final ScheduledExecutorService renewals =
+            Executors.newSingleThreadScheduledExecutor(Thread.ofVirtual().name("lease-", 0).factory());
     private final AtomicBoolean closing = new AtomicBoolean();
 
     public GeneratingAnswers(Messages messages, Gateway gateway) {
@@ -71,17 +82,26 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
 
     /** With another limit and drain, so that a test needs neither 64 answers nor 10 seconds. */
     public GeneratingAnswers(Messages messages, Gateway gateway, int maxRunning, Duration drain) {
+        this(messages, gateway, maxRunning, drain, RENEWAL);
+    }
+
+    /** With another renewal too, so that a test need not wait 5 seconds for one. It must be far inside the lease. */
+    public GeneratingAnswers(Messages messages, Gateway gateway, int maxRunning, Duration drain, Duration renewal) {
         if (maxRunning < 1) {
             throw new IllegalArgumentException("At least one answer must be able to run, not " + maxRunning);
         }
         if (drain == null || drain.isNegative()) {
             throw new IllegalArgumentException("The drain is a time of 0 or more, not " + drain);
         }
+        if (renewal == null || renewal.isNegative() || renewal.isZero() || renewal.compareTo(Messages.LEASE.dividedBy(2)) > 0) {
+            throw new IllegalArgumentException("A renewal comes in less than half the lease, not every " + renewal);
+        }
         this.messages = Objects.requireNonNull(messages, "Answers are written through Messages");
         this.gateway = Objects.requireNonNull(gateway, "Answers come from the gateway");
         this.maxRunning = maxRunning;
         this.drain = drain;
         this.slots = new Semaphore(maxRunning);
+        renewals.scheduleWithFixedDelay(this::renewAll, renewal.toNanos(), renewal.toNanos(), TimeUnit.NANOSECONDS);
     }
 
     /**
@@ -146,6 +166,27 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
         return request;
     }
 
+    /**
+     * Renews the lease of every answer under way, one after the other. A renewal that learns of a request to cancel stops
+     * the model, so that one which writes nothing for a while still stops within a renewal; one that finds the answer
+     * ended, as a reader ends it once a lease ran out, stops the model and writes nothing more. A failure costs only this
+     * round for this answer, since the lease is far longer: the next round tries again.
+     */
+    private void renewAll() {
+        for (Answer answer : running.values()) {
+            try {
+                switch (messages.renew(answer.caller, answer.conversationId, answer.id())) {
+                    case Renewal.Renewed renewed when renewed.cancelRequested() -> answer.cancel();
+                    case Renewal.Renewed renewed -> {
+                    }
+                    default -> answer.learnEndedElsewhere();
+                }
+            } catch (RuntimeException e) {
+                LOG.warn("The lease of answer {} could not be renewed this time, so the next renewal tries again", answer.id(), e);
+            }
+        }
+    }
+
     /** What the model is shown: the history before the answer, which ends with its question. */
     private List<Gateway.Turn> turns(Answer answer) {
         return messages.historyFor(answer.caller, answer.conversationId, answer.id()).stream()
@@ -156,7 +197,8 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
 
     /**
      * Takes no more asks, lets the answers under way finish for as long as the drain, then stops the rest, which end as
-     * interrupted, and waits a little for them to write that. Calling it again does nothing.
+     * interrupted, and waits a little for them to write that. Their leases are renewed until then, and no more after.
+     * Calling it again does nothing.
      */
     @Override
     public void close() {
@@ -175,6 +217,7 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
             Thread.currentThread().interrupt();
         } finally {
             threads.shutdown();
+            renewals.shutdownNow();
         }
     }
 
@@ -212,6 +255,10 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
 
         void cancel() {
             cancelRequested = true;
+        }
+
+        void learnEndedElsewhere() {
+            endedElsewhere = true;
         }
 
         /**
