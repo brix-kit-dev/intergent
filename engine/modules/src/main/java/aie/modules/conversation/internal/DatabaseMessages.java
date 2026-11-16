@@ -17,7 +17,8 @@ import java.util.Optional;
  * {@link Messages} on the database. Each write takes the conversation from the caller's application in the same
  * statement, so a conversation of another application adds nothing, and row-level security keeps each tenant to its own
  * rows. The tables hold the rules themselves as well, for SQL that goes around this class: the database numbers the
- * events, ends an answer once, and changes a message only through its events.
+ * events, ends an answer once, changes a message only through its events, and lets an answer with a cancel request end
+ * only as cancelled.
  */
 public final class DatabaseMessages implements Messages {
 
@@ -53,7 +54,10 @@ public final class DatabaseMessages implements Messages {
     private static final String ADD_STARTED = """
             INSERT INTO conversation_events (tenant_id, message_id, type) VALUES (?, ?, 'message.started')
             """;
-    /** An answer that has ended is left out here; the database would refuse its event anyway. */
+    /**
+     * An answer that has ended is left out here, and so is one with a cancel request, for any event but
+     * message.cancelled. The database would refuse their event anyway.
+     */
     private static final String ADD_EVENT = """
             INSERT INTO conversation_events (tenant_id, message_id, type, text, input_tokens, output_tokens, code)
             SELECT m.tenant_id, m.message_id, ?, ?::text, ?::bigint, ?::bigint, ?::text
@@ -61,13 +65,32 @@ public final class DatabaseMessages implements Messages {
             JOIN conversation_conversations c ON c.tenant_id = m.tenant_id AND c.conversation_id = m.conversation_id
             WHERE c.application_id = ? AND c.conversation_id = ? AND m.message_id = ? AND m.role = 'assistant'
                 AND m.status = 'in_progress'
+                AND (?::text = 'message.cancelled' OR NOT EXISTS (
+                    SELECT FROM conversation_cancel_requests r WHERE r.tenant_id = m.tenant_id AND r.message_id = m.message_id))
             RETURNING seq
             """;
-    private static final String ANSWER_STATUS = """
-            SELECT m.status
+    /** Where an answer stands, and whether someone asked for it to be cancelled. */
+    private static final String ANSWER_STATE = """
+            SELECT m.status, EXISTS (
+                    SELECT FROM conversation_cancel_requests r WHERE r.tenant_id = m.tenant_id AND r.message_id = m.message_id)
+                AS cancel_requested
             FROM conversation_messages m
             JOIN conversation_conversations c ON c.tenant_id = m.tenant_id AND c.conversation_id = m.conversation_id
             WHERE c.application_id = ? AND c.conversation_id = ? AND m.message_id = ? AND m.role = 'assistant'
+            """;
+    /**
+     * An answer that has ended is left out here; the database would refuse its request anyway. A request made before
+     * stands, and this one adds nothing.
+     */
+    private static final String REQUEST_CANCEL = """
+            INSERT INTO conversation_cancel_requests (tenant_id, message_id)
+            SELECT m.tenant_id, m.message_id
+            FROM conversation_messages m
+            JOIN conversation_conversations c ON c.tenant_id = m.tenant_id AND c.conversation_id = m.conversation_id
+            WHERE c.application_id = ? AND c.conversation_id = ? AND m.message_id = ? AND m.role = 'assistant'
+                AND m.status = 'in_progress'
+            ON CONFLICT (tenant_id, message_id) DO NOTHING
+            RETURNING message_id
             """;
     private static final String EVENTS_AFTER = """
             SELECT e.message_id, e.seq, e.type, e.text, e.input_tokens IS NOT NULL AS has_usage,
@@ -218,9 +241,10 @@ public final class DatabaseMessages implements Messages {
     }
 
     /**
-     * Adds an event, or says why it could not. An answer that ended before this write began is left out by the statement.
-     * One that ends while this write waits for its lock makes the database refuse the event; a fresh look at the answer
-     * then tells that refusal from any other failure.
+     * Adds an event, or says why it could not. An answer that ended, or had a cancel request that refuses this event,
+     * before this write began is left out by the statement. One that ends or gets a request while this write waits for
+     * its lock makes the database refuse the event; a fresh look at the answer then tells that refusal from any other
+     * failure.
      */
     private Written write(Owner caller, String conversationId, String messageId, EventType type, String text, Usage usage,
             ErrorCode code) {
@@ -229,11 +253,11 @@ public final class DatabaseMessages implements Messages {
             numbers = database.inTenantTx(caller.tenantId(), tx -> tx.query(ADD_EVENT, row -> row.number("seq"),
                     type.wireName(), text, usage == null ? null : usage.inputTokens(),
                     usage == null ? null : usage.outputTokens(), code == null ? null : code.wireName(),
-                    caller.applicationId(), conversationId, messageId));
+                    caller.applicationId(), conversationId, messageId, type.wireName()));
         } catch (DatabaseException refused) {
-            Optional<Status> status = statusOf(caller, conversationId, messageId);
-            if (status.isPresent() && status.get() != Status.IN_PROGRESS) {
-                return new Written.AlreadyEnded(status.get());
+            Optional<Written> why = stateOf(caller, conversationId, messageId).flatMap(state -> state.refusal(type));
+            if (why.isPresent()) {
+                return why.get();
             }
             throw refused;
         }
@@ -241,19 +265,67 @@ public final class DatabaseMessages implements Messages {
             signals.ring(messageId);
             return new Written.Added(numbers.getFirst());
         }
-        Optional<Status> status = statusOf(caller, conversationId, messageId);
-        if (status.isEmpty()) {
+        Optional<AnswerState> state = stateOf(caller, conversationId, messageId);
+        if (state.isEmpty()) {
             return new Written.NotFound();
         }
-        if (status.get() == Status.IN_PROGRESS) {
-            throw new IllegalStateException("Answer " + messageId + " is in progress, yet it took no event");
-        }
-        return new Written.AlreadyEnded(status.get());
+        return state.get().refusal(type).orElseThrow(
+                () -> new IllegalStateException("Answer " + messageId + " is in progress, yet it took no event"));
     }
 
-    private Optional<Status> statusOf(Owner caller, String conversationId, String messageId) {
-        return database.inTenantTx(caller.tenantId(), tx -> tx.query(ANSWER_STATUS, row -> status(row.string("status")),
+    /**
+     * Records the request under the answer's lock, as an event goes in. An answer that ended before this request began is
+     * left out by the statement, and so is one with a request already. One that ends while this request waits for its lock
+     * makes the database refuse the request; a fresh look at the answer then tells that refusal from any other failure.
+     */
+    @Override
+    public CancelRequest requestCancel(Owner caller, String conversationId, String messageId) {
+        List<String> recorded;
+        try {
+            recorded = database.inTenantTx(caller.tenantId(), tx -> tx.query(REQUEST_CANCEL,
+                    row -> row.string("message_id"), caller.applicationId(), conversationId, messageId));
+        } catch (DatabaseException refused) {
+            Optional<AnswerState> state = stateOf(caller, conversationId, messageId);
+            if (state.isPresent() && state.get().status() != Status.IN_PROGRESS) {
+                return new CancelRequest.AlreadyEnded(state.get().status());
+            }
+            throw refused;
+        }
+        if (!recorded.isEmpty()) {
+            return new CancelRequest.Recorded();
+        }
+        Optional<AnswerState> state = stateOf(caller, conversationId, messageId);
+        if (state.isEmpty()) {
+            return new CancelRequest.NotFound();
+        }
+        if (state.get().status() != Status.IN_PROGRESS) {
+            return new CancelRequest.AlreadyEnded(state.get().status());
+        }
+        if (!state.get().cancelRequested()) {
+            throw new IllegalStateException("Answer " + messageId + " is in progress, yet it took no cancel request");
+        }
+        return new CancelRequest.Recorded();
+    }
+
+    private Optional<AnswerState> stateOf(Owner caller, String conversationId, String messageId) {
+        return database.inTenantTx(caller.tenantId(), tx -> tx.query(ANSWER_STATE,
+                row -> new AnswerState(status(row.string("status")), row.flag("cancel_requested")),
                 caller.applicationId(), conversationId, messageId)).stream().findFirst();
+    }
+
+    /** Where an answer stands, as a fresh look finds it. */
+    private record AnswerState(Status status, boolean cancelRequested) {
+
+        /** Why the answer takes no event of this type, or empty when it takes one. */
+        Optional<Written> refusal(EventType type) {
+            if (status != Status.IN_PROGRESS) {
+                return Optional.of(new Written.AlreadyEnded(status));
+            }
+            if (cancelRequested && type != EventType.MESSAGE_CANCELLED) {
+                return Optional.of(new Written.CancelRequested());
+            }
+            return Optional.empty();
+        }
     }
 
     @Override

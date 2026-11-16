@@ -421,8 +421,15 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
   - 同一个事务里，数据库把结果写进消息：状态、整段文字（由增量拼成）、用量、错误码和结束时间。所以事件日志以后被清理，消息照样完整。
   - `message.cancelled` 不给文字时，数据库填上已生成的增量；给了但对不上，就拒绝。
   - 结束之后，这条回答不能再写任何事件，消息也不会再变。
-  - 两方抢着结束同一条回答，只有一方成功。`addDelta`、`complete`、`cancel` 和 `fail` 都返回 `Messages.Written`：`Added` 带序号；`AlreadyEnded` 带回答是怎么结束的，抢输的一方和结束后才来的写入都拿到它；`NotFound` 表示调用方的应用里没有这条回答。
+  - 两方抢着结束同一条回答，只有一方成功。`addDelta`、`complete`、`cancel` 和 `fail` 都返回 `Messages.Written`：`Added` 带序号；`AlreadyEnded` 带回答是怎么结束的，抢输的一方和结束后才来的写入都拿到它；`CancelRequested` 表示回答还在进行中，但有人要取消它，见下面的取消请求；`NotFound` 表示调用方的应用里没有这条回答。
   - 数据库只保证最多一个结束事件。至少一个要靠生成方写完，或者租约过期后由读取方补写（M2-11），一个不再说话的生成方，数据库自己发现不了。
+- **取消请求：** 表 `conversation_cancel_requests`，记下哪条回答要取消、什么时候要的（蓝图 6.4）。取消请求可能落到任何一个实例，回答却只在其中一个实例上生成，所以请求记在数据库里，规则也由数据库来守。
+  - `Messages.requestCancel` 记下请求，返回 `Messages.CancelRequest`：`Recorded` 表示请求已记下，之前已经记过的也算；`AlreadyEnded` 带回答是怎么结束的，这时什么都不记；`NotFound` 表示调用方的应用里，这个会话没有这条回答。用户消息、别的应用或别的租户的消息，都算找不到。
+  - 一条回答最多一个请求，再要一次什么都不改。表带行级安全，只追加：引擎只能读和新增，不能改，也不能删。外键指向消息表，把租户号对上租户号。
+  - 请求记下之后，这条回答不再收增量，结束事件也只收 `message.cancelled`。`addDelta`、`complete` 和 `fail` 都拿到 `Written.CancelRequested`，什么都不写。`cancel` 照常写 `message.cancelled`，带已生成的增量和用量。
+  - 先到先得：请求和事件一样，先锁住这条回答再检查。回答已经结束，请求就不记，回答保持原样。请求先记下，回答就只能以 `message.cancelled` 结束，即使模型随后正好完成或失败。
+  - 表自己也守这些规则，绕过 `Messages` 直接写 SQL 也一样：已经结束的回答和用户消息不收请求，有请求的回答只收 `message.cancelled`。
+  - 现在只有 `Messages.requestCancel` 能记下请求，还没有接口调用它。生成方拿到 `CancelRequested` 时，现在只会停下模型，不写结束事件，回答留在进行中。M2-9-2 让生成方写 `message.cancelled`，M2-9-3 加取消接口。
 - **提问：** `Messages.ask` 在一个事务里存用户消息、建回答、写 `message.started`。中途失败什么都不留，不会有没有回答的问题，也不会有没有开始事件的回答。
   - 提问先锁住会话这一行，同一个会话的提问排队写入，所以每个问题后面紧跟着它自己的回答。锁用的是 `FOR NO KEY UPDATE`：两个提问不能同时拿到它，别的新消息的外键检查却不受影响。
   - 会话不在调用方的应用里，什么都不存。文字的规则和用户消息一样。

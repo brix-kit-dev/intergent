@@ -363,6 +363,11 @@ final class TestApi {
         }
 
         @Override
+        public CancelRequest requestCancel(Owner caller, String conversationId, String messageId) {
+            throw notNeeded();
+        }
+
+        @Override
         public List<Event> eventsAfter(Owner caller, String conversationId, String messageId, long after, int limit) {
             reads.computeIfAbsent(messageId, unused -> new AtomicInteger()).incrementAndGet();
             if (readsLeft.getAndDecrement() == 0) {

@@ -59,11 +59,22 @@ public interface Messages {
     /** Ends an answer with message.completed and its usage. */
     Written complete(Owner caller, String conversationId, String messageId, Usage usage);
 
-    /** Ends an answer with message.cancelled, which carries what the deltas so far say, and the usage so far. */
+    /**
+     * Ends an answer with message.cancelled, which carries what the deltas so far say, and the usage so far. It is the
+     * one event an answer with a cancel request still takes.
+     */
     Written cancel(Owner caller, String conversationId, String messageId, Usage usage);
 
     /** Ends an answer with an error event and its code. */
     Written fail(Owner caller, String conversationId, String messageId, ErrorCode code);
+
+    /**
+     * Asks for an answer in progress to be cancelled (blueprint 6.4), whichever instance writes it. The request is kept
+     * with the answer: from then on, the answer takes no more deltas, and message.cancelled is the only ending it can
+     * get, so its writer meets {@link Written.CancelRequested} at its next write. Asking again changes nothing. Of a
+     * request and an ending, the one that comes first wins: an answer that ended before stays as it ended.
+     */
+    CancelRequest requestCancel(Owner caller, String conversationId, String messageId);
 
     /**
      * The events of an answer with a number above {@code after}, in order, at most {@code limit} of them. Empty when the
@@ -147,8 +158,31 @@ public interface Messages {
         record AlreadyEnded(Status status) implements Written {
         }
 
+        /**
+         * The answer is still in progress, but someone asked for it to be cancelled, so it took no event: from the request
+         * on, it takes message.cancelled alone.
+         */
+        record CancelRequested() implements Written {
+        }
+
         /** No answer has this ID in this conversation of the caller's application. */
         record NotFound() implements Written {
+        }
+    }
+
+    /** What became of a request to cancel an answer. */
+    sealed interface CancelRequest {
+
+        /** The answer is in progress, and the request is kept with it, made now or before. */
+        record Recorded() implements CancelRequest {
+        }
+
+        /** The answer had ended already, in this status, so the request changed nothing. */
+        record AlreadyEnded(Status status) implements CancelRequest {
+        }
+
+        /** No answer has this ID in this conversation of the caller's application. A user message is no answer. */
+        record NotFound() implements CancelRequest {
         }
     }
 

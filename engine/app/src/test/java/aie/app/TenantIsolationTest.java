@@ -77,6 +77,9 @@ class TenantIsolationTest {
                     """, "A message changes only through its events"),
             Sample.appendOnly("conversation_events", """
                     INSERT INTO conversation_events (tenant_id, message_id, type) VALUES ('{tenant}', 'msg_{tenant}', 'message.started')
+                    """),
+            Sample.appendOnly("conversation_cancel_requests", """
+                    INSERT INTO conversation_cancel_requests (tenant_id, message_id) VALUES ('{tenant}', 'msg_{tenant}')
                     """));
 
     private static final String TENANT_TABLES = """
