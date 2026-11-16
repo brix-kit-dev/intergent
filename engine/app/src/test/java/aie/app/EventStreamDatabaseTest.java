@@ -20,6 +20,7 @@ import aie.modules.conversation.internal.DatabaseMessages;
 import aie.modules.conversation.internal.GeneratingAnswers;
 import aie.modules.conversation.internal.LocalEventSignals;
 import java.io.IOException;
+import java.sql.SQLException;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
@@ -35,7 +36,7 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
  * The real event stream on the real scripts: it follows an answer that the real generator and the fake model write
- * while it reads, and replays one that has ended.
+ * while it reads, replays one that has ended, and ends one whose writer has gone.
  */
 @Testcontainers
 @Timeout(value = 60, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
@@ -133,6 +134,31 @@ class EventStreamDatabaseTest {
         assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(2));
         assertThat(idsAndTypes(sent)).containsExactly("1 message.started", "2 message.delta", "3 message.delta",
                 "4 message.completed");
+    }
+
+    /**
+     * M2-11-3: an answer whose writer has gone, as if its instance died, so that nothing renews its lease, which has run
+     * out. The stream sends what the log holds, and after 5 seconds with nothing new it looks at the lease: the stream
+     * ends the answer for its writer as interrupted, and sends that ending like any other.
+     */
+    @Test
+    void aStreamEndsTheAnswerOfAWriterThatHasGone() throws SQLException {
+        String alone = new DatabaseConversations(pool).start(caller, new DatabaseEndUsers(pool).resolve(caller, "user-1"), null)
+                .conversationId();
+        String answer = messages.ask(caller, alone, "Anyone there?").orElseThrow().answer().messageId();
+        assertThat(messages.addDelta(caller, alone, answer, "Hal")).isEqualTo(new Messages.Written.Added(2));
+        TestDatabase.asAdmin(DATABASE, "UPDATE engine.conversation_answer_leases SET expires_at = now() - interval '1 second'"
+                + " WHERE message_id = '" + answer + "'");
+
+        long start = System.nanoTime();
+        String sent = EventStreamProbe.send(messages, caller, alone, answer, 0);
+
+        assertThat(Duration.ofNanos(System.nanoTime() - start)).isBetween(Duration.ofSeconds(5), Duration.ofSeconds(20));
+        assertThat(idsAndTypes(sent)).containsExactly("1 message.started", "2 message.delta", "3 error");
+        assertThat(sent).contains("\"code\":\"stream_interrupted\"", "\"status\":503");
+        Messages.Message ended = messages.find(caller, alone, answer).orElseThrow();
+        assertThat(ended.status()).isEqualTo(Messages.Status.FAILED);
+        assertThat(ended.code()).isEqualTo(Messages.ErrorCode.STREAM_INTERRUPTED);
     }
 
     @Test

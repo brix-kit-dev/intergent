@@ -22,6 +22,9 @@ import aie.http.api.model.CreatedApiKey;
 import aie.http.api.model.Message;
 import aie.http.api.model.MessageStartedEvent;
 import aie.http.api.model.Usage;
+import aie.modules.conversation.api.Messages;
+import aie.modules.conversation.internal.DatabaseMessages;
+import aie.ports.DatabasePort;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
@@ -817,6 +820,75 @@ class ApiRoleTest {
         assertThat(elsewhere.statusCode()).isEqualTo(422);
         assertThat(TestDatabase.firstColumn(DATABASE, "SELECT message_id FROM engine.conversation_cancel_requests"
                 + " WHERE message_id = '" + answer + "'")).isEmpty();
+    }
+
+    /** An answer whose writer has gone: the key of its application, its conversation and the answer. */
+    private record Gone(String key, String conversationId, String answerId) {
+    }
+
+    /**
+     * An answer as its writer leaves it when its instance dies (M2-11-3): started straight in the database, with "Hal" as
+     * its one delta and no one to renew its lease, which has run out.
+     */
+    private static Gone answerOfAWriterThatHasGone(String idempotencyKey) throws Exception {
+        DatabasePort database = PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD);
+        Provisioning provisioning = new DatabaseProvisioning(database);
+        String tenant = provisioning.createTenant("jp1", null);
+        String application = provisioning.createApplication(tenant, "test", "internal");
+        String key = provisioning.createKey(tenant, application).key();
+        String id = JSON.readValue(startConversation(key, idempotencyKey, "{\"external_user_id\":\"host-user-1\"}").body(),
+                Conversation.class).getId();
+        Messages messages = new DatabaseMessages(database);
+        Owner writer = new Owner("key_unused", tenant, application);
+        String answer = messages.ask(writer, id, "Anyone there?").orElseThrow().answer().messageId();
+        assertThat(messages.addDelta(writer, id, answer, "Hal")).isEqualTo(new Messages.Written.Added(2));
+        TestDatabase.asAdmin(DATABASE, "UPDATE engine.conversation_answer_leases SET expires_at = now() - interval '1 second'"
+                + " WHERE message_id = '" + answer + "'");
+        return new Gone(key, id, answer);
+    }
+
+    /**
+     * Resuming an answer whose writer has gone (M2-11-3): the stream finds nothing new, looks at the lease 5 seconds on,
+     * and ends the answer for its writer. The caller gets error with stream_interrupted, and the answer has failed.
+     */
+    @Test
+    void aResumeEndsTheAnswerOfAWriterThatHasGone() throws Exception {
+        Gone gone = answerOfAWriterThatHasGone("gone-1");
+
+        long start = System.nanoTime();
+        HttpResponse<String> resumed = events(port, gone.key(), gone.conversationId(), gone.answerId(), "2");
+
+        assertThat(Duration.ofNanos(System.nanoTime() - start)).isBetween(Duration.ofSeconds(5), Duration.ofSeconds(20));
+        assertThat(resumed.statusCode()).isEqualTo(200);
+        List<String> sent = eventsOf(resumed.body());
+        assertThat(lines(sent, "id: ")).containsExactly("id: 3");
+        assertThat(lines(sent, "event: ")).containsExactly("event: error");
+        assertThat(resumed.body()).contains("\"code\":\"stream_interrupted\"", "\"status\":503");
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT status || ' ' || code FROM engine.conversation_messages"
+                + " WHERE message_id = '" + gone.answerId() + "'")).containsExactly("failed stream_interrupted");
+    }
+
+    /**
+     * Cancelling an answer whose writer has gone (M2-11-3): while it waits, the cancel looks at the lease, finds it has
+     * run out, and ends the answer for its writer at once, as cancelled with what the log holds. No one knows what the
+     * model used, so the usage is 0 (M2-11 decision 2), and a warning says so.
+     */
+    @Test
+    void aCancelEndsTheAnswerOfAWriterThatHasGone(CapturedOutput output) throws Exception {
+        Gone gone = answerOfAWriterThatHasGone("gone-2");
+
+        long start = System.nanoTime();
+        HttpResponse<String> cancelled = cancel(port, gone.key(), gone.conversationId(), gone.answerId(), null);
+
+        assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(4));
+        assertThat(cancelled.statusCode()).isEqualTo(200);
+        Message body = JSON.readValue(cancelled.body(), Message.class);
+        assertThat(body.getId()).isEqualTo(gone.answerId());
+        assertThat(body.getStatus()).isEqualTo("cancelled");
+        assertThat(body.getText()).isEqualTo("Hal");
+        assertThat(body.getUsage().getInputTokens()).isZero();
+        assertThat(body.getUsage().getOutputTokens()).isZero();
+        assertThat(output.getAll()).contains("Answer " + gone.answerId() + " was cancelled after its writer's lease ran out");
     }
 
     /** A streamed message with an Idempotency-Key, to the api on this port. */

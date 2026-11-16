@@ -182,7 +182,9 @@ class ConversationController implements ConversationsApi, StreamsApi {
      * is kept with the answer, so its writer stops: at once on this instance, at its next piece on another. This call then
      * waits for the ending, for as long as the cancel wait at most (M2-9 decision 3), and returns the answer as it is
      * then: cancelled with what was generated and its usage, or still in progress when its writer has not ended it yet,
-     * which it will. An answer that had ended comes back as it ended, unchanged, so the call is safe to repeat.
+     * which it will. A writer that has gone ends nothing, so the wait looks at its lease too: once the lease has run out,
+     * the answer ends as cancelled at once, with no tokens counted (M2-11-3). An answer that had ended comes back as it
+     * ended, unchanged, so the call is safe to repeat.
      *
      * <p>Everything is checked before the request is kept, and a refusal is a plain problem. A user message is no answer,
      * so it is as missing as an unknown message, one of another application and one of another tenant. A retry with the
@@ -208,7 +210,7 @@ class ConversationController implements ConversationsApi, StreamsApi {
      * Server-Sent Events. Without Last-Event-ID the stream starts from the first event, so an answer that ended is sent
      * again whole. The log is in the database and its numbers never go back, so every instance sends the same events,
      * with none repeated or missed. An instance other than the writer's finds each new event at its next look, within
-     * 200 milliseconds.
+     * 200 milliseconds. When the writer has gone, the stream ends the answer for it once its lease has run out (M2-11-3).
      *
      * <p>Everything is checked before the stream starts, and a refusal is a plain problem. A user message has no events,
      * so it is as missing as an unknown message, one of another application and one of another tenant. Last-Event-ID
@@ -382,11 +384,14 @@ class ConversationController implements ConversationsApi, StreamsApi {
 
     /**
      * Waits for a cancelled answer to end, for as long as the cancel wait at most, and returns it as it is then. It looks
-     * every 200 milliseconds, as the event stream does, so an ending is seen as soon after as on any instance.
+     * every 200 milliseconds, as the event stream does, so an ending is seen as soon after as on any instance. Before each
+     * look it looks at the writer's lease too: a writer whose lease has run out has gone, and its answer ends as cancelled
+     * at once, with no tokens known (M2-11-3).
      */
     private Messages.Message awaitEnding(Owner caller, String conversationId, String answerId) {
         long deadline = System.nanoTime() + CANCEL_WAIT.toNanos();
         while (true) {
+            messages.endIfExpired(caller, conversationId, answerId);
             Messages.Message now = found(caller, conversationId, answerId);
             long left = deadline - System.nanoTime();
             if (now.status() != Messages.Status.IN_PROGRESS || left <= 0) {

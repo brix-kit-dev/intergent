@@ -425,9 +425,14 @@ final class TestApi {
             throw notNeeded();
         }
 
+        /** The stand-in's writers never go away, so a lease never runs out: an answer in progress goes on. */
         @Override
         public Expiry endIfExpired(Owner caller, String conversationId, String messageId) {
-            throw notNeeded();
+            Message answer = answers.answers.get(messageId);
+            if (answer == null || !answer.conversationId().equals(conversationId)) {
+                return new Expiry.NotFound();
+            }
+            return answer.status() == Status.IN_PROGRESS ? new Expiry.Running() : new Expiry.AlreadyEnded(answer.status());
         }
 
         @Override

@@ -13,6 +13,7 @@ import aie.modules.conversation.api.Messages;
 import aie.modules.conversation.api.Messages.ErrorCode;
 import aie.modules.conversation.api.Messages.Event;
 import aie.modules.conversation.api.Messages.EventType;
+import aie.modules.conversation.api.Messages.Expiry;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.time.Clock;
@@ -33,15 +34,21 @@ import tools.jackson.databind.json.JsonMapper;
  * and waits on it, so a missed signal costs no more than the next look. When no event has gone out for 15 seconds, a
  * comment keeps the connection open. A caller that goes away stops the sending, not the answer.
  *
- * <p>A stream lasts 5 minutes at most, well past the route's 2 minutes: until the lease of M2-11, an answer whose
- * writer died stays in progress, and its stream would never end. At the limit the stream closes without an ending
- * event, and the client resumes from the last number it got.
+ * <p>A stream lasts 5 minutes at most, well past the route's 2 minutes. A writer that is there ends its answer within
+ * the route's time, and the answer of one that died ends once its lease has run out, since the stream looks at the
+ * lease (M2-11-3), so the limit is only a safety net. At the limit the stream closes without an ending event, and the
+ * client resumes from the last number it got.
  */
 final class EventStream {
 
     static final Duration POLL = Duration.ofMillis(200);
     static final Duration HEARTBEAT = Duration.ofSeconds(15);
     static final Duration LIMIT = Duration.ofMinutes(5);
+    /**
+     * How long a stream that sees no new event waits before it looks at the writer's lease (M2-11-3). A writer renews its
+     * lease every 5 seconds, so one whose lease has run out has gone, and the stream ends the answer for it.
+     */
+    static final Duration LEASE_LOOK = Duration.ofSeconds(5);
     /** How many events one read takes at most. A full read is followed by the next one at once. */
     static final int BATCH = 100;
 
@@ -81,6 +88,7 @@ final class EventStream {
     private final Duration poll;
     private final Duration heartbeat;
     private final Duration limit;
+    private final Duration leaseLook;
     private final Clock clock;
     private final Waiter waiter;
 
@@ -90,11 +98,17 @@ final class EventStream {
 
     EventStream(Messages messages, EventSignals signals, Duration poll, Duration heartbeat, Duration limit, Clock clock,
             Waiter waiter) {
+        this(messages, signals, poll, heartbeat, limit, LEASE_LOOK, clock, waiter);
+    }
+
+    EventStream(Messages messages, EventSignals signals, Duration poll, Duration heartbeat, Duration limit, Duration leaseLook,
+            Clock clock, Waiter waiter) {
         this.messages = Objects.requireNonNull(messages, "A stream reads the log through Messages");
         this.signals = Objects.requireNonNull(signals, "A stream needs the signals, or NONE");
         this.poll = positive(poll, "poll");
         this.heartbeat = positive(heartbeat, "heartbeat");
         this.limit = positive(limit, "limit");
+        this.leaseLook = positive(leaseLook, "lease look");
         this.clock = Objects.requireNonNull(clock, "A stream needs a clock");
         this.waiter = Objects.requireNonNull(waiter, "A stream needs a way to wait");
     }
@@ -110,11 +124,16 @@ final class EventStream {
      * Sends the answer's events after number {@code after}, until its ending event, the limit, or the caller going away.
      * Each read that found events is flushed at once, and so is each heartbeat. A failure to read the log is thrown on,
      * to a caller whose response has started by then.
+     *
+     * <p>A stream that has seen no new event for {@link #LEASE_LOOK} looks at the writer's lease. Once the lease has run
+     * out, the writer has gone, so the stream ends the answer for it (blueprint 6.4), reads again at once, and sends that
+     * ending like any other.
      */
     Ended send(Owner caller, String conversationId, String messageId, long after, OutputStream out) {
         Instant start = clock.instant();
         Instant deadline = start.plus(limit);
         Instant beat = start.plus(heartbeat);
+        Instant look = start.plus(leaseLook);
         long last = after;
         CompletableFuture<Void> signal = null;
         try {
@@ -133,7 +152,13 @@ final class EventStream {
                 if (!events.isEmpty()) {
                     out.flush();
                     beat = now.plus(heartbeat);
+                    look = now.plus(leaseLook);
                     if (events.size() == BATCH) {
+                        continue;
+                    }
+                } else if (!now.isBefore(look)) {
+                    look = now.plus(leaseLook);
+                    if (messages.endIfExpired(caller, conversationId, messageId) instanceof Expiry.Ended) {
                         continue;
                     }
                 }

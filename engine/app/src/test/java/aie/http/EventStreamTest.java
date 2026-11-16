@@ -74,13 +74,19 @@ class EventStreamTest {
         }
     }
 
-    /** An event log in which each event shows from its own moment on. It remembers each read. */
+    /**
+     * An event log in which each event shows from its own moment on. It remembers each read, and the moment of each look
+     * at the writer's lease. The writer renews its lease until the moment it is gone, if a test gives one; a look at this
+     * answer from then on ends it as interrupted, as Messages does. Of any other answer, the log knows nothing.
+     */
     private static final class Log {
 
         private final Time time;
         private final List<Event> events = new ArrayList<>();
         private final Map<Long, Instant> shownFrom = new HashMap<>();
         private final List<String> reads = new ArrayList<>();
+        private final List<Duration> looks = new ArrayList<>();
+        private Instant writerGone;
         private RuntimeException failure;
 
         Log(Time time) {
@@ -93,9 +99,31 @@ class EventStreamTest {
             return this;
         }
 
+        Log writerGoneAt(Duration moment) {
+            writerGone = T0.plus(moment);
+            return this;
+        }
+
+        private Messages.Expiry lookAtTheLease(Object[] arguments) {
+            looks.add(Duration.between(T0, time.now));
+            if (!List.of(CALLER, CONVERSATION, ANSWER).equals(List.of(arguments))) {
+                return new Messages.Expiry.NotFound();
+            }
+            if (writerGone == null || time.now.isBefore(writerGone)) {
+                return new Messages.Expiry.Running();
+            }
+            long next = events.stream().mapToLong(Event::seq).max().orElse(0) + 1;
+            at(Duration.between(T0, time.now), event(next, EventType.ERROR, null, null, ErrorCode.STREAM_INTERRUPTED));
+            writerGone = null;
+            return new Messages.Expiry.Ended(EventType.ERROR);
+        }
+
         Messages messages() {
             return (Messages) Proxy.newProxyInstance(Messages.class.getClassLoader(), new Class<?>[] {Messages.class},
                     (proxy, method, arguments) -> {
+                        if (method.getName().equals("endIfExpired")) {
+                            return lookAtTheLease(arguments);
+                        }
                         if (!method.getName().equals("eventsAfter")) {
                             throw new UnsupportedOperationException(method.getName());
                         }
@@ -251,7 +279,10 @@ class EventStreamTest {
         assertThat(send(0)).doesNotContain(HEARTBEAT).contains("id: 8\n");
     }
 
-    /** Until the lease of M2-11 an answer may never end, so after 5 minutes the stream closes, and the client resumes. */
+    /**
+     * A writer that renews its lease and writes nothing leaves its answer going, so after 5 minutes the stream closes
+     * without an ending, and the client resumes.
+     */
     @Test
     void theStreamClosesAtItsLimitWithoutAnEnding() {
         log.at(Duration.ZERO, started(1));
@@ -264,6 +295,60 @@ class EventStreamTest {
         String sent = out.toString(UTF_8);
         assertThat(sent.split(HEARTBEAT, -1)).hasSize(20);
         assertThat(sent).doesNotContain("event: message.completed", "event: error");
+    }
+
+    /** M2-11-3: a stream that sees no new event looks at the writer's lease every 5 seconds, until it closes. */
+    @Test
+    void aQuietStreamLooksAtTheLeaseEvery5Seconds() {
+        log.at(Duration.ZERO, started(1));
+
+        send(0);
+
+        assertThat(log.looks).startsWith(seconds(5), seconds(10), seconds(15)).hasSize(60);
+        assertThat(log.looks.getLast()).isEqualTo(Duration.ofMinutes(5));
+    }
+
+    /** New events show the writer is there, so each one puts the next look off by 5 seconds. */
+    @Test
+    void newEventsPutTheLookOff() {
+        log.at(Duration.ZERO, started(1)).at(seconds(3), delta(2, "Hel")).at(seconds(7), delta(3, "lo"))
+                .at(seconds(13), completed(4));
+
+        send(0);
+
+        assertThat(log.looks).containsExactly(seconds(12));
+    }
+
+    /** A stream that starts with nothing new to send has seen no event yet, so its first look comes 5 seconds on. */
+    @Test
+    void aStreamThatStartsCaughtUpLooksFirstAfter5Seconds() {
+        log.at(Duration.ZERO, started(1)).at(seconds(7), completed(2));
+
+        assertThat(send(1)).startsWith("id: 2\n");
+        assertThat(log.looks).containsExactly(seconds(5));
+    }
+
+    /**
+     * The writer has gone: at the first look after its lease ran out, the stream ends the answer for it, reads again at
+     * once, and sends that ending like any other.
+     */
+    @Test
+    void aStreamEndsTheAnswerOfAWriterThatHasGone() {
+        log.at(Duration.ZERO, started(1)).at(seconds(1), delta(2, "Hel")).writerGoneAt(seconds(8));
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+        Ended ended = stream().send(CALLER, CONVERSATION, ANSWER, 0, out);
+
+        assertThat(ended).isEqualTo(Ended.ENDING_SENT);
+        assertThat(log.looks).containsExactly(seconds(6), seconds(11));
+        assertThat(time.now).isEqualTo(T0.plus(seconds(11)));
+        String[] sent = out.toString(UTF_8).split("\n\n");
+        assertThat(sent).hasSize(3);
+        String[] lines = sent[2].split("\n");
+        assertThat(lines[0]).isEqualTo("id: 3");
+        assertThat(lines[1]).isEqualTo("event: error");
+        Map<?, ?> problem = JSON.readValue(lines[2].substring("data: ".length()), Map.class);
+        assertThat(problem.get("code")).isEqualTo("stream_interrupted");
     }
 
     @Test
@@ -440,10 +525,13 @@ class EventStreamTest {
         assertThat(EventStream.POLL).isEqualTo(Duration.ofMillis(200));
         assertThat(EventStream.HEARTBEAT).isEqualTo(Duration.ofSeconds(15));
         assertThat(EventStream.LIMIT).isEqualTo(Duration.ofMinutes(5));
+        assertThat(EventStream.LEASE_LOOK).isEqualTo(Duration.ofSeconds(5));
         assertThat(EventStream.BATCH).isEqualTo(100);
         for (Duration wrong : new Duration[] {Duration.ZERO, Duration.ofMillis(-1), null}) {
             assertThatThrownBy(() -> new EventStream(log.messages(), EventSignals.NONE, wrong, EventStream.HEARTBEAT,
                     EventStream.LIMIT, time, waitOnTheClock())).isInstanceOf(IllegalArgumentException.class);
+            assertThatThrownBy(() -> new EventStream(log.messages(), EventSignals.NONE, EventStream.POLL, EventStream.HEARTBEAT,
+                    EventStream.LIMIT, wrong, time, waitOnTheClock())).isInstanceOf(IllegalArgumentException.class);
         }
     }
 }
