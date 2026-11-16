@@ -280,6 +280,120 @@ class IdempotencyKeysTest {
         assertThat(keys.claim(KEY, REQUEST)).isEqualTo(new Claim.Finished(201, "{\"id\":\"first\"}"));
     }
 
+    /**
+     * M2-10-1: a streamed answer is kept as the ID of its message, a 200 with no body of its own, and a retry gets that
+     * ID, to send the message's event log again.
+     */
+    @Test
+    void aStreamedAnswerIsKeptAsItsMessage() throws SQLException {
+        keys.claim(KEY, REQUEST);
+
+        keys.finishStreamed(KEY, "msg_1");
+
+        assertThat(keys.claim(KEY, REQUEST)).isEqualTo(new Claim.Streamed("msg_1"));
+        assertThat(column("streamed_message_id")).isEqualTo("msg_1");
+        assertThat(column("response_status")).isEqualTo("200");
+        assertThat(column("response_body")).isNull();
+    }
+
+    /** Once streamed, the key is finished like any other: never taken over, never let go of. */
+    @Test
+    void aStreamedAnswerStaysWithItsKey() throws SQLException {
+        keys.claim(KEY, REQUEST);
+        keys.finishStreamed(KEY, "msg_1");
+        change("locked_until = now() - interval '1 second'");
+
+        keys.release(KEY);
+
+        assertThat(keys.claim(KEY, REQUEST)).isEqualTo(new Claim.Streamed("msg_1"));
+    }
+
+    @Test
+    void aDifferentRequestAfterAStreamedOneIsRefused() {
+        keys.claim(KEY, REQUEST);
+        keys.finishStreamed(KEY, "msg_1");
+
+        assertThat(keys.claim(KEY, OTHER_REQUEST)).isEqualTo(REUSED);
+    }
+
+    /** The first answer stands, whether it is a body or a stream. */
+    @Test
+    void theFirstAnswerStandsForStreamsToo() {
+        Key streamedFirst = new Key(TENANT_A, "app_a", "key_streamed");
+        Key storedFirst = new Key(TENANT_A, "app_a", "key_stored");
+        keys.claim(streamedFirst, REQUEST);
+        keys.claim(storedFirst, REQUEST);
+
+        keys.finishStreamed(streamedFirst, "msg_first");
+        keys.finishStreamed(streamedFirst, "msg_late");
+        keys.finish(streamedFirst, 500, "{\"id\":\"late\"}");
+        keys.finish(storedFirst, 201, "{\"id\":\"first\"}");
+        keys.finishStreamed(storedFirst, "msg_late");
+
+        assertThat(keys.claim(streamedFirst, REQUEST)).isEqualTo(new Claim.Streamed("msg_first"));
+        assertThat(keys.claim(storedFirst, REQUEST)).isEqualTo(new Claim.Finished(201, "{\"id\":\"first\"}"));
+    }
+
+    /** An expired key starts over with nothing of its stream left, so a new request may store any answer. */
+    @Test
+    void anExpiredStreamedKeyStartsOver() throws SQLException {
+        keys.claim(KEY, REQUEST);
+        keys.finishStreamed(KEY, "msg_1");
+        change("expires_at = now() - interval '1 second'");
+
+        assertThat(keys.claim(KEY, OTHER_REQUEST)).isEqualTo(ACQUIRED);
+        assertThat(column("streamed_message_id")).isNull();
+        keys.finish(KEY, 201, "{\"id\":\"new\"}");
+
+        assertThat(keys.claim(KEY, OTHER_REQUEST)).isEqualTo(new Claim.Finished(201, "{\"id\":\"new\"}"));
+    }
+
+    @Test
+    void aStreamedAnswerGoesOnlyToItsOwnKey() {
+        Key otherApplication = new Key(TENANT_A, "app_a2", KEY.value());
+        Key otherTenant = new Key(TENANT_B, "app_b", KEY.value());
+        Key otherValue = new Key(TENANT_A, "app_a", "key_2");
+        keys.claim(KEY, REQUEST);
+        keys.claim(otherApplication, REQUEST);
+        keys.claim(otherTenant, REQUEST);
+        keys.claim(otherValue, REQUEST);
+
+        keys.finishStreamed(KEY, "msg_1");
+
+        assertThat(keys.claim(otherApplication, REQUEST)).isEqualTo(IN_USE);
+        assertThat(keys.claim(otherTenant, REQUEST)).isEqualTo(IN_USE);
+        assertThat(keys.claim(otherValue, REQUEST)).isEqualTo(IN_USE);
+        assertThat(keys.claim(KEY, REQUEST)).isEqualTo(new Claim.Streamed("msg_1"));
+    }
+
+    @Test
+    void aStreamedAnswerNeedsItsMessage() {
+        keys.claim(KEY, REQUEST);
+
+        assertThatThrownBy(() -> keys.finishStreamed(KEY, null)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> keys.finishStreamed(KEY, "")).isInstanceOf(IllegalArgumentException.class);
+
+        assertThat(keys.claim(KEY, REQUEST)).isEqualTo(IN_USE);
+    }
+
+    /** The table holds the rule itself: a streamed answer has a message, a 200 and no body. */
+    @Test
+    void theTableKeepsAStreamedAnswerWithoutABody() throws SQLException {
+        keys.claim(KEY, REQUEST);
+
+        for (String wrong : List.of(
+                "response_status = 201, response_body = NULL, streamed_message_id = 'msg_1'",
+                "response_status = 200, response_body = '{}', streamed_message_id = 'msg_1'",
+                "response_status = NULL, response_body = NULL, streamed_message_id = 'msg_1'",
+                "response_status = 200, response_body = NULL, streamed_message_id = ''")) {
+            assertThatThrownBy(() -> change(wrong)).isInstanceOf(SQLException.class)
+                    .hasMessageContaining("tenancy_idempotency_keys_streamed");
+        }
+        change("response_status = 200, response_body = NULL, streamed_message_id = 'msg_1'");
+
+        assertThat(keys.claim(KEY, REQUEST)).isEqualTo(new Claim.Streamed("msg_1"));
+    }
+
     @Test
     void anAnswerDoesNotMoveTheExpiry() throws SQLException {
         keys.claim(KEY, REQUEST);

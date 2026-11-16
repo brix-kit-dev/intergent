@@ -99,6 +99,8 @@ class IdempotencyFilter extends OncePerRequestFilter {
             case Claim.Reused reused -> refuse(request, response, 422,
                     "idempotency_key_reused", "This " + HEADER + " belongs to a different request");
             case Claim.Finished(int status, String answer) -> replay(response, status, answer);
+            case Claim.Streamed streamed -> throw new IllegalStateException(
+                    "The answer to an " + HEADER + " is a stream, which this engine does not send again yet (M2-10-2)");
         }
     }
 

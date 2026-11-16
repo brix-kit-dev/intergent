@@ -78,6 +78,10 @@ final class TestApi {
         }
 
         @Override
+        public void finishStreamed(Key key, String messageId) {
+        }
+
+        @Override
         public void release(Key key) {
         }
     };

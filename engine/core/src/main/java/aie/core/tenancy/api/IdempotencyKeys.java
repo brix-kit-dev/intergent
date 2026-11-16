@@ -17,6 +17,15 @@ public interface IdempotencyKeys {
     void finish(Key key, int status, String body);
 
     /**
+     * Stores that the request answers as a stream: the event log of this message, which retries get instead of a body.
+     * It is called once the answer exists, before it streams, so a retry while the answer is written follows it, and one
+     * after it ended replays it. The first answer stands, as with {@link #finish}.
+     *
+     * @throws IllegalArgumentException for a message ID that is null or empty
+     */
+    void finishStreamed(Key key, String messageId);
+
+    /**
      * Lets go of a key whose request did nothing, such as one turned away with 429, so that a retry with it runs the
      * request as if the key were new. Only a key still held is let go: a stored answer stands.
      */
@@ -43,6 +52,10 @@ public interface IdempotencyKeys {
 
         /** The same request already ran. This is its answer, to return as it is. */
         record Finished(int status, String body) implements Claim {
+        }
+
+        /** The same request already ran and answers as the stream of this message, to send again from its log. */
+        record Streamed(String messageId) implements Claim {
         }
     }
 }
