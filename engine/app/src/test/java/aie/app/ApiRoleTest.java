@@ -951,15 +951,23 @@ class ApiRoleTest {
                 + " WHERE message_id = '" + answer + "'")).isEmpty();
     }
 
-    /** An answer whose writer has gone: the key of its application, its conversation and the answer. */
-    private record Gone(String key, String conversationId, String answerId) {
+    /** An answer that has not ended: the key of its application, its conversation and the answer. */
+    private record Unfinished(String key, String conversationId, String answerId) {
     }
 
     /**
      * An answer as its writer leaves it when its instance dies (M2-11-3): started straight in the database, with "Hal" as
      * its one delta and no one to renew its lease, which has run out.
      */
-    private static Gone answerOfAWriterThatHasGone(String idempotencyKey) throws Exception {
+    private static Unfinished answerOfAWriterThatHasGone(String idempotencyKey) throws Exception {
+        Unfinished gone = answerInProgress(idempotencyKey);
+        TestDatabase.asAdmin(DATABASE, "UPDATE engine.conversation_answer_leases SET expires_at = now() - interval '1 second'"
+                + " WHERE message_id = '" + gone.answerId() + "'");
+        return gone;
+    }
+
+    /** An answer started straight in the database, with "Hal" as its one delta and a lease that still runs. */
+    private static Unfinished answerInProgress(String idempotencyKey) throws Exception {
         DatabasePort database = PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD);
         Provisioning provisioning = new DatabaseProvisioning(database);
         String tenant = provisioning.createTenant("jp1", null);
@@ -971,9 +979,7 @@ class ApiRoleTest {
         Owner writer = new Owner("key_unused", tenant, application);
         String answer = messages.ask(writer, id, "Anyone there?").orElseThrow().answer().messageId();
         assertThat(messages.addDelta(writer, id, answer, "Hal")).isEqualTo(new Messages.Written.Added(2));
-        TestDatabase.asAdmin(DATABASE, "UPDATE engine.conversation_answer_leases SET expires_at = now() - interval '1 second'"
-                + " WHERE message_id = '" + answer + "'");
-        return new Gone(key, id, answer);
+        return new Unfinished(key, id, answer);
     }
 
     /**
@@ -982,7 +988,7 @@ class ApiRoleTest {
      */
     @Test
     void aResumeEndsTheAnswerOfAWriterThatHasGone() throws Exception {
-        Gone gone = answerOfAWriterThatHasGone("gone-1");
+        Unfinished gone = answerOfAWriterThatHasGone("gone-1");
 
         long start = System.nanoTime();
         HttpResponse<String> resumed = events(port, gone.key(), gone.conversationId(), gone.answerId(), "2");
@@ -1004,7 +1010,7 @@ class ApiRoleTest {
      */
     @Test
     void aCancelEndsTheAnswerOfAWriterThatHasGone(CapturedOutput output) throws Exception {
-        Gone gone = answerOfAWriterThatHasGone("gone-2");
+        Unfinished gone = answerOfAWriterThatHasGone("gone-2");
 
         long start = System.nanoTime();
         HttpResponse<String> cancelled = cancel(port, gone.key(), gone.conversationId(), gone.answerId(), null);
@@ -1018,6 +1024,125 @@ class ApiRoleTest {
         assertThat(body.getUsage().getInputTokens()).isZero();
         assertThat(body.getUsage().getOutputTokens()).isZero();
         assertThat(output.getAll()).contains("Answer " + gone.answerId() + " was cancelled after its writer's lease ran out");
+    }
+
+    private static HttpResponse<String> readMessage(String key, String conversationId, String messageId) throws Exception {
+        return HttpClient.newHttpClient().send(at("/v1/conversations/" + conversationId + "/messages/" + messageId)
+                .header("Authorization", "Bearer " + key).build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    /**
+     * GET .../messages/{message_id} on the real database (M2-13-1): what the end user said, and the answer as the send
+     * returned it, but only in its own conversation and with a key of its own application. Another conversation of the
+     * same end user, the tenant's live application, another tenant and an unknown ID all get the same 404.
+     */
+    @Test
+    void aMessageIsReadOnlyInItsOwnConversation() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String testKey = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "internal")).key();
+        String liveKey = provisioning.createKey(tenant, provisioning.createApplication(tenant, "live", "internal")).key();
+        String stranger = provisioning.createTenant("jp1", null);
+        String strangerKey = provisioning.createKey(stranger, provisioning.createApplication(stranger, "test", "internal")).key();
+        String id = JSON.readValue(startConversation(testKey, "read-message-1", "{\"external_user_id\":\"host-user-1\"}").body(),
+                Conversation.class).getId();
+        String other = JSON.readValue(startConversation(testKey, "read-message-2", "{\"external_user_id\":\"host-user-1\"}")
+                .body(), Conversation.class).getId();
+        HttpResponse<String> sent = sendMessage(testKey, "read-message-3", id, "{\"text\":\"[fake pieces=2 delay=1ms] Hi\"}");
+        Message answer = JSON.readValue(sent.body(), Message.class);
+        String question = TestDatabase.firstColumn(DATABASE, "SELECT message_id FROM engine.conversation_messages"
+                + " WHERE conversation_id = '" + id + "' AND role = 'user'").get(0);
+
+        HttpResponse<String> read = readMessage(testKey, id, answer.getId());
+        HttpResponse<String> asked = readMessage(testKey, id, question);
+        HttpResponse<String> unknown = readMessage(testKey, id, "msg_" + "0".repeat(26));
+
+        assertThat(read.statusCode()).isEqualTo(200);
+        assertThat(read.body()).isEqualTo(sent.body());
+        assertThat(asked.statusCode()).isEqualTo(200);
+        Message said = JSON.readValue(asked.body(), Message.class);
+        assertThat(said.getId()).isEqualTo(question);
+        assertThat(said.getConversationId()).isEqualTo(id);
+        assertThat(said.getRole()).isEqualTo("user");
+        assertThat(said.getStatus()).isEqualTo("completed");
+        assertThat(said.getText()).isEqualTo("[fake pieces=2 delay=1ms] Hi");
+        assertThat(said.getUsage()).isNull();
+        assertThat(said.getCode()).isNull();
+        assertThat(said.getCompletedAt()).isEqualTo(said.getCreatedAt());
+        assertThat(said.getCreatedAt()).isBeforeOrEqualTo(answer.getCreatedAt());
+        assertThat(unknown.statusCode()).isEqualTo(404);
+        for (HttpResponse<String> elsewhere : List.of(readMessage(testKey, other, answer.getId()),
+                readMessage(testKey, other, question), readMessage(liveKey, id, answer.getId()),
+                readMessage(strangerKey, id, answer.getId()))) {
+            assertThat(elsewhere.statusCode()).isEqualTo(404);
+            assertThat(elsewhere.body()).isEqualTo(unknown.body());
+        }
+    }
+
+    /** An answer whose writer is there reads in progress, with its delta so far, and its lease is left running. */
+    @Test
+    void anAnswerInProgressReadsWithItsTextSoFar() throws Exception {
+        Unfinished going = answerInProgress("read-going-1");
+
+        HttpResponse<String> read = readMessage(going.key(), going.conversationId(), going.answerId());
+
+        assertThat(read.statusCode()).isEqualTo(200);
+        Message body = JSON.readValue(read.body(), Message.class);
+        assertThat(body.getStatus()).isEqualTo("in_progress");
+        assertThat(body.getText()).isEqualTo("Hal");
+        assertThat(body.getUsage()).isNull();
+        assertThat(body.getCompletedAt()).isNull();
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT m.status || ' ' || (l.expires_at > now())"
+                + " FROM engine.conversation_messages m JOIN engine.conversation_answer_leases l ON l.message_id = m.message_id"
+                + " WHERE m.message_id = '" + going.answerId() + "'")).containsExactly("in_progress true");
+    }
+
+    /**
+     * Reading an answer whose writer has gone (M2-13-1, M2-11-3): the read looks at the lease, finds it has run out, and
+     * ends the answer for its writer before it reads it, with error and stream_interrupted. A second read finds it so.
+     */
+    @Test
+    void aReadEndsTheAnswerOfAWriterThatHasGone() throws Exception {
+        Unfinished gone = answerOfAWriterThatHasGone("gone-3");
+
+        HttpResponse<String> read = readMessage(gone.key(), gone.conversationId(), gone.answerId());
+        HttpResponse<String> again = readMessage(gone.key(), gone.conversationId(), gone.answerId());
+
+        assertThat(read.statusCode()).isEqualTo(200);
+        Message body = JSON.readValue(read.body(), Message.class);
+        assertThat(body.getId()).isEqualTo(gone.answerId());
+        assertThat(body.getStatus()).isEqualTo("failed");
+        assertThat(body.getCode()).isEqualTo("stream_interrupted");
+        assertThat(body.getText()).isEqualTo("Hal");
+        assertThat(body.getUsage()).isNull();
+        assertThat(body.getCompletedAt()).isNotNull();
+        assertThat(again.body()).isEqualTo(read.body());
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT type FROM engine.conversation_events WHERE message_id = '"
+                + gone.answerId() + "' ORDER BY seq")).containsExactly("message.started", "message.delta", "error");
+    }
+
+    /** A browser's token reads its own end user's messages on the real database, and another end user's are missing. */
+    @Test
+    void aTokenReadsOnlyItsOwnEndUsersMessages() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String key = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "internal")).key();
+        String alice = sessionToken(key, "{\"external_user_id\":\"alice\"}");
+        String bob = sessionToken(key, "{\"external_user_id\":\"bob\"}");
+        String id = JSON.readValue(startConversation(alice, "read-token-1", "{}").body(), Conversation.class).getId();
+        HttpResponse<String> sent = sendMessage(alice, "read-token-2", id, "{\"text\":\"[fake pieces=2 delay=1ms] Hi\"}");
+        String answer = JSON.readValue(sent.body(), Message.class).getId();
+
+        HttpResponse<String> own = readMessage(alice, id, answer);
+        HttpResponse<String> host = readMessage(key, id, answer);
+        HttpResponse<String> other = readMessage(bob, id, answer);
+        HttpResponse<String> unknown = readMessage(bob, "conv_" + "0".repeat(26), answer);
+
+        assertThat(own.statusCode()).isEqualTo(200);
+        assertThat(own.body()).isEqualTo(sent.body());
+        assertThat(host.body()).isEqualTo(sent.body());
+        assertThat(other.statusCode()).isEqualTo(404);
+        assertThat(other.body()).isEqualTo(unknown.body());
     }
 
     /** A streamed message with an Idempotency-Key, to the api on this port. */

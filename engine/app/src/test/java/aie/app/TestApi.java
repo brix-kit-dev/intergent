@@ -267,6 +267,8 @@ final class TestApi {
         volatile Cancelling cancelling = Cancelling.AT_ONCE;
         /** The answers a cancel was asked for, each once. */
         final Set<String> requested = ConcurrentHashMap.newKeySet();
+        /** Answers whose writers have gone, as when their instance died, so their leases have run out. */
+        final Set<String> gone = ConcurrentHashMap.newKeySet();
         private final AtomicInteger made = new AtomicInteger();
 
         @Override
@@ -297,6 +299,15 @@ final class TestApi {
             log.add(event(answer, log.size() + 1, Messages.EventType.MESSAGE_CANCELLED, answer.text(), usage, null));
             answers.put(answer.messageId(), new Messages.Message(answer.messageId(), answer.conversationId(),
                     Messages.Role.ASSISTANT, Messages.Status.CANCELLED, answer.text(), usage, null, ASKED_AT, ENDED_AT));
+        }
+
+        /** An error with stream_interrupted into the log, as a reader writes it for a writer that has gone; then the answer. */
+        private void interrupted(Messages.Message answer) {
+            List<Messages.Event> log = events.get(answer.messageId());
+            Messages.ErrorCode code = Messages.ErrorCode.STREAM_INTERRUPTED;
+            log.add(event(answer, log.size() + 1, Messages.EventType.ERROR, null, null, code));
+            answers.put(answer.messageId(), new Messages.Message(answer.messageId(), answer.conversationId(),
+                    Messages.Role.ASSISTANT, Messages.Status.FAILED, answer.text(), null, code, ASKED_AT, ENDED_AT));
         }
 
         @Override
@@ -355,13 +366,15 @@ final class TestApi {
     /**
      * Finds the answers StandInAnswers made, their questions and their events, each only in its own conversation. The
      * web layer needs nothing else yet. A test can make it fail after some reads of the log, as a database that goes
-     * away mid-stream, and count the reads.
+     * away mid-stream, and count the reads, and the looks at a writer's lease.
      */
     static final class StandInMessages implements Messages {
 
         private final StandInAnswers answers;
         /** Reads of the log that still work; below 0, all of them do. */
         final AtomicInteger readsLeft = new AtomicInteger(-1);
+        /** The messages whose writer's lease a reader looked at, once for each look. */
+        final List<String> leaseLooks = new CopyOnWriteArrayList<>();
         /** The reads of each message's log so far, kept apart so that one test's stream cannot add to another's. */
         private final Map<String, AtomicInteger> reads = new ConcurrentHashMap<>();
 
@@ -426,14 +439,25 @@ final class TestApi {
             throw notNeeded();
         }
 
-        /** The stand-in's writers never go away, so a lease never runs out: an answer in progress goes on. */
+        /**
+         * A writer stays unless the test says it has gone, and so does its lease: an answer in progress goes on. The answer
+         * of a writer that has gone is ended for it, with error and stream_interrupted.
+         */
         @Override
         public Expiry endIfExpired(Owner caller, String conversationId, String messageId) {
+            leaseLooks.add(messageId);
             Message answer = answers.answers.get(messageId);
             if (answer == null || !answer.conversationId().equals(conversationId)) {
                 return new Expiry.NotFound();
             }
-            return answer.status() == Status.IN_PROGRESS ? new Expiry.Running() : new Expiry.AlreadyEnded(answer.status());
+            if (answer.status() != Status.IN_PROGRESS) {
+                return new Expiry.AlreadyEnded(answer.status());
+            }
+            if (!answers.gone.contains(messageId)) {
+                return new Expiry.Running();
+            }
+            answers.interrupted(answer);
+            return new Expiry.Ended(EventType.ERROR);
         }
 
         @Override

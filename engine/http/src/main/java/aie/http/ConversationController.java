@@ -46,9 +46,10 @@ import org.springframework.web.server.ResponseStatusException;
 /**
  * The conversation operations of the contract, and the stream of an answer's events. The generated interfaces have no
  * defaults, so every operation has to be here. Starting and reading a conversation work, and so do sending a message,
- * with or without streaming, resuming an answer's stream and cancelling an answer; reading messages answers 404, as its
- * paths did before this controller, until its point of M2 comes. A browser's session token reaches only its own end
- * user's conversations, whichever operation it calls (M2-12-2, M2-12-3), so another end user's reads as missing.
+ * with or without streaming, reading one, resuming an answer's stream and cancelling an answer; reading the history
+ * answers 404, as its path did before this controller, until its point of M2 comes. A browser's session token reaches
+ * only its own end user's conversations, whichever operation it calls (M2-12-2, M2-12-3), so another end user's reads as
+ * missing.
  */
 @RestController
 class ConversationController implements ConversationsApi, StreamsApi {
@@ -179,10 +180,27 @@ class ConversationController implements ConversationsApi, StreamsApi {
         };
     }
 
+    /**
+     * A message of a conversation (M2-13-1): what the end user said, or an answer as it is now. An answer still being
+     * written comes in progress, with its text so far. Its writer may have gone, as when its instance died, so a reader
+     * looks at the writer's lease, and once the lease has run out it ends the answer for the writer first (M2-11-3), and
+     * reads it as it ended. Only an answer in progress has a lease to look at, so any other message takes one read.
+     *
+     * <p>Everything is checked before anything is read. A message of another conversation is as missing as an unknown
+     * one, one of another application and one of another tenant; so is, for a browser, one in another end user's
+     * conversation (M2-12-3).
+     */
     @Override
     public ResponseEntity<Message> getMessage(String conversationId, String messageId, @Nullable String engineVersion,
             @Nullable String traceparent, @Nullable String onBehalfOf) {
-        throw notYet();
+        takesJson(accepted(), "The message comes as application/json");
+        String conversation = conversationId(conversationId);
+        String id = messageId(messageId);
+        Owner caller = caller();
+        requireReachable(caller, conversation);
+        Messages.Message found = messages.find(caller, conversation, id)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
+        return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(message(current(caller, found)));
     }
 
     @Override
@@ -424,10 +442,24 @@ class ConversationController implements ConversationsApi, StreamsApi {
         }
     }
 
-    /** A message the database has just said is there, as cancelling it found it. */
+    /** A message the database has just said is there, as cancelling or reading it found it. */
     private Messages.Message found(Owner caller, String conversationId, String messageId) {
         return messages.find(caller, conversationId, messageId).orElseThrow(() -> new IllegalStateException(
-                "Answer " + messageId + " was there for its cancel, yet it cannot be found"));
+                "Message " + messageId + " was there a moment ago, yet it cannot be found"));
+    }
+
+    /**
+     * The message as a reader should see it. An answer in progress whose writer's lease has run out is ended for the
+     * writer, and read again as it ended (M2-11-3). One that ended between the two looks comes back as it was found, as a
+     * read a moment earlier would have.
+     */
+    private Messages.Message current(Owner caller, Messages.Message message) {
+        if (message.status() != Messages.Status.IN_PROGRESS) {
+            return message;
+        }
+        return messages.endIfExpired(caller, message.conversationId(), message.messageId()) instanceof Messages.Expiry.Ended
+                ? found(caller, message.conversationId(), message.messageId())
+                : message;
     }
 
     private static Message message(Messages.Message message) {
