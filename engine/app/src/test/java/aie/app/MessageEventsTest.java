@@ -310,13 +310,13 @@ class MessageEventsTest {
         await().during(Duration.ofSeconds(1)).atMost(Duration.ofSeconds(5)).until(() -> log().reads(answer) == 0);
     }
 
-    /** Browser tokens come in M2-12. */
+    /** Browser tokens come in M2-12-3. Until then a valid session token is forbidden here. */
     @Test
     void aSessionTokenIsNotTakenYet() throws Exception {
         String answer = ask(Outcome.COMPLETED).answer().messageId();
         String token = TestApi.SESSION_TOKENS.issue(new SessionTokens.Session(
                 "ten_test", "app_test", "eu_1", IdentityLevel.VERIFIED, List.of(), Map.of(), null)).token();
 
-        problem(events(answer, "Authorization", "Bearer " + token), 401, "unauthorized");
+        problem(events(answer, "Authorization", "Bearer " + token), 403, "forbidden");
     }
 }

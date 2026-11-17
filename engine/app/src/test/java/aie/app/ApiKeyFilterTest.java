@@ -14,6 +14,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -37,10 +38,14 @@ class ApiKeyFilterTest {
     private static final String PATH = "/v1/nothing-here";
     private static final String NO_KEY = "Send an API key as Authorization: Bearer";
     private static final String BAD_KEY = "The API key is not valid";
+    private static final String BAD_CREDENTIAL = "The API key or session token is not valid";
+    private static final String SERVER_KEY_NEEDED = "This operation takes a server key, not a session token";
+    private static final String NOT_ON_BEHALF = "A session token acts only for its own tenant, so On-Behalf-Of takes a server key";
     /** Well formed and unknown to the stand-in. */
     private static final String UNKNOWN_KEY = "aie_test_dev_" + "9876543210".repeat(4);
 
     private static volatile boolean lookupFails;
+    private static final AtomicInteger LOOKUPS = new AtomicInteger();
     private static ConfigurableApplicationContext context;
     private static int port;
 
@@ -51,6 +56,7 @@ class ApiKeyFilterTest {
     @BeforeAll
     static void start() {
         context = TestApi.start(key -> {
+            LOOKUPS.incrementAndGet();
             if (lookupFails) {
                 throw new DatabaseException("The transaction failed", null);
             }
@@ -91,16 +97,42 @@ class ApiKeyFilterTest {
     }
 
     private static void assertBadKey(HttpResponse<String> response) {
-        assertThat(problem(response, 401, "unauthorized").getDetail()).isEqualTo(BAD_KEY);
+        assertBadCredential(response, BAD_KEY);
+    }
+
+    private static void assertBadCredential(HttpResponse<String> response, String detail) {
+        assertThat(problem(response, 401, "unauthorized").getDetail()).isEqualTo(detail);
         assertThat(response.headers().allValues("WWW-Authenticate")).containsExactly("Bearer error=\"invalid_token\"");
     }
 
+    /** RFC 6750 3.1: a valid token that may not make the request gets 403 and says so in the challenge. */
+    private static void assertForbiddenToken(HttpResponse<String> response, String detail) {
+        assertThat(problem(response, 403, "forbidden").getDetail()).isEqualTo(detail);
+        assertThat(response.headers().allValues("WWW-Authenticate")).containsExactly("Bearer error=\"insufficient_scope\"");
+    }
+
+    /** Each starts with aie_, as every API key does, so each is looked up as a key. */
     static List<String> badKeys() {
         return List.of(
                 "Bearer " + UNKNOWN_KEY,
                 "Bearer " + TestApi.KEY + "0",
-                "Bearer " + TestApi.KEY.toUpperCase(Locale.ROOT),
                 "Bearer " + TestApi.KEY + " " + TestApi.KEY,
+                "Bearer aie_",
+                "Bearer aie_not-a-key");
+    }
+
+    /** None starts with aie_, so each is checked as a session token, and none is a valid one. */
+    static List<String> badTokens() {
+        String token = TestApi.sessionToken("eu_1");
+        int signature = token.lastIndexOf('.') + 1;
+        char flipped = token.charAt(signature) == 'A' ? 'B' : 'A';
+        return List.of(
+                "Bearer " + TestApi.expiredSessionToken(),
+                "Bearer " + TestApi.foreignSessionToken(),
+                "Bearer " + token.substring(0, signature) + flipped + token.substring(signature + 1),
+                "Bearer " + token.substring(0, signature),
+                "Bearer " + token + "x",
+                "Bearer " + TestApi.KEY.toUpperCase(Locale.ROOT),
                 "Bearer not-a-key",
                 "Bearer");
     }
@@ -125,6 +157,46 @@ class ApiKeyFilterTest {
     @MethodSource("badKeys")
     void aKeyThatIsNotKnownIsUnauthorized(String authorization) throws Exception {
         assertBadKey(send(request(PATH).header("Authorization", authorization)));
+    }
+
+    /** Expired, signed with another key, changed, cut short, or no token at all: every failure looks the same. */
+    @ParameterizedTest
+    @MethodSource("badTokens")
+    void aTokenThatIsNotValidIsUnauthorized(String authorization) throws Exception {
+        assertBadCredential(send(request(PATH).header("Authorization", authorization)), BAD_CREDENTIAL);
+    }
+
+    /** No operation takes a session token yet (M2-12-1), so a valid one is forbidden, also where a key would pass. */
+    @ParameterizedTest
+    @ValueSource(strings = {PATH, "/v1/test/caller", "/v1/conversations", "/v1/sessions", "/v1"})
+    void aValidSessionTokenIsForbidden(String path) throws Exception {
+        assertForbiddenToken(send(request(path).header("Authorization", "Bearer " + TestApi.sessionToken("eu_1"))),
+                SERVER_KEY_NEEDED);
+    }
+
+    /** A token is checked by its signature alone (blueprint 7.6), so no token reaches the key lookup. */
+    @Test
+    void aTokenIsCheckedWithoutTheKeyLookup() throws Exception {
+        int before = LOOKUPS.get();
+
+        send(request(PATH).header("Authorization", "Bearer " + TestApi.sessionToken("eu_1")));
+        send(request(PATH).header("Authorization", "Bearer " + TestApi.foreignSessionToken()));
+
+        assertThat(LOOKUPS.get()).isEqualTo(before);
+    }
+
+    /** A token names its own tenant, and the contract keeps On-Behalf-Of for server keys, whatever its value. */
+    @ParameterizedTest
+    @ValueSource(strings = {"ten_lower", "ten_other", "app_lower", ""})
+    void aSessionTokenWithOnBehalfOfIsForbidden(String tenant) throws Exception {
+        assertForbiddenToken(send(request("/v1/test/caller").header("Authorization", "Bearer " + TestApi.sessionToken("eu_1"))
+                .header("On-Behalf-Of", tenant)), NOT_ON_BEHALF);
+    }
+
+    @Test
+    void aTokenIsCheckedBeforeOnBehalfOf() throws Exception {
+        assertBadCredential(send(request(PATH).header("Authorization", "Bearer " + TestApi.expiredSessionToken())
+                .header("On-Behalf-Of", "ten_lower")), BAD_CREDENTIAL);
     }
 
     /** RFC 9110 11.1: the scheme ignores case, and spaces may separate it from the key. */
@@ -267,5 +339,19 @@ class ApiKeyFilterTest {
                 .contains("The request failed")
                 .doesNotContain(TestApi.KEY)
                 .doesNotContain(UNKNOWN_KEY);
+    }
+
+    /** A token carries who the end user is, so neither a valid one nor a refused one reaches the logs. */
+    @Test
+    void noTokenReachesTheLogs(CapturedOutput output) throws Exception {
+        String valid = TestApi.sessionToken("eu_1");
+        String expired = TestApi.expiredSessionToken();
+
+        send(request(PATH).header("Authorization", "Bearer " + valid));
+        send(request(PATH).header("Authorization", "Bearer " + valid).header("On-Behalf-Of", "ten_lower"));
+        send(request(PATH).header("Authorization", "Bearer " + expired));
+
+        assertThat(output.toString()).doesNotContain(valid).doesNotContain(expired)
+                .doesNotContain(valid.substring(valid.indexOf('.') + 1, valid.lastIndexOf('.')));
     }
 }

@@ -348,13 +348,13 @@ class MessageControllerTest {
         assertThat(ANSWERS.calls).containsExactly("ten_lower/app_lowertest asks in conv_1: Hi");
     }
 
-    /** Browser tokens come in M2-12. */
+    /** Browser tokens come in M2-12-3. Until then a valid session token is forbidden here, and nothing is asked. */
     @Test
     void aSessionTokenIsNotTakenYet() throws Exception {
         String token = TestApi.SESSION_TOKENS.issue(new SessionTokens.Session(
                 "ten_test", "app_test", "eu_1", IdentityLevel.VERIFIED, List.of(), Map.of(), null)).token();
 
-        problem(send("{\"text\":\"Hi\"}", "Authorization", "Bearer " + token), 401, "unauthorized");
+        problem(send("{\"text\":\"Hi\"}", "Authorization", "Bearer " + token), 403, "forbidden");
         assertThat(ANSWERS.calls).isEmpty();
     }
 

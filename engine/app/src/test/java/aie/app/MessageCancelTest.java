@@ -260,14 +260,14 @@ class MessageCancelTest {
         assertThat(message(cancel(answer, "Accept", "*/*")).getStatus()).isEqualTo("cancelled");
     }
 
-    /** Browser tokens come in M2-12. */
+    /** Browser tokens come in M2-12-3. Until then a valid session token is forbidden here, and nothing is cancelled. */
     @Test
     void aSessionTokenIsNotTakenYet() throws Exception {
         String answer = going();
         String token = TestApi.SESSION_TOKENS.issue(new SessionTokens.Session(
                 "ten_test", "app_test", "eu_1", IdentityLevel.VERIFIED, List.of(), Map.of(), null)).token();
 
-        problem(cancel(answer, "Authorization", "Bearer " + token), 401, "unauthorized");
+        problem(cancel(answer, "Authorization", "Bearer " + token), 403, "forbidden");
 
         assertThat(cancels()).isEmpty();
     }

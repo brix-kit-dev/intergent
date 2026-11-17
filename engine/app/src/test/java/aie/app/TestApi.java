@@ -19,6 +19,7 @@ import aie.modules.conversation.api.Messages;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
@@ -472,5 +473,26 @@ final class TestApi {
 
     static byte[] sessionKey(int seed) {
         return sessionKey(seed, 32);
+    }
+
+    /** A valid token for an end user of {@link #OWNER}'s application, as the api issues it. */
+    static String sessionToken(String endUserId) {
+        return SESSION_TOKENS.issue(session(endUserId)).token();
+    }
+
+    /** A token the api signed for {@link #OWNER}'s application that ran out a minute ago. */
+    static String expiredSessionToken() {
+        Clock issuedThen = Clock.fixed(Instant.now().minus(SessionTokens.LIFETIME).minusSeconds(60), ZoneOffset.UTC);
+        return new SignedSessionTokens(issuedThen, SESSION_KEY, List.of()).issue(session("eu_1")).token();
+    }
+
+    /** A token for {@link #OWNER}'s application, signed with a key this api does not know. */
+    static String foreignSessionToken() {
+        return new SignedSessionTokens(Clock.systemUTC(), sessionKey(8), List.of()).issue(session("eu_1")).token();
+    }
+
+    private static SessionTokens.Session session(String endUserId) {
+        return new SessionTokens.Session(OWNER.tenantId(), OWNER.applicationId(), endUserId,
+                SessionTokens.IdentityLevel.VERIFIED, List.of(), Map.of(), null);
     }
 }

@@ -199,14 +199,14 @@ class ConversationControllerTest {
         assertNothingMade();
     }
 
-    /** Browser tokens come in M2-12. Until then a session token is just not an API key. */
+    /** Browser tokens come in M2-12-2. Until then a valid session token is forbidden here, and nothing is made. */
     @Test
     void aSessionTokenIsNotTakenYet() throws Exception {
         String token = TestApi.SESSION_TOKENS.issue(new SessionTokens.Session(
                 "ten_test", "app_test", "eu_1", IdentityLevel.VERIFIED, List.of(), Map.of(), null)).token();
 
         assertProblem(send(request("/v1/conversations").header("Authorization", "Bearer " + token)
-                .header("Content-Type", "application/json").POST(BodyPublishers.ofString("{}"))), 401, "unauthorized");
+                .header("Content-Type", "application/json").POST(BodyPublishers.ofString("{}"))), 403, "forbidden");
         assertNothingMade();
     }
 
@@ -334,13 +334,13 @@ class ConversationControllerTest {
         assertThat(CONVERSATIONS.calls).isEmpty();
     }
 
-    /** Browser tokens come in M2-12. Until then a session token cannot read a conversation either. */
+    /** Browser tokens come in M2-12-2. Until then a session token cannot read a conversation either. */
     @Test
     void aSessionTokenCannotReadYet() throws Exception {
         String token = TestApi.SESSION_TOKENS.issue(new SessionTokens.Session(
                 "ten_test", "app_test", "eu_1", IdentityLevel.VERIFIED, List.of(), Map.of(), null)).token();
 
-        assertProblem(send(request("/v1/conversations/conv_nothing").header("Authorization", "Bearer " + token)), 401, "unauthorized");
+        assertProblem(send(request("/v1/conversations/conv_nothing").header("Authorization", "Bearer " + token)), 403, "forbidden");
         assertThat(CONVERSATIONS.calls).isEmpty();
     }
 
