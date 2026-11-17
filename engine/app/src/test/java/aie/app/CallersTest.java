@@ -13,6 +13,7 @@ import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -38,8 +39,10 @@ import tools.jackson.databind.json.JsonMapper;
  * This reads every operation from the contract and calls it on the real web stack with session tokens, so an operation
  * added to the contract is checked here without a change to this test. Every browser operation takes a valid token, and
  * every one that names a conversation finds another end user's as missing (blueprint 6.3), so an operation added later,
- * such as reading messages in M2-13, must keep a browser in its own conversations or fail here. The anonymous session
- * takes no credential, so its site key check is SiteKeyFilter's, and it is not called here.
+ * such as reading messages in M2-13, must keep a browser in its own conversations or fail here. A browser's operation
+ * answers its CORS preflight, and a page may read its answers to a token and to failed credentials, not to a server key
+ * (M2-12-4); a server's operation answers no preflight. The anonymous session takes no credential, so its site key check
+ * is SiteKeyFilter's, and it is not called here.
  */
 class CallersTest {
 
@@ -49,6 +52,8 @@ class CallersTest {
     /** A well-formed value for each path parameter of the contract. */
     private static final Map<String, String> PATH_VALUES = Map.of("conversation_id", "conv_1", "message_id", "msg_1", "key_id", "key_1");
     private static final Pattern PATH_PARAMETER = Pattern.compile("\\{([^}]+)}");
+    /** An origin a page on a host's site may have. */
+    private static final String PAGE = "https://shop.example.com";
     /** A body each operation takes, so that its checks pass; any other gets an empty object. */
     private static final Map<String, String> BODIES = Map.of("createMessage", "{\"text\":\"Hi\"}");
 
@@ -138,9 +143,39 @@ class CallersTest {
         return call(operation, authorization, Map.of());
     }
 
-    /** The same, with these values for some of the path's parameters. */
+    /** The same, from a page of this origin, as a browser sends it. */
+    private static HttpResponse<String> fromPage(Operation operation, String authorization, String origin) throws Exception {
+        return call(operation, authorization, Map.of("origin", origin));
+    }
+
+    /** The operation's CORS preflight from the page, asking for its method. */
+    private static HttpResponse<String> preflight(Operation operation) throws Exception {
+        return HttpClient.newHttpClient().send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path(operation, Map.of())))
+                .header("Origin", PAGE).header("Access-Control-Request-Method", operation.method())
+                .method("OPTIONS", BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    /** The same, with these values for some of the path's parameters, and an Origin when the values name one. */
     private static HttpResponse<String> call(Operation operation, String authorization, Map<String, String> values)
             throws Exception {
+        HttpRequest.Builder request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path(operation, values)));
+        if (authorization != null) {
+            request.header("Authorization", authorization);
+        }
+        if (values.containsKey("origin")) {
+            request.header("Origin", values.get("origin"));
+        }
+        if (Set.of("POST", "PUT", "PATCH").contains(operation.method())) {
+            request.header("Content-Type", "application/json").method(operation.method(),
+                    BodyPublishers.ofString(BODIES.getOrDefault(operation.operationId(), "{}")));
+        } else {
+            request.method(operation.method(), BodyPublishers.noBody());
+        }
+        return HttpClient.newHttpClient().send(request.build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    /** The operation's path with these values for its parameters, or a well-formed one for each other. */
+    private static String path(Operation operation, Map<String, String> values) {
         Matcher parameter = PATH_PARAMETER.matcher(operation.path());
         StringBuilder path = new StringBuilder();
         while (parameter.find()) {
@@ -151,15 +186,20 @@ class CallersTest {
             parameter.appendReplacement(path, value);
         }
         parameter.appendTail(path);
-        HttpRequest.Builder request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
-                .header("Authorization", authorization);
-        if (Set.of("POST", "PUT", "PATCH").contains(operation.method())) {
-            request.header("Content-Type", "application/json").method(operation.method(),
-                    BodyPublishers.ofString(BODIES.getOrDefault(operation.operationId(), "{}")));
-        } else {
-            request.method(operation.method(), BodyPublishers.noBody());
-        }
-        return HttpClient.newHttpClient().send(request.build(), HttpResponse.BodyHandlers.ofString());
+        return path.toString();
+    }
+
+    /** What lets the page read an answer (M2-12-4): its own origin back, the headers it may read, and Vary. */
+    private static void assertForThePage(HttpResponse<String> response) {
+        assertThat(response.headers().allValues("Access-Control-Allow-Origin")).containsExactly(PAGE);
+        assertThat(response.headers().allValues("Access-Control-Expose-Headers")).containsExactly("Request-Id, Retry-After");
+        assertThat(response.headers().allValues("Vary")).contains("Origin");
+        assertThat(response.headers().allValues("Access-Control-Allow-Credentials")).isEmpty();
+    }
+
+    private static void assertNotForAPage(HttpResponse<String> response) {
+        assertThat(response.headers().allValues("Access-Control-Allow-Origin")).isEmpty();
+        assertThat(response.headers().allValues("Access-Control-Expose-Headers")).isEmpty();
     }
 
     private static Problem problem(HttpResponse<String> response, int status, String code) {
@@ -228,6 +268,71 @@ class CallersTest {
     void everyOperationRefusesAnExpiredToken(Operation operation) throws Exception {
         assertThat(problem(call(operation, "Bearer " + TestApi.expiredSessionToken()), 401, "unauthorized").getDetail())
                 .isEqualTo("The API key or session token is not valid");
+    }
+
+    /** M2-12-4: every browser operation answers its preflight from any page, for its own method and the token. */
+    @ParameterizedTest
+    @MethodSource("browserOperations")
+    void everyBrowserOperationAnswersItsPreflight(Operation operation) throws Exception {
+        HttpResponse<String> answer = preflight(operation);
+
+        assertThat(answer.statusCode()).isEqualTo(204);
+        assertThat(answer.headers().firstValue("Access-Control-Allow-Origin")).contains(PAGE);
+        assertThat(answer.headers().firstValue("Access-Control-Allow-Methods").orElseThrow().split(", ")).contains(operation.method());
+        assertThat(answer.headers().firstValue("Access-Control-Allow-Headers").orElseThrow()).startsWith("Authorization, ");
+    }
+
+    /** A server's operation is never called from a page, so it answers no preflight: the key check refuses it. */
+    @ParameterizedTest
+    @MethodSource("serverOperations")
+    void noServerOperationAnswersAPreflight(Operation operation) throws Exception {
+        HttpResponse<String> answer = preflight(operation);
+
+        assertThat(answer.statusCode()).isEqualTo(401);
+        assertNotForAPage(answer);
+    }
+
+    /** The page reads every answer to its token, whatever the operation then answers. */
+    @ParameterizedTest
+    @MethodSource("browserOperations")
+    void aPageReadsTheAnswerToItsToken(Operation operation) throws Exception {
+        assertForThePage(fromPage(operation, "Bearer " + TestApi.sessionToken("eu_1"), PAGE));
+    }
+
+    /** An expired token, none, or a bad key: the page reads why, and so learns to fetch a new token. */
+    @ParameterizedTest
+    @MethodSource("browserOperations")
+    void aPageReadsWhyItsCredentialFailed(Operation operation) throws Exception {
+        for (String authorization : Arrays.asList("Bearer " + TestApi.expiredSessionToken(), null,
+                "Bearer aie_test_dev_" + "9876543210".repeat(4))) {
+            HttpResponse<String> response = fromPage(operation, authorization, PAGE);
+            assertThat(response.statusCode()).isEqualTo(401);
+            assertForThePage(response);
+        }
+    }
+
+    /** M2-12 decision 3: an answer to a server key is not for a page, so a key put in a page fails there at once (S-5). */
+    @ParameterizedTest
+    @MethodSource("browserOperations")
+    void aServerKeysAnswerIsNotForAPage(Operation operation) throws Exception {
+        assertNotForAPage(fromPage(operation, TestApi.AUTHORIZATION, PAGE));
+    }
+
+    /** No page has an origin such as this, so none may read the answer; the request itself is the token's to make. */
+    @ParameterizedTest
+    @MethodSource("browserOperations")
+    void anOriginNoPageCouldHaveReadsNothing(Operation operation) throws Exception {
+        assertNotForAPage(fromPage(operation, "Bearer " + TestApi.sessionToken("eu_1"), "http://shop.example.com"));
+    }
+
+    /** A server's operation refuses a token without letting any page read why. */
+    @ParameterizedTest
+    @MethodSource("serverOperations")
+    void aServerOperationsRefusalIsNotForAPage(Operation operation) throws Exception {
+        HttpResponse<String> response = fromPage(operation, "Bearer " + TestApi.sessionToken("eu_1"), PAGE);
+
+        assertThat(response.statusCode()).isEqualTo(403);
+        assertNotForAPage(response);
     }
 
     /** The token is refused before the operation runs, so nothing is made, looked up, asked or cancelled. */

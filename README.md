@@ -556,11 +556,20 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 - **响应不返回：** 响应只带 `Request-Id`。
 - **传给外部调用：** 现在引擎还没有外部调用，等 M3 接 OpenTelemetry 时做。
 
-**跨域预检：** 浏览器从宿主的网页调用引擎时，要先发 `OPTIONS` 预检请求，问能不能跨域。现在只有 `/v1/anonymous-sessions` 回答预检，因为浏览器在还没有令牌时只调用这一个接口。其他浏览器接口的规则到 M2 再定，它们的预检和普通请求一样要密钥，得到 401。
+**跨域预检：** 浏览器从宿主的网页调用引擎时，要先发 `OPTIONS` 预检请求，问能不能跨域。回答预检的有两类：`/v1/anonymous-sessions`，浏览器还没有令牌时只调它；以及收会话令牌的浏览器接口（M2-12-4）。只给服务端的接口不回答预检，因为服务端不发预检：这样的请求和普通请求一样要密钥，得到 401。
 
-- **放行：** 来源只要是站点键可能列出的那种，就回 204，并带上 `Access-Control-Allow-Origin`（原样返回请求的来源）、`Access-Control-Allow-Methods: POST`、`Access-Control-Allow-Headers: Content-Type, Idempotency-Key, Engine-Version, traceparent`，缓存 600 秒。预检请求没有正文，看不到站点键，所以这一步对哪个网站都放行；真正的 POST 只对它那把站点键列出的来源放行，见下面的“换匿名令牌”。
-- **拒绝：** 来源不合格（比如 `null`、http 的正式域名、带路径），或者问的不是 POST，回 403 `forbidden`，不带跨域头。
+- **换匿名令牌：** 来源只要是站点键可能列出的那种，就回 204，并带上 `Access-Control-Allow-Origin`（原样返回请求的来源）、`Access-Control-Allow-Methods: POST`、`Access-Control-Allow-Headers: Content-Type, Idempotency-Key, Engine-Version, traceparent`，缓存 600 秒。预检请求没有正文，看不到站点键，所以这一步对哪个网站都放行；真正的 POST 只对它那把站点键列出的来源放行，见下面的“换匿名令牌”。
+- **浏览器接口：** 来源格式正确就放行（M2 总切分第 8 项：https；本机开发允许 http 的 localhost 和 127.0.0.1），问的方法要是这个路径的接口收的。回 204，带上原样返回的来源、这个路径的方法（比如会话的消息路径是 `GET, POST`）、`Access-Control-Allow-Headers: Authorization, Content-Type, Idempotency-Key, Engine-Version, traceparent, Last-Event-ID`，缓存 600 秒。问 `HEAD` 当作问 `GET`。这些接口靠请求头里的令牌认证，按来源名单放行保护不了令牌，反而会挡住宿主的新网站，所以不设名单。
+- **拒绝：** 来源不合格（比如 `null`、http 的正式域名、带路径），或者问的方法这个路径不收（比如换匿名令牌问的不是 POST），回 403 `forbidden`，不带跨域头。
 - **顺序：** 预检排在认证前面，因为预检请求不带凭证。过滤器的顺序是：`Request-Id`、`traceparent`、预检、认证、版本、幂等。
+
+**网页读得到的回答（M2-12-4）：** 浏览器接口上，来源格式正确的请求，回答带 `Access-Control-Allow-Origin`（原样返回来源）、`Vary: Origin` 和 `Access-Control-Expose-Headers: Request-Id, Retry-After`，网页才读得到回答，以及这两个响应头。
+
+- **哪些回答带：** 带会话令牌的请求，和凭证出了问题的请求（没带、令牌过期、密钥不对、带了两个 `Authorization`），不管成功还是失败。比如令牌过期的 401，组件读到了，才知道该换新令牌。这些头在认证时就写上，所以之后才出的错（版本不对、幂等冲突、会话不是自己的 404）和流式回答也都带着。
+- **服务端密钥的回答不带（M2-12 第 3 项）：** 宿主误把服务端密钥放进网页，网页读不到回答，开发时马上就会发现（`S-5`）。经宿主后端转发的请求不受影响，因为跨域头只对浏览器有用。
+- **只给服务端的接口不带：** 网页本来就调不了它们。
+- **不带 cookie：** 不发 `Access-Control-Allow-Credentials`，网页带着 cookie 的请求，浏览器会拦下。
+- **令牌只放在 `Authorization` 头（M2-12 第 4 项）：** 引擎不认网址里的令牌，因为网址会进访问日志、代理日志和浏览器历史。浏览器自带的 `EventSource` 加不了请求头，所以组件用 `fetch` 读流。
 
 **认证：** `/v1` 下的请求都要带 API 密钥，只有 `POST /v1/anonymous-sessions` 例外，它用站点键。写法是 `Authorization: Bearer aie_test_dev_...`，这是 RFC 6750 的格式。浏览器带会话令牌，写法一样，见下面的“会话令牌”。密钥用 `admin` 发放，见[开通租户](#开通租户)。认证排在版本检查前面，因为以后版本要按调用方的应用决定：
 

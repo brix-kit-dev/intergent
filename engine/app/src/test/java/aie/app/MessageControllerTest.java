@@ -376,6 +376,20 @@ class MessageControllerTest {
         assertThat(response.body()).startsWith("id: 1\nevent: message.started\n").contains("event: message.completed\n");
     }
 
+    /** M2-12-4: the page reads a streamed answer too, since the headers go out before the first event. */
+    @Test
+    void aTokensStreamIsForThePage() throws Exception {
+        String own = conversationOf("eu_browser1");
+
+        HttpResponse<String> response = sendTo(own, "{\"text\":\"Hi\"}", "Authorization", "Bearer " + TestApi.sessionToken("eu_browser1"),
+                "Accept", "text/event-stream", "Origin", "https://shop.example.com");
+
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.headers().firstValue("Access-Control-Allow-Origin")).contains("https://shop.example.com");
+        assertThat(response.headers().firstValue("Access-Control-Expose-Headers")).contains("Request-Id, Retry-After");
+        assertThat(response.body()).contains("event: message.completed\n");
+    }
+
     /** Another end user's conversation is missing to a browser, as an unknown one is, and nothing is asked. */
     @ParameterizedTest
     @ValueSource(strings = {"application/json", "text/event-stream"})

@@ -6,6 +6,7 @@ import aie.core.tenancy.api.ApiKeys;
 import aie.core.tenancy.api.LowerTenants;
 import aie.core.tenancy.api.LowerTenants.Acting;
 import aie.core.tenancy.api.SessionTokens;
+import aie.core.tenancy.api.SiteKeys;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -38,6 +39,11 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * lists, as its own tenant's application, with its end user as {@link #BROWSER}; elsewhere it is forbidden. An invalid
  * or expired one is refused like a bad key. A token is never logged either.
  *
+ * <p>On the browser's operations, a page may read the answer to a token and to a request whose credentials failed, so
+ * that it learns, for one, that its token ran out: every such answer lets the request's origin read it, when a page
+ * could have that origin. A request a server key passes gets no such header, so a key put in a page by mistake fails
+ * there at once (S-5, M2-12 decision 3); a server, which sends its key from behind the host, needs none.
+ *
  * <p>The one exception is {@code POST /v1/anonymous-sessions}, which a browser calls with a site key instead:
  * {@link SiteKeyFilter} checks it, in the same place in the chain.
  */
@@ -63,6 +69,8 @@ class ApiKeyFilter extends OncePerRequestFilter {
     private static final String SERVER_KEY_NEEDED = SCHEME + " error=\"insufficient_scope\"";
     /** Every API key starts this way (blueprint 6.2), and a session token, a signed JWT, never does. */
     private static final String KEY_PREFIX = "aie_";
+    /** What a page may read of an answer besides its body: the request's ID, and when to come back after a 429. */
+    static final String EXPOSED = "Request-Id, Retry-After";
     private static final String ON_BEHALF_OF = "On-Behalf-Of";
     /** A tenant ID; the contract allows On-Behalf-Of 64 characters. */
     private static final Pattern TENANT_ID = Pattern.compile("ten_[0-9A-Za-z]{1,60}");
@@ -87,12 +95,14 @@ class ApiKeyFilter extends OncePerRequestFilter {
             throws ServletException, IOException {
         List<String> credentials = Collections.list(request.getHeaders(HttpHeaders.AUTHORIZATION));
         if (credentials.size() > 1) {
+            allowPage(request, response);
             response.sendError(HttpServletResponse.SC_BAD_REQUEST, "Send one Authorization header");
             return;
         }
         String header = credentials.isEmpty() ? "" : credentials.getFirst().strip();
         int space = header.indexOf(' ');
         if (!(space < 0 ? header : header.substring(0, space)).equalsIgnoreCase(SCHEME)) {
+            allowPage(request, response);
             refuse(response, SCHEME, TokenOperations.take(request)
                     ? "Send an API key or a session token as Authorization: Bearer"
                     : "Send an API key as Authorization: Bearer");
@@ -105,6 +115,7 @@ class ApiKeyFilter extends OncePerRequestFilter {
         }
         Optional<Owner> owner = keys.find(token);
         if (owner.isEmpty()) {
+            allowPage(request, response);
             refuse(response, INVALID_KEY, "The API key is not valid");
             return;
         }
@@ -143,6 +154,7 @@ class ApiKeyFilter extends OncePerRequestFilter {
      */
     private void sessionToken(HttpServletRequest request, HttpServletResponse response, FilterChain chain, String token)
             throws ServletException, IOException {
+        allowPage(request, response);
         Optional<SessionTokens.Verified> verified = sessionTokens.verify(token);
         if (verified.isEmpty()) {
             refuse(response, INVALID_KEY, "The API key or session token is not valid");
@@ -160,6 +172,20 @@ class ApiKeyFilter extends OncePerRequestFilter {
         request.setAttribute(CALLER, new Owner(session.endUserId(), session.tenantId(), session.applicationId()));
         request.setAttribute(BROWSER, session);
         chain.doFilter(request, response);
+    }
+
+    /**
+     * Lets the page that sent a request to one of the browser's paths read the answer, whatever it turns out to be, when
+     * the origin is one a page could have (M2 decision 8). The headers go out before the request goes on, so a refusal
+     * further on, an error and a stream keep them. Without cookies, no credentials are allowed.
+     */
+    private static void allowPage(HttpServletRequest request, HttpServletResponse response) {
+        String origin = request.getHeader(HttpHeaders.ORIGIN);
+        if (SiteKeys.origin(origin).isPresent() && !TokenOperations.methods(request).isEmpty()) {
+            response.setHeader(HttpHeaders.ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+            response.setHeader(HttpHeaders.ACCESS_CONTROL_EXPOSE_HEADERS, EXPOSED);
+            response.setHeader(HttpHeaders.VARY, HttpHeaders.ORIGIN);
+        }
     }
 
     /** RFC 6750 3.1: a valid token that may not make this request gets 403, and the challenge says why. */

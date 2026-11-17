@@ -2,6 +2,8 @@ package aie.http;
 
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.List;
+import java.util.SortedSet;
+import java.util.TreeSet;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.server.PathContainer;
 import org.springframework.web.util.pattern.PathPattern;
@@ -37,6 +39,17 @@ final class TokenOperations {
         HttpMethod operation = HttpMethod.HEAD.equals(method) ? HttpMethod.GET : method;
         PathContainer path = PathContainer.parsePath(request.getServletPath());
         return OPERATIONS.stream().anyMatch(each -> each.method().equals(operation) && each.path().matches(path));
+    }
+
+    /**
+     * The methods the browser operations of this request's path take, in alphabetical order, such as GET and POST for a
+     * conversation's messages. None for a path no browser operation has. A CORS preflight asks for one of them.
+     */
+    static SortedSet<String> methods(HttpServletRequest request) {
+        PathContainer path = PathContainer.parsePath(request.getServletPath());
+        SortedSet<String> methods = new TreeSet<>();
+        OPERATIONS.stream().filter(each -> each.path().matches(path)).forEach(each -> methods.add(each.method().name()));
+        return methods;
     }
 
     private record Operation(HttpMethod method, PathPattern path) {

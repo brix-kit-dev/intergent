@@ -207,6 +207,35 @@ class ApiKeyFilterTest {
                 .header("On-Behalf-Of", "ten_lower")), NOT_ON_BEHALF);
     }
 
+    /**
+     * M2-12-4: on a browser's path, a page reads every refusal a token or a failed credential gets, wherever in the chain
+     * it comes: On-Behalf-Of here, two Authorization headers here too, and a bad Engine-Version further on.
+     */
+    @Test
+    void aPageReadsEveryRefusalOnABrowsersPath() throws Exception {
+        String page = "https://shop.example.com";
+        String token = "Bearer " + TestApi.sessionToken("eu_1");
+
+        HttpResponse<String> onBehalfOf = send(request("/v1/conversations/conv_nothing").header("Authorization", token)
+                .header("On-Behalf-Of", "ten_lower").header("Origin", page));
+        HttpResponse<String> version = send(request("/v1/conversations/conv_nothing").header("Authorization", token)
+                .header("Engine-Version", "2020-01-01").header("Origin", page));
+        String twice;
+        try (Socket socket = new Socket("127.0.0.1", port)) {
+            socket.setSoTimeout(5000);
+            String header = "Authorization: " + token + "\r\n";
+            socket.getOutputStream().write(("GET /v1/conversations/conv_nothing HTTP/1.1\r\nHost: x\r\nConnection: close\r\nOrigin: "
+                    + page + "\r\n" + header + header + "\r\n").getBytes(StandardCharsets.ISO_8859_1));
+            twice = new String(socket.getInputStream().readAllBytes(), StandardCharsets.ISO_8859_1);
+        }
+
+        assertForbiddenToken(onBehalfOf, NOT_ON_BEHALF);
+        assertThat(onBehalfOf.headers().firstValue("Access-Control-Allow-Origin")).contains(page);
+        problem(version, 400, "invalid_request");
+        assertThat(version.headers().firstValue("Access-Control-Allow-Origin")).contains(page);
+        assertThat(twice).startsWith("HTTP/1.1 400").containsIgnoringCase("Access-Control-Allow-Origin: " + page);
+    }
+
     /** A token is checked by its signature alone (blueprint 7.6), so no token reaches the key lookup. */
     @Test
     void aTokenIsCheckedWithoutTheKeyLookup() throws Exception {
