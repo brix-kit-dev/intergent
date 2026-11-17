@@ -479,6 +479,11 @@ final class TestApi {
         }
 
         @Override
+        public Page page(Owner caller, String conversationId, String after, int limit) {
+            throw notNeeded();
+        }
+
+        @Override
         public List<Message> historyFor(Owner caller, String conversationId, String answerId) {
             throw notNeeded();
         }

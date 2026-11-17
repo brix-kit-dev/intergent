@@ -114,6 +114,16 @@ public interface Messages {
     List<Message> list(Owner caller, String conversationId);
 
     /**
+     * A page of the conversation's messages, oldest first, as the history is read a page at a time (M2-13-2): at most
+     * {@code limit} of them, after the message with the ID {@code after}, or from the first message when {@code after} is
+     * null. The order is that of {@link #list}, the database's own number. A position is a message of this conversation:
+     * one of another conversation is none, and neither is an unknown ID.
+     *
+     * @throws IllegalArgumentException for a {@code limit} below 1
+     */
+    Page page(Owner caller, String conversationId, String after, int limit);
+
+    /**
      * What the model is shown to write an answer: the messages before the answer, oldest first. Every user message counts,
      * and so does an answer that completed or was cancelled with some text, since the end user saw that text. A failed
      * answer, one still in progress and one without text do not count. Of those that count, only the last
@@ -226,6 +236,26 @@ public interface Messages {
 
         /** No answer has this ID in this conversation of the caller's application. */
         record NotFound() implements Expiry {
+        }
+    }
+
+    /** What a read of a page found. */
+    sealed interface Page {
+
+        /** The page's messages, oldest first, and whether more come after the last of them. */
+        record Found(List<Message> messages, boolean more) implements Page {
+
+            public Found {
+                messages = List.copyOf(messages);
+            }
+        }
+
+        /** The position is no message of this conversation, so no page starts after it. */
+        record NoSuchPosition() implements Page {
+        }
+
+        /** No conversation has this ID in the caller's application. */
+        record NotFound() implements Page {
         }
     }
 

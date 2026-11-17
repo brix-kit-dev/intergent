@@ -176,6 +176,24 @@ public final class DatabaseMessages implements Messages {
             """;
     private static final String FIND = OF_THE_APPLICATION + "AND m.message_id = ?";
     private static final String LIST = OF_THE_APPLICATION + "ORDER BY m.ordinal";
+    /** The conversation, when it is one of the caller's application. */
+    private static final String CONVERSATION = """
+            SELECT conversation_id FROM conversation_conversations WHERE application_id = ? AND conversation_id = ?
+            """;
+    /** Where a message of the conversation stands: the database's own number for it. */
+    private static final String POSITION = """
+            SELECT m.ordinal
+            FROM conversation_messages m
+            JOIN conversation_conversations c ON c.tenant_id = m.tenant_id AND c.conversation_id = m.conversation_id
+            WHERE c.application_id = ? AND c.conversation_id = ? AND m.message_id = ?
+            """;
+    /**
+     * The messages after a number, in its order. The index on the conversation and the number holds them in this order,
+     * so a page of a long conversation reads its own rows and no others.
+     */
+    private static final String PAGE = OF_THE_APPLICATION + "AND m.ordinal > ? ORDER BY m.ordinal LIMIT ?";
+    /** The database numbers messages from 1, so the first message comes after this one. */
+    private static final long BEFORE_THE_FIRST = 0;
 
     private static final Logger LOG = LoggerFactory.getLogger(DatabaseMessages.class);
 
@@ -506,6 +524,33 @@ public final class DatabaseMessages implements Messages {
     public List<Message> list(Owner caller, String conversationId) {
         return database.inTenantTx(caller.tenantId(), tx -> tx.query(
                 LIST, DatabaseMessages::message, caller.applicationId(), conversationId));
+    }
+
+    /**
+     * The conversation, the position and the page, in one transaction. The page reads one message more than it holds, so
+     * that it knows whether more come without counting them.
+     */
+    @Override
+    public Page page(Owner caller, String conversationId, String after, int limit) {
+        if (limit < 1) {
+            throw new IllegalArgumentException("A page holds 1 message or more");
+        }
+        return database.inTenantTx(caller.tenantId(), tx -> {
+            if (tx.query(CONVERSATION, row -> row.string("conversation_id"), caller.applicationId(), conversationId).isEmpty()) {
+                return new Page.NotFound();
+            }
+            long from = BEFORE_THE_FIRST;
+            if (after != null) {
+                List<Long> position = tx.query(POSITION, row -> row.number("ordinal"), caller.applicationId(), conversationId, after);
+                if (position.isEmpty()) {
+                    return new Page.NoSuchPosition();
+                }
+                from = position.getFirst();
+            }
+            List<Message> read = tx.query(
+                    PAGE, DatabaseMessages::message, caller.applicationId(), conversationId, from, limit + 1L);
+            return read.size() > limit ? new Page.Found(read.subList(0, limit), true) : new Page.Found(read, false);
+        });
     }
 
     /** The database picks the last messages that count; the answers before the first user message among them go here. */
