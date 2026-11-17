@@ -269,6 +269,10 @@ final class TestApi {
         final Set<String> requested = ConcurrentHashMap.newKeySet();
         /** Answers whose writers have gone, as when their instance died, so their leases have run out. */
         final Set<String> gone = ConcurrentHashMap.newKeySet();
+        /** The IDs of the questions and answers, in the order they were made, which a page of StandInMessages follows. */
+        final List<String> order = new CopyOnWriteArrayList<>();
+        /** The conversations that have a history: each one asked in, and any a test adds, empty. */
+        final Set<String> conversations = ConcurrentHashMap.newKeySet();
         private final AtomicInteger made = new AtomicInteger();
 
         @Override
@@ -327,6 +331,9 @@ final class TestApi {
                     Messages.Status.IN_PROGRESS, "", null, null, ASKED_AT, null);
             questions.put(question.messageId(), question);
             answers.put(started.messageId(), started);
+            order.add(question.messageId());
+            order.add(started.messageId());
+            conversations.add(conversationId);
             List<Messages.Event> log = new CopyOnWriteArrayList<>();
             log.add(event(started, 1, Messages.EventType.MESSAGE_STARTED, null, null, null));
             events.put(started.messageId(), log);
@@ -375,6 +382,8 @@ final class TestApi {
         final AtomicInteger readsLeft = new AtomicInteger(-1);
         /** The messages whose writer's lease a reader looked at, once for each look. */
         final List<String> leaseLooks = new CopyOnWriteArrayList<>();
+        /** The conversations a page was read of, once for each page. */
+        final List<String> pageReads = new CopyOnWriteArrayList<>();
         /** The reads of each message's log so far, kept apart so that one test's stream cannot add to another's. */
         private final Map<String, AtomicInteger> reads = new ConcurrentHashMap<>();
 
@@ -478,9 +487,25 @@ final class TestApi {
             throw notNeeded();
         }
 
+        /** The conversation's questions and answers in the order StandInAnswers made them, as the database numbers them. */
         @Override
         public Page page(Owner caller, String conversationId, String after, int limit) {
-            throw notNeeded();
+            pageReads.add(conversationId);
+            if (!answers.conversations.contains(conversationId)) {
+                return new Page.NotFound();
+            }
+            List<Message> history = answers.order.stream()
+                    .map(id -> find(caller, conversationId, id)).flatMap(Optional::stream).toList();
+            int from = 0;
+            if (after != null) {
+                List<String> ids = history.stream().map(Message::messageId).toList();
+                if (!ids.contains(after)) {
+                    return new Page.NoSuchPosition();
+                }
+                from = ids.indexOf(after) + 1;
+            }
+            List<Message> rest = history.subList(from, history.size());
+            return rest.size() > limit ? new Page.Found(rest.subList(0, limit), true) : new Page.Found(rest, false);
         }
 
         @Override

@@ -38,18 +38,19 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.ErrorResponseException;
+import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.server.ResponseStatusException;
 
 /**
  * The conversation operations of the contract, and the stream of an answer's events. The generated interfaces have no
- * defaults, so every operation has to be here. Starting and reading a conversation work, and so do sending a message,
- * with or without streaming, reading one, resuming an answer's stream and cancelling an answer; reading the history
- * answers 404, as its path did before this controller, until its point of M2 comes. A browser's session token reaches
- * only its own end user's conversations, whichever operation it calls (M2-12-2, M2-12-3), so another end user's reads as
- * missing.
+ * defaults, so every operation has to be here: starting and reading a conversation, sending a message, with or without
+ * streaming, reading one message or the history a page at a time, resuming an answer's stream and cancelling an answer.
+ * A browser's session token reaches only its own end user's conversations, whichever operation it calls (M2-12-2,
+ * M2-12-3), so another end user's reads as missing.
  */
 @RestController
 class ConversationController implements ConversationsApi, StreamsApi {
@@ -67,6 +68,12 @@ class ConversationController implements ConversationsApi, StreamsApi {
      * keeps the numbers as an integer, so ten digits hold every one of them.
      */
     private static final Pattern EVENT_ID = Pattern.compile("[1-9][0-9]{0,9}");
+    /** The contract's Limit: a page holds 1 to 100 messages, and 20 when the caller asks for no number. */
+    private static final int MIN_PAGE = 1;
+    private static final int MAX_PAGE = 100;
+    private static final String LIMIT_RULE = "limit must be a whole number from " + MIN_PAGE + " to " + MAX_PAGE;
+    /** A cursor is the next_cursor of a page of the same conversation: the ID of its last message (M2-13 decision 1). */
+    private static final String CURSOR_RULE = "cursor must be a next_cursor of this conversation";
     /** Retry-After of a full instance: an answer takes seconds, so a slot is likely free by then. */
     static final Duration RETRY_AFTER = Duration.ofSeconds(5);
     /**
@@ -203,10 +210,43 @@ class ConversationController implements ConversationsApi, StreamsApi {
         return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(message(current(caller, found)));
     }
 
+    /**
+     * The history of a conversation (M2-13-3), a page at a time, oldest first: at most limit messages, from the first, or
+     * after the cursor. The cursor is the ID of the last message of the page before, as its next_cursor gave it (M2-13
+     * decision 1), so a client passes it back as it is, and the database's own number never leaves the engine. The last
+     * page has a next_cursor of null. Answers in progress come as getMessage reads them: one whose writer's lease has run
+     * out is ended for the writer first (M2-11-3), and then the page is read again.
+     *
+     * <p>Everything is checked before anything is read. A cursor that is no message of this conversation is refused as
+     * one written wrong is, for a client can only have it from somewhere else. A conversation of another application or
+     * tenant is missing, whatever the cursor, and so is, for a browser, one of another end user (M2-12-3).
+     */
     @Override
     public ResponseEntity<MessageList> listMessages(String conversationId, Integer limit, @Nullable String cursor,
             @Nullable String engineVersion, @Nullable String traceparent, @Nullable String onBehalfOf) {
-        throw notYet();
+        takesJson(accepted(), "The messages come as application/json");
+        String conversation = conversationId(conversationId);
+        int size = pageSize(limit);
+        String after = cursor(cursor);
+        Owner caller = caller();
+        requireReachable(caller, conversation);
+        Messages.Page.Found page = page(caller, conversation, after, size);
+        if (endExpired(caller, page.messages())) {
+            page = page(caller, conversation, after, size);
+        }
+        MessageList history = new MessageList(page.messages().stream().map(ConversationController::message).toList(),
+                page.more() ? page.messages().getLast().messageId() : null);
+        return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(history);
+    }
+
+    /**
+     * A limit that is not a whole number never reaches listMessages, since Spring cannot make it an Integer. It gets the
+     * limit's own rule, as a number out of range does, and not Spring's words. Of this controller's parameters only the
+     * limit is not text, so only it can fail so.
+     */
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    ResponseEntity<Object> notAWholeNumber(MethodArgumentTypeMismatchException mismatch) {
+        return Problems.response(HttpStatus.BAD_REQUEST.value(), LIMIT_RULE, HttpHeaders.EMPTY);
     }
 
     /**
@@ -454,12 +494,31 @@ class ConversationController implements ConversationsApi, StreamsApi {
      * read a moment earlier would have.
      */
     private Messages.Message current(Owner caller, Messages.Message message) {
-        if (message.status() != Messages.Status.IN_PROGRESS) {
-            return message;
+        return endExpired(caller, List.of(message)) ? found(caller, message.conversationId(), message.messageId()) : message;
+    }
+
+    /**
+     * Ends, for their writers, the answers in progress among these messages whose leases have run out (M2-11-3), and
+     * says whether it ended any. Only an answer in progress has a lease, so the others cost nothing.
+     */
+    private boolean endExpired(Owner caller, List<Messages.Message> read) {
+        boolean ended = false;
+        for (Messages.Message message : read) {
+            if (message.status() == Messages.Status.IN_PROGRESS && messages.endIfExpired(
+                    caller, message.conversationId(), message.messageId()) instanceof Messages.Expiry.Ended) {
+                ended = true;
+            }
         }
-        return messages.endIfExpired(caller, message.conversationId(), message.messageId()) instanceof Messages.Expiry.Ended
-                ? found(caller, message.conversationId(), message.messageId())
-                : message;
+        return ended;
+    }
+
+    /** A page of the conversation, or the refusal the caller earns: a cursor of no message here, or no conversation. */
+    private Messages.Page.Found page(Owner caller, String conversationId, @Nullable String after, int size) {
+        return switch (messages.page(caller, conversationId, after, size)) {
+            case Messages.Page.Found found -> found;
+            case Messages.Page.NoSuchPosition none -> throw new ResponseStatusException(HttpStatus.BAD_REQUEST, CURSOR_RULE);
+            case Messages.Page.NotFound missing -> throw new ResponseStatusException(HttpStatus.NOT_FOUND);
+        };
     }
 
     private static Message message(Messages.Message message) {
@@ -496,6 +555,28 @@ class ConversationController implements ConversationsApi, StreamsApi {
         return conversationId;
     }
 
+    /**
+     * The page size the caller asked for, as the contract's Limit allows it. Spring gives the contract's 20 when the
+     * caller names no number.
+     */
+    private static int pageSize(Integer limit) {
+        if (limit < MIN_PAGE || limit > MAX_PAGE) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, LIMIT_RULE);
+        }
+        return limit;
+    }
+
+    /**
+     * The cursor, which must be written as a next_cursor is: a message ID. None starts at the first message. An empty one
+     * is refused, so that a client that sends a null next_cursor as empty is not sent back to the first page for ever.
+     */
+    private static @Nullable String cursor(@Nullable String cursor) {
+        if (cursor != null && (!MESSAGE_ID.matcher(cursor).matches() || cursor.length() > MAX_MESSAGE_ID)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, CURSOR_RULE);
+        }
+        return cursor;
+    }
+
     /** The message ID of the path, as the contract's MessageId allows it. The whole ID has to match here too. */
     private static String messageId(String messageId) {
         if (!MESSAGE_ID.matcher(messageId).matches() || messageId.length() > MAX_MESSAGE_ID) {
@@ -509,11 +590,6 @@ class ConversationController implements ConversationsApi, StreamsApi {
         return new Conversation(conversation.conversationId(), conversation.endUserId(),
                         conversation.createdAt().atOffset(ZoneOffset.UTC))
                 .locale(conversation.locale());
-    }
-
-    /** An operation whose point of M2 has not come yet. */
-    private static ResponseStatusException notYet() {
-        return new ResponseStatusException(HttpStatus.NOT_FOUND);
     }
 
     /** ApiKeyFilter has put the caller here before any /v1 request reaches a controller. */

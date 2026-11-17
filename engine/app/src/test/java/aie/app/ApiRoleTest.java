@@ -20,6 +20,7 @@ import aie.core.tenancy.internal.SignedSessionTokens;
 import aie.http.api.model.Conversation;
 import aie.http.api.model.CreatedApiKey;
 import aie.http.api.model.Message;
+import aie.http.api.model.MessageList;
 import aie.http.api.model.MessageStartedEvent;
 import aie.http.api.model.Problem;
 import aie.http.api.model.Usage;
@@ -1141,6 +1142,107 @@ class ApiRoleTest {
         assertThat(own.statusCode()).isEqualTo(200);
         assertThat(own.body()).isEqualTo(sent.body());
         assertThat(host.body()).isEqualTo(sent.body());
+        assertThat(other.statusCode()).isEqualTo(404);
+        assertThat(other.body()).isEqualTo(unknown.body());
+    }
+
+    private static HttpResponse<String> readHistory(String key, String conversationId, String query) throws Exception {
+        return HttpClient.newHttpClient().send(at("/v1/conversations/" + conversationId + "/messages" + query)
+                .header("Authorization", "Bearer " + key).build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    /**
+     * GET .../messages on the real database (M2-13-3): three questions and their answers come back a page at a time,
+     * oldest first, each answer as its send returned it, and the next_cursor of a page leads to the next, until the last,
+     * whose next_cursor is null. Only the conversation's own application reads it, and a cursor of another conversation
+     * is refused.
+     */
+    @Test
+    void aHistoryIsReadAPageAtATime() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String testKey = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "internal")).key();
+        String liveKey = provisioning.createKey(tenant, provisioning.createApplication(tenant, "live", "internal")).key();
+        String stranger = provisioning.createTenant("jp1", null);
+        String strangerKey = provisioning.createKey(stranger, provisioning.createApplication(stranger, "test", "internal")).key();
+        String id = JSON.readValue(startConversation(testKey, "history-1", "{\"external_user_id\":\"host-user-1\"}").body(),
+                Conversation.class).getId();
+        String other = JSON.readValue(startConversation(testKey, "history-2", "{\"external_user_id\":\"host-user-1\"}").body(),
+                Conversation.class).getId();
+        List<Message> answers = new ArrayList<>();
+        for (int i = 1; i <= 3; i++) {
+            answers.add(JSON.readValue(sendMessage(testKey, "history-q" + i, id,
+                    "{\"text\":\"[fake pieces=2 delay=1ms] Question " + i + "\"}").body(), Message.class));
+        }
+        String elsewhere = JSON.readValue(sendMessage(testKey, "history-q4", other, "{\"text\":\"[fake pieces=2 delay=1ms] Hi\"}")
+                .body(), Message.class).getId();
+
+        HttpResponse<String> first = readHistory(testKey, id, "?limit=4");
+        MessageList one = JSON.readValue(first.body(), MessageList.class);
+        HttpResponse<String> second = readHistory(testKey, id, "?limit=4&cursor=" + one.getNextCursor());
+        MessageList two = JSON.readValue(second.body(), MessageList.class);
+
+        assertThat(first.statusCode()).isEqualTo(200);
+        assertThat(one.getData()).extracting(Message::getRole).containsExactly("user", "assistant", "user", "assistant");
+        assertThat(one.getData()).extracting(Message::getText).startsWith("[fake pieces=2 delay=1ms] Question 1");
+        assertThat(List.of(one.getData().get(1), one.getData().get(3))).containsExactly(answers.get(0), answers.get(1));
+        assertThat(one.getNextCursor()).isEqualTo(answers.get(1).getId());
+        assertThat(second.statusCode()).isEqualTo(200);
+        assertThat(two.getData()).extracting(Message::getText).first().isEqualTo("[fake pieces=2 delay=1ms] Question 3");
+        assertThat(two.getData().get(1)).isEqualTo(answers.get(2));
+        assertThat(two.getData()).hasSize(2);
+        assertThat(second.body()).contains("\"next_cursor\":null");
+        HttpResponse<String> unknown = readHistory(testKey, "conv_" + "0".repeat(26), "");
+        assertThat(unknown.statusCode()).isEqualTo(404);
+        for (String otherKey : List.of(liveKey, strangerKey)) {
+            HttpResponse<String> outside = readHistory(otherKey, id, "");
+            assertThat(outside.statusCode()).isEqualTo(404);
+            assertThat(outside.body()).isEqualTo(unknown.body());
+        }
+        HttpResponse<String> foreignCursor = readHistory(testKey, id, "?cursor=" + elsewhere);
+        assertThat(foreignCursor.statusCode()).isEqualTo(400);
+        assertThat(JSON.readValue(foreignCursor.body(), Problem.class).getDetail())
+                .isEqualTo("cursor must be a next_cursor of this conversation");
+    }
+
+    /** A history whose answer's writer has gone: reading the page ends that answer for the writer first (M2-11-3). */
+    @Test
+    void aHistoryEndsTheAnswerOfAWriterThatHasGone() throws Exception {
+        Unfinished gone = answerOfAWriterThatHasGone("gone-4");
+
+        HttpResponse<String> read = readHistory(gone.key(), gone.conversationId(), "");
+
+        assertThat(read.statusCode()).isEqualTo(200);
+        MessageList page = JSON.readValue(read.body(), MessageList.class);
+        assertThat(page.getData()).extracting(Message::getStatus).containsExactly("completed", "failed");
+        assertThat(page.getData().getFirst().getText()).isEqualTo("Anyone there?");
+        assertThat(page.getData().getLast().getCode()).isEqualTo("stream_interrupted");
+        assertThat(page.getData().getLast().getText()).isEqualTo("Hal");
+        assertThat(page.getNextCursor()).isNull();
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT status || ' ' || code FROM engine.conversation_messages"
+                + " WHERE message_id = '" + gone.answerId() + "'")).containsExactly("failed stream_interrupted");
+    }
+
+    /** A browser's token reads its own end user's history on the real database, and another end user's is missing. */
+    @Test
+    void aTokenReadsOnlyItsOwnEndUsersHistory() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String key = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "internal")).key();
+        String alice = sessionToken(key, "{\"external_user_id\":\"alice\"}");
+        String bob = sessionToken(key, "{\"external_user_id\":\"bob\"}");
+        String id = JSON.readValue(startConversation(alice, "history-token-1", "{}").body(), Conversation.class).getId();
+        Message answer = JSON.readValue(sendMessage(alice, "history-token-2", id, "{\"text\":\"[fake pieces=2 delay=1ms] Hi\"}")
+                .body(), Message.class);
+
+        HttpResponse<String> own = readHistory(alice, id, "");
+        HttpResponse<String> host = readHistory(key, id, "");
+        HttpResponse<String> other = readHistory(bob, id, "");
+        HttpResponse<String> unknown = readHistory(bob, "conv_" + "0".repeat(26), "");
+
+        assertThat(own.statusCode()).isEqualTo(200);
+        assertThat(JSON.readValue(own.body(), MessageList.class).getData()).last().isEqualTo(answer);
+        assertThat(host.body()).isEqualTo(own.body());
         assertThat(other.statusCode()).isEqualTo(404);
         assertThat(other.body()).isEqualTo(unknown.body());
     }
