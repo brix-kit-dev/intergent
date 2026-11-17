@@ -4,8 +4,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 import aie.app.TestApi.StandInAnswers.Outcome;
-import aie.core.tenancy.api.SessionTokens;
-import aie.core.tenancy.api.SessionTokens.IdentityLevel;
 import aie.http.api.StreamsApi;
 import aie.http.api.model.Problem;
 import aie.modules.conversation.api.Answers;
@@ -19,7 +17,6 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.List;
-import java.util.Map;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -39,6 +36,8 @@ class MessageEventsTest {
 
     private static final JsonMapper JSON = JsonMapper.builder().build();
     private static final TestApi.StandInAnswers ANSWERS = new TestApi.StandInAnswers();
+    /** Conversations of browsers' end users, which a browser's request looks up before it does anything (M2-12-3). */
+    private static final TestApi.StandInConversations CONVERSATIONS = new TestApi.StandInConversations();
     private static final String MALFORMED_ID = "Last-Event-ID must be the id of an event the stream sent, a number from 1";
     private static final String BEYOND_THE_LOG = "Last-Event-ID names no event of this answer";
 
@@ -48,7 +47,7 @@ class MessageEventsTest {
     @BeforeAll
     static void start() {
         context = TestApi.start(TestApi.LOOKUP, new TestApi.StandInKeys(), new TestApi.StandInEndUsers(),
-                new TestApi.StandInConversations(), ANSWERS, "--server.port=0");
+                CONVERSATIONS, ANSWERS, "--server.port=0");
         port = TestApi.port(context);
     }
 
@@ -310,13 +309,34 @@ class MessageEventsTest {
         await().during(Duration.ofSeconds(1)).atMost(Duration.ofSeconds(5)).until(() -> log().reads(answer) == 0);
     }
 
-    /** Browser tokens come in M2-12-3. Until then a valid session token is forbidden here. */
-    @Test
-    void aSessionTokenIsNotTakenYet() throws Exception {
-        String answer = ask(Outcome.COMPLETED).answer().messageId();
-        String token = TestApi.SESSION_TOKENS.issue(new SessionTokens.Session(
-                "ten_test", "app_test", "eu_1", IdentityLevel.VERIFIED, List.of(), Map.of(), null)).token();
+    /** An answer that the stand-in completed in a conversation of this browser end user. */
+    private static String answerOf(String endUserId) {
+        String conversation = CONVERSATIONS.start(TestApi.OWNER, endUserId, null).conversationId();
+        ANSWERS.outcome = Outcome.COMPLETED;
+        return conversation + " " + ((Answers.Start.Started) ANSWERS.ask(TestApi.OWNER, conversation, "Hi")).asked().answer().messageId();
+    }
 
-        problem(events(answer, "Authorization", "Bearer " + token), 403, "forbidden");
+    /** A browser resumes its own end user's answer (M2-12-3), as a key does. */
+    @Test
+    void aTokenResumesAnAnswerInItsOwnConversation() throws Exception {
+        String[] own = answerOf("eu_browser1").split(" ");
+
+        HttpResponse<String> response = streamed(eventsIn(own[0], own[1], "Authorization", "Bearer " + TestApi.sessionToken("eu_browser1")));
+
+        assertThat(response.body()).startsWith("id: 1\nevent: message.started\n").contains("event: message.completed\n");
+    }
+
+    /** Another end user's answer is missing to a browser, as an unknown one is, and its log is not read. */
+    @Test
+    void aTokenCannotResumeAnotherEndUsersAnswer() throws Exception {
+        String[] others = answerOf("eu_browser1").split(" ");
+        String token = "Bearer " + TestApi.sessionToken("eu_browser2");
+
+        HttpResponse<String> other = eventsIn(others[0], others[1], "Authorization", token);
+        HttpResponse<String> unknown = eventsIn("conv_nothing", others[1], "Authorization", token);
+
+        problem(other, 404, "not_found");
+        assertThat(other.body()).isEqualTo(unknown.body());
+        assertThat(log().reads(others[1])).isZero();
     }
 }

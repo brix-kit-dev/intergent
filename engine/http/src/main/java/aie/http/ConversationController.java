@@ -47,8 +47,8 @@ import org.springframework.web.server.ResponseStatusException;
  * The conversation operations of the contract, and the stream of an answer's events. The generated interfaces have no
  * defaults, so every operation has to be here. Starting and reading a conversation work, and so do sending a message,
  * with or without streaming, resuming an answer's stream and cancelling an answer; reading messages answers 404, as its
- * paths did before this controller, until its point of M2 comes. A browser's session token starts and reads its own end
- * user's conversations; ApiKeyFilter lets it through to no other operation yet (M2-12-2).
+ * paths did before this controller, until its point of M2 comes. A browser's session token reaches only its own end
+ * user's conversations, whichever operation it calls (M2-12-2, M2-12-3), so another end user's reads as missing.
  */
 @RestController
 class ConversationController implements ConversationsApi, StreamsApi {
@@ -146,8 +146,10 @@ class ConversationController implements ConversationsApi, StreamsApi {
      * <p>Everything about the request is checked before anything is stored, and a refusal is a plain problem, before any
      * stream starts. A full instance answers 429 and stores nothing, so the same Idempotency-Key may come back after
      * Retry-After. A streamed answer is kept with its Idempotency-Key as its message, and a retry with the key gets the
-     * same answer's events again, from the first, without asking anything (M2-10-2). The locale is checked but not used
-     * yet: it is the language to answer in, which the prompts of M3 need. data_class is checked by its enum and waits for
+     * same answer's events again, from the first, without asking anything (M2-10-2). A browser speaks only in its own end
+     * user's conversations, so another end user's is missing, before anything is asked or sent again (M2-12-3). The
+     * locale is checked but not used yet: it is the language to answer in, which the prompts of M3 need. data_class is
+     * checked by its enum and waits for
      * the trust layer of M3.
      */
     @Override
@@ -163,6 +165,7 @@ class ConversationController implements ConversationsApi, StreamsApi {
         String text = messageText(body.getText());
         SessionRequests.locale(body.getLocale());
         Owner caller = caller();
+        requireReachable(caller, conversation);
         if (request.getAttribute(IdempotencyFilter.RESEND) instanceof String answer) {
             send(caller, conversation, answer, 0, eventStream(currentResponse()));
             return null;
@@ -198,8 +201,9 @@ class ConversationController implements ConversationsApi, StreamsApi {
      * ended, unchanged, so the call is safe to repeat.
      *
      * <p>Everything is checked before the request is kept, and a refusal is a plain problem. A user message is no answer,
-     * so it is as missing as an unknown message, one of another application and one of another tenant. A retry with the
-     * same Idempotency-Key gets the first answer, as for any POST.
+     * so it is as missing as an unknown message, one of another application and one of another tenant; so is, for a
+     * browser, one in another end user's conversation (M2-12-3). A retry with the same Idempotency-Key gets the first
+     * answer, as for any POST.
      */
     @Override
     public ResponseEntity<Message> cancelMessage(String conversationId, String messageId, @Nullable String idempotencyKey,
@@ -208,6 +212,7 @@ class ConversationController implements ConversationsApi, StreamsApi {
         String conversation = conversationId(conversationId);
         String answer = messageId(messageId);
         Owner caller = caller();
+        requireReachable(caller, conversation);
         Messages.Message now = switch (answers.cancel(caller, conversation, answer)) {
             case Messages.CancelRequest.NotFound missing -> throw new ResponseStatusException(HttpStatus.NOT_FOUND);
             case Messages.CancelRequest.AlreadyEnded ended -> found(caller, conversation, answer);
@@ -224,7 +229,8 @@ class ConversationController implements ConversationsApi, StreamsApi {
      * 200 milliseconds. When the writer has gone, the stream ends the answer for it once its lease has run out (M2-11-3).
      *
      * <p>Everything is checked before the stream starts, and a refusal is a plain problem. A user message has no events,
-     * so it is as missing as an unknown message, one of another application and one of another tenant. Last-Event-ID
+     * so it is as missing as an unknown message, one of another application and one of another tenant; so is, for a
+     * browser, one in another end user's conversation (M2-12-3). Last-Event-ID
      * must be an id the stream sent (M2-8 decision 1), and an empty one is none, as the SSE standard's last event ID is
      * empty until the first event came. A caller that already has the ending gets the headers and nothing else (M2-8
      * decision 2), and so does HEAD, which has no body to wait for.
@@ -238,6 +244,7 @@ class ConversationController implements ConversationsApi, StreamsApi {
         String answer = messageId(messageId);
         long after = lastEventId(lastEventID);
         Owner caller = caller();
+        requireReachable(caller, conversation);
         messages.find(caller, conversation, answer).filter(found -> found.role() == Messages.Role.ASSISTANT)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
         boolean hasEnding = after > 0 && hasEnding(caller, conversation, answer, after);
@@ -485,6 +492,17 @@ class ConversationController implements ConversationsApi, StreamsApi {
     /** The session of a request made with a browser's token, or null for one made with a server key. */
     private SessionTokens.@Nullable Session browser() {
         return request.getAttribute(ApiKeyFilter.BROWSER) instanceof SessionTokens.Session session ? session : null;
+    }
+
+    /**
+     * Turns a browser away from a conversation it may not reach, as if the conversation were not there (M2-12-3). Every
+     * message, its events and its cancel are found through their conversation, so this one look covers them. A server
+     * key's reach is its application, which the module's own queries keep, so it costs no extra read.
+     */
+    private void requireReachable(Owner caller, String conversationId) {
+        if (browser() != null && conversations.find(caller, conversationId).filter(this::reachable).isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND);
+        }
     }
 
     /**

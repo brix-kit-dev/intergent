@@ -8,18 +8,22 @@ import org.springframework.web.util.pattern.PathPattern;
 import org.springframework.web.util.pattern.PathPatternParser;
 
 /**
- * The operations a session token may call. The contract opens an operation to the browser in its x-callers (blueprint
- * 6.3, S-10), and M2-12 opens those operations here one step at a time, each together with the check that a token
- * reaches only its own end user's conversations. Every other operation, and any path the contract does not have, is for
- * server keys only. CallersTest calls every operation of the contract with a token, so an operation for servers on this
- * list fails it.
+ * The operations a session token may call: those the contract opens to the browser in their x-callers (blueprint 6.3,
+ * S-10), each of which lets a token reach only its own end user's conversations. Every other operation, and any path the
+ * contract does not have, is for server keys only. CallersTest calls every operation of the contract with a token, so
+ * this list and the contract cannot part: an operation for servers on it, or one for browsers off it, fails that test.
  */
 final class TokenOperations {
 
     /** The contract's method and path of each, as the generated interfaces map them. */
     private static final List<Operation> OPERATIONS = List.of(
             new Operation(HttpMethod.POST, "/v1/conversations"),
-            new Operation(HttpMethod.GET, "/v1/conversations/{conversation_id}"));
+            new Operation(HttpMethod.GET, "/v1/conversations/{conversation_id}"),
+            new Operation(HttpMethod.POST, "/v1/conversations/{conversation_id}/messages"),
+            new Operation(HttpMethod.GET, "/v1/conversations/{conversation_id}/messages"),
+            new Operation(HttpMethod.GET, "/v1/conversations/{conversation_id}/messages/{message_id}"),
+            new Operation(HttpMethod.GET, "/v1/conversations/{conversation_id}/messages/{message_id}/events"),
+            new Operation(HttpMethod.POST, "/v1/conversations/{conversation_id}/messages/{message_id}/cancel"));
 
     private TokenOperations() {
     }

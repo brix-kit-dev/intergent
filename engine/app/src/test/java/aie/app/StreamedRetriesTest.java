@@ -32,6 +32,8 @@ import org.springframework.context.ConfigurableApplicationContext;
 class StreamedRetriesTest {
 
     private static final TestApi.StandInAnswers ANSWERS = new TestApi.StandInAnswers();
+    /** Conversations of browsers' end users, which a browser's request looks up before it does anything (M2-12-3). */
+    private static final TestApi.StandInConversations CONVERSATIONS = new TestApi.StandInConversations();
     private static final RecordingKeys KEYS = new RecordingKeys();
     private static final String BODY = "{\"text\":\"Hi\"}";
     private static final String PATH = "/v1/conversations/conv_1/messages";
@@ -76,7 +78,7 @@ class StreamedRetriesTest {
     @BeforeAll
     static void start() {
         context = TestApi.start(TestApi.LOOKUP, new TestApi.StandInKeys(), new TestApi.StandInEndUsers(),
-                new TestApi.StandInConversations(), ANSWERS, KEYS, "--server.port=0");
+                CONVERSATIONS, ANSWERS, KEYS, "--server.port=0");
         port = TestApi.port(context);
     }
 
@@ -100,7 +102,12 @@ class StreamedRetriesTest {
 
     /** POST .../messages of conv_1 with BODY, the test's server key and any further headers, in pairs. */
     private static HttpResponse<String> send(String... headers) throws Exception {
-        HttpRequest.Builder request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + PATH))
+        return sendTo(PATH, headers);
+    }
+
+    /** The same, to another conversation's messages. */
+    private static HttpResponse<String> sendTo(String path, String... headers) throws Exception {
+        HttpRequest.Builder request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
                 .header("Authorization", TestApi.AUTHORIZATION).header("Content-Type", "application/json")
                 .timeout(Duration.ofSeconds(20)).POST(BodyPublishers.ofString(BODY));
         for (int i = 0; i < headers.length; i += 2) {
@@ -133,6 +140,46 @@ class StreamedRetriesTest {
     private static String theAnswer() {
         assertThat(ANSWERS.answers).hasSize(1);
         return ANSWERS.answers.keySet().iterator().next();
+    }
+
+    /** The messages path of a new conversation of this browser end user. */
+    private static String messagesOf(String endUserId) {
+        return "/v1/conversations/" + CONVERSATIONS.start(TestApi.OWNER, endUserId, null).conversationId() + "/messages";
+    }
+
+    /**
+     * A browser's request names its end user in its fingerprint (M2-12 decision 2), so another end user's request with
+     * the same key and body is another request.
+     */
+    @Test
+    void aBrowsersFingerprintNamesItsEndUser() throws Exception {
+        String path = messagesOf("eu_browser1");
+
+        events(sendTo(path, "Authorization", "Bearer " + TestApi.sessionToken("eu_browser1"), "Accept", "text/event-stream",
+                "Idempotency-Key", "s-1"));
+
+        assertThat(KEYS.fingerprints).containsExactly(sha256("end user eu_browser1\nstream\nPOST " + path + "\n" + BODY));
+    }
+
+    /**
+     * A resend goes through a browser's check too (M2-12-3): were another end user's key ever to name a streamed answer, a
+     * conversation that is not the browser's own is missing, and none of its events go out.
+     */
+    @Test
+    void aResendIntoAnotherEndUsersConversationIsMissing() throws Exception {
+        String path = messagesOf("eu_browser1");
+        String conversation = path.split("/")[3];
+        String answer = ((Answers.Start.Started) ANSWERS.ask(TestApi.OWNER, conversation, "Hi")).asked().answer().messageId();
+        ANSWERS.calls.clear();
+        KEYS.next = new IdempotencyKeys.Claim.Streamed(answer);
+
+        HttpResponse<String> response = sendTo(path, "Authorization", "Bearer " + TestApi.sessionToken("eu_browser2"),
+                "Accept", "text/event-stream", "Idempotency-Key", "s-1");
+
+        assertThat(response.statusCode()).isEqualTo(404);
+        assertThat(response.headers().firstValue("Content-Type")).contains("application/problem+json");
+        assertThat(response.body()).doesNotContain(answer);
+        assertThat(ANSWERS.calls).isEmpty();
     }
 
     private static String sha256(String text) throws Exception {

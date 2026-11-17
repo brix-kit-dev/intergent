@@ -4,8 +4,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import aie.app.TestApi.StandInAnswers.Cancelling;
 import aie.app.TestApi.StandInAnswers.Outcome;
-import aie.core.tenancy.api.SessionTokens;
-import aie.core.tenancy.api.SessionTokens.IdentityLevel;
 import aie.http.api.model.Message;
 import aie.http.api.model.Problem;
 import aie.modules.conversation.api.Answers;
@@ -16,7 +14,6 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.List;
-import java.util.Map;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -37,6 +34,8 @@ class MessageCancelTest {
 
     private static final JsonMapper JSON = JsonMapper.builder().build();
     private static final TestApi.StandInAnswers ANSWERS = new TestApi.StandInAnswers();
+    /** Conversations of browsers' end users, which a browser's request looks up before it does anything (M2-12-3). */
+    private static final TestApi.StandInConversations CONVERSATIONS = new TestApi.StandInConversations();
     private static final String MESSAGE_ID_RULE = "message_id must be msg_ followed by 1 to 60 letters or digits";
 
     private static ConfigurableApplicationContext context;
@@ -49,7 +48,7 @@ class MessageCancelTest {
     @BeforeAll
     static void start() throws Exception {
         context = TestApi.start(TestApi.LOOKUP, new TestApi.StandInKeys(), new TestApi.StandInEndUsers(),
-                new TestApi.StandInConversations(), ANSWERS, "--server.port=0");
+                CONVERSATIONS, ANSWERS, "--server.port=0");
         port = TestApi.port(context);
         cancel("msg_00000000000000000000000000");
     }
@@ -260,15 +259,36 @@ class MessageCancelTest {
         assertThat(message(cancel(answer, "Accept", "*/*")).getStatus()).isEqualTo("cancelled");
     }
 
-    /** Browser tokens come in M2-12-3. Until then a valid session token is forbidden here, and nothing is cancelled. */
+    /** An answer still being written in a conversation of this browser end user: its conversation, then its ID. */
+    private static String[] goingFor(String endUserId) {
+        String conversation = CONVERSATIONS.start(TestApi.OWNER, endUserId, null).conversationId();
+        ANSWERS.outcome = Outcome.NEVER_ENDS;
+        return new String[] {conversation,
+                ((Answers.Start.Started) ANSWERS.ask(TestApi.OWNER, conversation, "Hi")).asked().answer().messageId()};
+    }
+
+    /** A browser stops its own end user's answer (M2-12-3), as a key does. */
     @Test
-    void aSessionTokenIsNotTakenYet() throws Exception {
-        String answer = going();
-        String token = TestApi.SESSION_TOKENS.issue(new SessionTokens.Session(
-                "ten_test", "app_test", "eu_1", IdentityLevel.VERIFIED, List.of(), Map.of(), null)).token();
+    void aTokenCancelsAnAnswerInItsOwnConversation() throws Exception {
+        String[] own = goingFor("eu_browser1");
 
-        problem(cancel(answer, "Authorization", "Bearer " + token), 403, "forbidden");
+        Message cancelled = message(cancelIn(own[0], own[1], "Authorization", "Bearer " + TestApi.sessionToken("eu_browser1")));
 
+        assertThat(cancelled.getStatus()).isEqualTo("cancelled");
+        assertThat(cancels()).containsExactly("ten_test/app_test cancels " + own[1] + " in " + own[0]);
+    }
+
+    /** Another end user's answer is missing to a browser, as an unknown one is, and no cancel is kept. */
+    @Test
+    void aTokenCannotCancelAnotherEndUsersAnswer() throws Exception {
+        String[] others = goingFor("eu_browser1");
+        String token = "Bearer " + TestApi.sessionToken("eu_browser2");
+
+        HttpResponse<String> other = cancelIn(others[0], others[1], "Authorization", token);
+        HttpResponse<String> unknown = cancelIn("conv_nothing", others[1], "Authorization", token);
+
+        problem(other, 404, "not_found");
+        assertThat(other.body()).isEqualTo(unknown.body());
         assertThat(cancels()).isEmpty();
     }
 }

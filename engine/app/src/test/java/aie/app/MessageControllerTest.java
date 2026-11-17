@@ -4,8 +4,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import aie.app.TestApi.StandInAnswers.Outcome;
-import aie.core.tenancy.api.SessionTokens;
-import aie.core.tenancy.api.SessionTokens.IdentityLevel;
 import aie.http.AnswerWait;
 import aie.http.api.model.Message;
 import aie.http.api.model.Problem;
@@ -40,6 +38,8 @@ class MessageControllerTest {
 
     private static final JsonMapper JSON = JsonMapper.builder().build();
     private static final TestApi.StandInAnswers ANSWERS = new TestApi.StandInAnswers();
+    /** Conversations of browsers' end users, which a browser's request looks up before it does anything (M2-12-3). */
+    private static final TestApi.StandInConversations CONVERSATIONS = new TestApi.StandInConversations();
     /** A character outside the Basic Multilingual Plane: one character, two UTF-16 units. */
     private static final String ASTRAL = "😀";
     private static final String TEXT_RULE = "text must have 1 to 32000 characters";
@@ -52,7 +52,7 @@ class MessageControllerTest {
     @BeforeAll
     static void start() {
         context = TestApi.start(TestApi.LOOKUP, new TestApi.StandInKeys(), new TestApi.StandInEndUsers(),
-                new TestApi.StandInConversations(), ANSWERS, "--server.port=0");
+                CONVERSATIONS, ANSWERS, "--server.port=0");
         port = TestApi.port(context);
     }
 
@@ -348,13 +348,46 @@ class MessageControllerTest {
         assertThat(ANSWERS.calls).containsExactly("ten_lower/app_lowertest asks in conv_1: Hi");
     }
 
-    /** Browser tokens come in M2-12-3. Until then a valid session token is forbidden here, and nothing is asked. */
-    @Test
-    void aSessionTokenIsNotTakenYet() throws Exception {
-        String token = TestApi.SESSION_TOKENS.issue(new SessionTokens.Session(
-                "ten_test", "app_test", "eu_1", IdentityLevel.VERIFIED, List.of(), Map.of(), null)).token();
+    /** A conversation of a browser's end user, in the stand-in the controller looks it up in. */
+    private static String conversationOf(String endUserId) {
+        return CONVERSATIONS.start(TestApi.OWNER, endUserId, null).conversationId();
+    }
 
-        problem(send("{\"text\":\"Hi\"}", "Authorization", "Bearer " + token), 403, "forbidden");
+    /** A browser speaks in its own end user's conversation (M2-12-3), and the answer comes back as for a key. */
+    @Test
+    void aTokenSendsAMessageInItsOwnConversation() throws Exception {
+        String own = conversationOf("eu_browser1");
+
+        Message answer = answered(sendTo(own, "{\"text\":\"Hi\"}", "Authorization", "Bearer " + TestApi.sessionToken("eu_browser1")));
+
+        assertThat(answer.getText()).isEqualTo("Hello!");
+        assertThat(ANSWERS.calls).containsExactly("ten_test/app_test asks in " + own + ": Hi");
+    }
+
+    @Test
+    void aTokenStreamsAMessageInItsOwnConversation() throws Exception {
+        String own = conversationOf("eu_browser1");
+
+        HttpResponse<String> response = sendTo(own, "{\"text\":\"Hi\"}", "Authorization", "Bearer " + TestApi.sessionToken("eu_browser1"),
+                "Accept", "text/event-stream");
+
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.headers().firstValue("Content-Type")).hasValueSatisfying(type -> assertThat(type).startsWith("text/event-stream"));
+        assertThat(response.body()).startsWith("id: 1\nevent: message.started\n").contains("event: message.completed\n");
+    }
+
+    /** Another end user's conversation is missing to a browser, as an unknown one is, and nothing is asked. */
+    @ParameterizedTest
+    @ValueSource(strings = {"application/json", "text/event-stream"})
+    void aTokenCannotSendInAnotherEndUsersConversation(String accept) throws Exception {
+        String others = conversationOf("eu_browser1");
+        String token = "Bearer " + TestApi.sessionToken("eu_browser2");
+
+        HttpResponse<String> other = sendTo(others, "{\"text\":\"Hi\"}", "Authorization", token, "Accept", accept);
+        HttpResponse<String> unknown = sendTo("conv_nothing", "{\"text\":\"Hi\"}", "Authorization", token, "Accept", accept);
+
+        problem(other, 404, "not_found");
+        assertThat(other.body()).isEqualTo(unknown.body());
         assertThat(ANSWERS.calls).isEmpty();
     }
 

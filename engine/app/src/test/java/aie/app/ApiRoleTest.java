@@ -565,6 +565,59 @@ class ApiRoleTest {
     }
 
     /**
+     * Browser tokens on the real database (M2-12-3): a token sends, streams, resumes and cancels in its own end user's
+     * conversation. Another end user's token finds none of it, as if it were not there, and nothing is asked for it; its
+     * streamed retry with the first token's Idempotency-Key is another request. The server key still reads it all.
+     */
+    @Test
+    void aTokenTalksOnlyInItsOwnConversations() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String key = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "internal")).key();
+        String alice = sessionToken(key, "{\"external_user_id\":\"alice\"}");
+        String bob = sessionToken(key, "{\"external_user_id\":\"bob\"}");
+        String id = JSON.readValue(startConversation(alice, "talk-1", "{}").body(), Conversation.class).getId();
+        String streamedBody = "{\"text\":\"[fake pieces=2 delay=1ms] Hello\"}";
+
+        HttpResponse<String> sent = sendMessage(alice, "talk-2", id, "{\"text\":\"[fake pieces=2 delay=1ms] Hi\"}");
+        Message answer = JSON.readValue(sent.body(), Message.class);
+        HttpResponse<String> streamed = HttpClient.newHttpClient().send(streamedWithKey(port, alice, "talk-3", id, streamedBody),
+                HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> resumed = events(port, alice, id, answer.getId(), "1");
+        HttpResponse<String> cancelled = cancel(port, alice, id, answer.getId(), null);
+
+        assertThat(sent.statusCode()).isEqualTo(200);
+        assertThat(answer.getStatus()).isEqualTo("completed");
+        assertThat(streamed.statusCode()).isEqualTo(200);
+        assertThat(lines(eventsOf(streamed.body()), "event: ")).last().isEqualTo("event: message.completed");
+        assertThat(resumed.statusCode()).isEqualTo(200);
+        assertThat(lines(eventsOf(resumed.body()), "id: ")).first().isEqualTo("id: 2");
+        assertThat(cancelled.statusCode()).isEqualTo(200);
+        assertThat(cancelled.body()).isEqualTo(sent.body());
+
+        HttpResponse<String> unknown = events(port, bob, "conv_" + "0".repeat(26), answer.getId(), null);
+        List<HttpResponse<String>> others = List.of(
+                sendMessage(bob, "talk-4", id, "{\"text\":\"Hi\"}"),
+                HttpClient.newHttpClient().send(streamedWithKey(port, bob, "talk-5", id, streamedBody), HttpResponse.BodyHandlers.ofString()),
+                events(port, bob, id, answer.getId(), null),
+                cancel(port, bob, id, answer.getId(), null));
+        HttpResponse<String> retry = HttpClient.newHttpClient().send(streamedWithKey(port, bob, "talk-3", id, streamedBody),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertThat(others).allSatisfy(other -> {
+            assertThat(other.statusCode()).isEqualTo(404);
+            assertThat(other.body()).isEqualTo(unknown.body());
+        });
+        assertThat(retry.statusCode()).isEqualTo(422);
+        assertThat(JSON.readValue(retry.body(), Problem.class).getCode()).isEqualTo("idempotency_key_reused");
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT count(*) FROM engine.conversation_messages WHERE conversation_id = '"
+                + id + "'")).containsExactly("4");
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT count(*) FROM engine.conversation_cancel_requests WHERE message_id = '"
+                + answer.getId() + "'")).containsExactly("0");
+        assertThat(events(port, key, id, answer.getId(), null).statusCode()).isEqualTo(200);
+    }
+
+    /**
      * The role's own generator and the fake model answer a message, and a retry with the same Idempotency-Key replays the
      * answer instead of asking again. Another application's key does not reach the conversation.
      */

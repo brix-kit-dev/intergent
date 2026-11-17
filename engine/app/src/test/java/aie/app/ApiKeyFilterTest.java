@@ -168,13 +168,13 @@ class ApiKeyFilterTest {
 
     /** An operation that takes no session token forbids a valid one, also where a key would pass. */
     @ParameterizedTest
-    @ValueSource(strings = {PATH, "/v1/test/caller", "/v1/conversations", "/v1/sessions", "/v1", "/v1/conversations/conv_1/messages"})
+    @ValueSource(strings = {PATH, "/v1/test/caller", "/v1/conversations", "/v1/sessions", "/v1", "/v1/conversations/conv_1/messages/msg_1/cancel"})
     void aValidSessionTokenIsForbidden(String path) throws Exception {
         assertForbiddenToken(send(request(path).header("Authorization", "Bearer " + TestApi.sessionToken("eu_1"))),
                 SERVER_KEY_NEEDED);
     }
 
-    /** Starting and reading a conversation take a token (M2-12-2); a HEAD is the GET without its body. */
+    /** The browser operations take a token (M2-12-2, M2-12-3); a HEAD is the GET without its body. */
     @Test
     void anOperationThatTakesATokenLetsAValidOneThrough() throws Exception {
         String token = "Bearer " + TestApi.sessionToken("eu_1");
