@@ -4,6 +4,7 @@ import aie.core.tenancy.api.ApiKeyLookup.Owner;
 import aie.core.tenancy.api.IdempotencyKeys;
 import aie.core.tenancy.api.IdempotencyKeys.Claim;
 import aie.core.tenancy.api.IdempotencyKeys.Key;
+import aie.core.tenancy.api.SessionTokens;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -36,7 +37,8 @@ import tools.jackson.databind.node.ObjectNode;
  * The Idempotency-Key of blueprint 6.2 on every POST of the public API. The same key with the same request gets the
  * first answer again, whatever it was, so the work runs once; a retry that should run again takes a new key. The same
  * key with a different request is refused. This runs after the key and version checks, so it knows the tenant and the
- * application, and a request those checks refuse leaves the key free.
+ * application, and a request those checks refuse leaves the key free. A browser's request is told apart by its end user
+ * too, so one end user's key never brings back another's answer.
  *
  * <p>A 429 says that nothing ran and that the caller should come back after Retry-After, so it is not stored and the key
  * is let go: a retry with the same key runs the request.
@@ -109,7 +111,7 @@ class IdempotencyFilter extends OncePerRequestFilter {
         }
         Owner caller = Objects.requireNonNull((Owner) request.getAttribute(ApiKeyFilter.CALLER), "No caller on a /v1 request");
         Key key = new Key(caller.tenantId(), caller.applicationId(), values.getFirst());
-        switch (keys.claim(key, fingerprint(request, body, StreamedRequests.wanted(request)))) {
+        switch (keys.claim(key, fingerprint(request, body, StreamedRequests.wanted(request), endUser(request)))) {
             case Claim.Acquired acquired -> run(new CachedBodyRequest(request, body), response, chain, key);
             case Claim.InUse inUse -> refuse(request, response, HttpServletResponse.SC_CONFLICT,
                     "idempotency_key_in_use", "A request with this " + HEADER + " is still running");
@@ -224,15 +226,22 @@ class IdempotencyFilter extends OncePerRequestFilter {
         return body.length > MAX_BODY ? null : body;
     }
 
+    /** The end user of a request made with a browser's token, or null for one made with a server key. */
+    private static @Nullable String endUser(HttpServletRequest request) {
+        return request.getAttribute(ApiKeyFilter.BROWSER) instanceof SessionTokens.Session session ? session.endUserId() : null;
+    }
+
     /**
      * The method, the path and the body: the same key on another operation is another request. A request that asks for a
-     * stream is another request than the same one asking for JSON (M2-10 decision 1), so its fingerprint says so; that of
-     * any other request is as it was before streams took a key, so the keys stored before still match.
+     * stream is another request than the same one asking for JSON (M2-10 decision 1), so its fingerprint says so. A
+     * browser's request names its end user too, so another end user of the application with the same key makes another
+     * request and never gets this one's answer (M2-12 decision 2). That of any other request is as it was before, so the
+     * keys stored before still match.
      */
-    private static String fingerprint(HttpServletRequest request, byte[] body, boolean streamed) {
+    private static String fingerprint(HttpServletRequest request, byte[] body, boolean streamed, @Nullable String endUser) {
         String query = request.getQueryString();
-        String target = (streamed ? "stream\n" : "") + request.getMethod() + " " + request.getServletPath()
-                + (query == null ? "" : "?" + query) + "\n";
+        String target = (endUser == null ? "" : "end user " + endUser + "\n") + (streamed ? "stream\n" : "")
+                + request.getMethod() + " " + request.getServletPath() + (query == null ? "" : "?" + query) + "\n";
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             digest.update(target.getBytes(StandardCharsets.UTF_8));

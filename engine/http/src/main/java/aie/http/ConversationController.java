@@ -2,6 +2,7 @@ package aie.http;
 
 import aie.core.tenancy.api.ApiKeyLookup.Owner;
 import aie.core.tenancy.api.EndUsers;
+import aie.core.tenancy.api.SessionTokens;
 import aie.http.api.ConversationsApi;
 import aie.http.api.StreamsApi;
 import aie.http.api.model.Conversation;
@@ -46,7 +47,8 @@ import org.springframework.web.server.ResponseStatusException;
  * The conversation operations of the contract, and the stream of an answer's events. The generated interfaces have no
  * defaults, so every operation has to be here. Starting and reading a conversation work, and so do sending a message,
  * with or without streaming, resuming an answer's stream and cancelling an answer; reading messages answers 404, as its
- * paths did before this controller, until its point of M2 comes.
+ * paths did before this controller, until its point of M2 comes. A browser's session token starts and reads its own end
+ * user's conversations; ApiKeyFilter lets it through to no other operation yet (M2-12-2).
  */
 @RestController
 class ConversationController implements ConversationsApi, StreamsApi {
@@ -96,32 +98,41 @@ class ConversationController implements ConversationsApi, StreamsApi {
     }
 
     /**
-     * A conversation for the host's user in the caller's application, with the end user made the first time the ID is
-     * seen. For On-Behalf-Of, the caller is already the lower tenant's application. Only server keys come this far so
-     * far, and a server key names no user, so external_user_id is required; browser tokens name their own user and come
-     * in M2-12. The body is checked before anything is made. Finding the end user and starting the conversation are two
-     * transactions, one per module (A-4). An end user left behind by a failed start does no harm, because the same ID
-     * finds it again.
+     * A conversation for an end user of the caller's application. A server key names no user, so external_user_id is
+     * required, and the end user is made the first time the ID is seen. For On-Behalf-Of, the caller is already the lower
+     * tenant's application. A browser's session token names its own end user, so it may not send external_user_id, and
+     * its language is the conversation's when the body gives none (M2-12-2). The body is checked before anything is
+     * made. Finding the end user and starting the conversation are two transactions, one per module (A-4). An end user
+     * left behind by a failed start does no harm, because the same ID finds it again.
      */
     @Override
     public ResponseEntity<Conversation> createConversation(CreateConversationRequest body, @Nullable String idempotencyKey,
             @Nullable String engineVersion, @Nullable String traceparent, @Nullable String onBehalfOf) {
-        String externalId = externalId(body.getExternalUserId());
+        SessionTokens.Session browser = browser();
+        if (browser != null && body.getExternalUserId() != null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "A session token names its own end user, so leave external_user_id out");
+        }
+        String externalId = browser == null ? externalId(body.getExternalUserId()) : null;
         String locale = SessionRequests.locale(body.getLocale());
         Owner caller = caller();
-        Conversations.Conversation started = conversations.start(caller, endUsers.resolve(caller, externalId), locale);
+        Conversations.Conversation started = browser == null
+                ? conversations.start(caller, endUsers.resolve(caller, externalId), locale)
+                : conversations.start(caller, browser.endUserId(), locale == null ? browser.locale() : locale);
         return ResponseEntity.status(HttpStatus.CREATED).body(answer(started));
     }
 
     /**
      * A conversation of the caller's application. One of another application or another tenant reads as missing, the
      * same as one that does not exist, so a 404 tells nothing about other callers. For On-Behalf-Of, the caller is
-     * already the lower tenant's application.
+     * already the lower tenant's application. A browser reaches only its own end user's conversations, so another end
+     * user's reads as missing too (blueprint 6.3).
      */
     @Override
     public ResponseEntity<Conversation> getConversation(String conversationId, @Nullable String engineVersion,
             @Nullable String traceparent, @Nullable String onBehalfOf) {
         Conversations.Conversation found = conversations.find(caller(), conversationId(conversationId))
+                .filter(this::reachable)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
         return ResponseEntity.ok(answer(found));
     }
@@ -469,5 +480,19 @@ class ConversationController implements ConversationsApi, StreamsApi {
     /** ApiKeyFilter has put the caller here before any /v1 request reaches a controller. */
     private Owner caller() {
         return Objects.requireNonNull((Owner) request.getAttribute(ApiKeyFilter.CALLER), "No caller on a /v1 request");
+    }
+
+    /** The session of a request made with a browser's token, or null for one made with a server key. */
+    private SessionTokens.@Nullable Session browser() {
+        return request.getAttribute(ApiKeyFilter.BROWSER) instanceof SessionTokens.Session session ? session : null;
+    }
+
+    /**
+     * Whether the caller may reach the conversation. A server key reaches every one of its application, a browser only
+     * those of its own end user. Who a conversation is for never changes, so the answer holds for the whole request.
+     */
+    private boolean reachable(Conversations.Conversation conversation) {
+        SessionTokens.Session browser = browser();
+        return browser == null || browser.endUserId().equals(conversation.endUserId());
     }
 }

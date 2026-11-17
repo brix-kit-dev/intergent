@@ -166,12 +166,45 @@ class ApiKeyFilterTest {
         assertBadCredential(send(request(PATH).header("Authorization", authorization)), BAD_CREDENTIAL);
     }
 
-    /** No operation takes a session token yet (M2-12-1), so a valid one is forbidden, also where a key would pass. */
+    /** An operation that takes no session token forbids a valid one, also where a key would pass. */
     @ParameterizedTest
-    @ValueSource(strings = {PATH, "/v1/test/caller", "/v1/conversations", "/v1/sessions", "/v1"})
+    @ValueSource(strings = {PATH, "/v1/test/caller", "/v1/conversations", "/v1/sessions", "/v1", "/v1/conversations/conv_1/messages"})
     void aValidSessionTokenIsForbidden(String path) throws Exception {
         assertForbiddenToken(send(request(path).header("Authorization", "Bearer " + TestApi.sessionToken("eu_1"))),
                 SERVER_KEY_NEEDED);
+    }
+
+    /** Starting and reading a conversation take a token (M2-12-2); a HEAD is the GET without its body. */
+    @Test
+    void anOperationThatTakesATokenLetsAValidOneThrough() throws Exception {
+        String token = "Bearer " + TestApi.sessionToken("eu_1");
+
+        HttpResponse<String> started = send(request("/v1/conversations").header("Authorization", token)
+                .header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString("{}")));
+        HttpResponse<String> head = send(request("/v1/conversations/conv_nothing").header("Authorization", token)
+                .method("HEAD", HttpRequest.BodyPublishers.noBody()));
+
+        assertThat(started.statusCode()).isEqualTo(201);
+        assertThat(started.headers().allValues("WWW-Authenticate")).isEmpty();
+        assertThat(head.statusCode()).isEqualTo(404);
+    }
+
+    /** Where a token is taken, a request without credentials learns it may send either. */
+    @Test
+    void withoutCredentialsAnOperationThatTakesATokenNamesBoth() throws Exception {
+        HttpResponse<String> response = send(request("/v1/conversations").header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{}")));
+
+        assertThat(problem(response, 401, "unauthorized").getDetail())
+                .isEqualTo("Send an API key or a session token as Authorization: Bearer");
+        assertThat(response.headers().allValues("WWW-Authenticate")).containsExactly("Bearer");
+    }
+
+    /** On-Behalf-Of comes before the operation, so it is refused where a token is taken too. */
+    @Test
+    void aSessionTokenWithOnBehalfOfIsForbiddenWhereATokenIsTaken() throws Exception {
+        assertForbiddenToken(send(request("/v1/conversations/conv_nothing").header("Authorization", "Bearer " + TestApi.sessionToken("eu_1"))
+                .header("On-Behalf-Of", "ten_lower")), NOT_ON_BEHALF);
     }
 
     /** A token is checked by its signature alone (blueprint 7.6), so no token reaches the key lookup. */
@@ -348,6 +381,7 @@ class ApiKeyFilterTest {
         String expired = TestApi.expiredSessionToken();
 
         send(request(PATH).header("Authorization", "Bearer " + valid));
+        send(request("/v1/conversations/conv_nothing").header("Authorization", "Bearer " + valid));
         send(request(PATH).header("Authorization", "Bearer " + valid).header("On-Behalf-Of", "ten_lower"));
         send(request(PATH).header("Authorization", "Bearer " + expired));
 

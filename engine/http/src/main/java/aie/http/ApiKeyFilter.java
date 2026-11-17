@@ -34,8 +34,9 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * <p>A browser sends the short-lived session token of blueprint 6.5 the same way. An API key starts with
  * {@code aie_}, so anything else is checked as a session token: by its signature and expiry alone, with no
  * table read (blueprint 7.6). Every operation says in the contract who may call it, and one that does not name the
- * browser is for server keys only (blueprint 6.3, S-10). No operation takes a token yet, so a valid token is forbidden
- * everywhere, and an invalid or expired one is refused like a bad key. A token is never logged either.
+ * browser is for server keys only (blueprint 6.3, S-10). A valid token passes on the operations {@link TokenOperations}
+ * lists, as its own tenant's application, with its end user as {@link #BROWSER}; elsewhere it is forbidden. An invalid
+ * or expired one is refused like a bad key. A token is never logged either.
  *
  * <p>The one exception is {@code POST /v1/anonymous-sessions}, which a browser calls with a site key instead:
  * {@link SiteKeyFilter} checks it, in the same place in the chain.
@@ -44,8 +45,16 @@ import org.springframework.web.filter.OncePerRequestFilter;
 @Order(Ordered.HIGHEST_PRECEDENCE + 3)
 class ApiKeyFilter extends OncePerRequestFilter {
 
-    /** The request attribute that holds the caller's {@link Owner} once the key has passed. */
+    /**
+     * The request attribute that holds the caller's {@link Owner} once the key or token has passed. A token has no ID of
+     * its own, so its owner carries the token's end user ID where a key's carries the key ID: that is who acted.
+     */
     static final String CALLER = "aie.http.caller";
+    /**
+     * The request attribute that holds the {@link SessionTokens.Session} of a request made with a session token, and is
+     * not there for one made with a key. The browser's end user is the only one whose conversations it reaches.
+     */
+    static final String BROWSER = "aie.http.browser";
 
     private static final String SCHEME = "Bearer";
     /** RFC 6750 3.1: a request without Bearer credentials gets the challenge alone, a bad key gets the error too. */
@@ -84,12 +93,14 @@ class ApiKeyFilter extends OncePerRequestFilter {
         String header = credentials.isEmpty() ? "" : credentials.getFirst().strip();
         int space = header.indexOf(' ');
         if (!(space < 0 ? header : header.substring(0, space)).equalsIgnoreCase(SCHEME)) {
-            refuse(response, SCHEME, "Send an API key as Authorization: Bearer");
+            refuse(response, SCHEME, TokenOperations.take(request)
+                    ? "Send an API key or a session token as Authorization: Bearer"
+                    : "Send an API key as Authorization: Bearer");
             return;
         }
         String token = space < 0 ? "" : header.substring(space).strip();
         if (!token.startsWith(KEY_PREFIX)) {
-            refuseSessionToken(request, response, token);
+            sessionToken(request, response, chain, token);
             return;
         }
         Optional<Owner> owner = keys.find(token);
@@ -124,24 +135,37 @@ class ApiKeyFilter extends OncePerRequestFilter {
     }
 
     /**
-     * A credential that is not an API key. A valid session token is forbidden, since no operation takes one yet (M2-12-2
-     * and M2-12-3 add the browser operations), and blueprint 6.10's {@code forbidden} is a caller without the right to
-     * an operation. On-Behalf-Of is refused first: a token names its own tenant, and the contract keeps the header for
-     * server keys. Anything else, an expired or forged token or no credential at all, is refused like a bad key.
+     * A credential that is not an API key. A valid session token passes on an operation that takes one, as its tenant's
+     * application and its end user. Anywhere else it is forbidden: blueprint 6.10's {@code forbidden} is a caller without
+     * the right to an operation. On-Behalf-Of is refused first, because a token names its own tenant, and the contract
+     * keeps the header for server keys. Anything else, an expired or forged token or no credential at all, is refused
+     * like a bad key.
      */
-    private void refuseSessionToken(HttpServletRequest request, HttpServletResponse response, String token)
-            throws IOException {
-        if (sessionTokens.verify(token).isEmpty()) {
+    private void sessionToken(HttpServletRequest request, HttpServletResponse response, FilterChain chain, String token)
+            throws ServletException, IOException {
+        Optional<SessionTokens.Verified> verified = sessionTokens.verify(token);
+        if (verified.isEmpty()) {
             refuse(response, INVALID_KEY, "The API key or session token is not valid");
             return;
         }
-        response.setHeader(HttpHeaders.WWW_AUTHENTICATE, SERVER_KEY_NEEDED);
         if (request.getHeader(ON_BEHALF_OF) != null) {
-            response.sendError(HttpServletResponse.SC_FORBIDDEN,
-                    "A session token acts only for its own tenant, so " + ON_BEHALF_OF + " takes a server key");
+            forbid(response, "A session token acts only for its own tenant, so " + ON_BEHALF_OF + " takes a server key");
             return;
         }
-        response.sendError(HttpServletResponse.SC_FORBIDDEN, "This operation takes a server key, not a session token");
+        if (!TokenOperations.take(request)) {
+            forbid(response, "This operation takes a server key, not a session token");
+            return;
+        }
+        SessionTokens.Session session = verified.get().session();
+        request.setAttribute(CALLER, new Owner(session.endUserId(), session.tenantId(), session.applicationId()));
+        request.setAttribute(BROWSER, session);
+        chain.doFilter(request, response);
+    }
+
+    /** RFC 6750 3.1: a valid token that may not make this request gets 403, and the challenge says why. */
+    private static void forbid(HttpServletResponse response, String detail) throws IOException {
+        response.setHeader(HttpHeaders.WWW_AUTHENTICATE, SERVER_KEY_NEEDED);
+        response.sendError(HttpServletResponse.SC_FORBIDDEN, detail);
     }
 
     /** RFC 9110 15.5.2: every 401 carries a challenge that says how to authenticate. */

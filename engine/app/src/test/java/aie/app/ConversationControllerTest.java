@@ -38,6 +38,7 @@ class ConversationControllerTest {
     private static final TestApi.StandInEndUsers END_USERS = new TestApi.StandInEndUsers();
     private static final TestApi.StandInConversations CONVERSATIONS = new TestApi.StandInConversations();
     private static final String NO_USER = "external_user_id is required with a server key";
+    private static final String TOKEN_NAMES_USER = "A session token names its own end user, so leave external_user_id out";
     private static final String USER_RULE = "external_user_id must have 1 to 255 characters";
     private static final String LOCALE_RULE = "locale must be a BCP 47 language tag of at most 35 characters, such as ja-JP";
     private static final String ID_RULE = "conversation_id must be conv_ followed by 1 to 59 letters or digits";
@@ -79,6 +80,17 @@ class ConversationControllerTest {
             request.header(headers[i], headers[i + 1]);
         }
         return send(request);
+    }
+
+    /** POST /v1/conversations with a browser's session token instead of the key. */
+    private static HttpResponse<String> startWithToken(String token, String body) throws Exception {
+        return send(request("/v1/conversations").header("Authorization", "Bearer " + token)
+                .header("Content-Type", "application/json").POST(BodyPublishers.ofString(body)));
+    }
+
+    /** GET /v1/conversations/{id} with a browser's session token instead of the key. */
+    private static HttpResponse<String> readWithToken(String token, String id) throws Exception {
+        return send(request("/v1/conversations/" + id).header("Authorization", "Bearer " + token));
     }
 
     /** GET /v1/conversations/{id}, with the ID put into the path as it is given, so a test can send escapes. */
@@ -199,15 +211,42 @@ class ConversationControllerTest {
         assertNothingMade();
     }
 
-    /** Browser tokens come in M2-12-2. Until then a valid session token is forbidden here, and nothing is made. */
+    /**
+     * A browser's token names its tenant, application and end user (M2-12-2), so the conversation is that end user's in
+     * that application, and no end user is looked up.
+     */
     @Test
-    void aSessionTokenIsNotTakenYet() throws Exception {
+    void aTokenStartsAConversationForItsOwnEndUser() throws Exception {
         String token = TestApi.SESSION_TOKENS.issue(new SessionTokens.Session(
-                "ten_test", "app_test", "eu_1", IdentityLevel.VERIFIED, List.of(), Map.of(), null)).token();
+                "ten_other", "app_other", "eu_browser1", IdentityLevel.ANONYMOUS, List.of(), Map.of(), null)).token();
 
-        assertProblem(send(request("/v1/conversations").header("Authorization", "Bearer " + token)
-                .header("Content-Type", "application/json").POST(BodyPublishers.ofString("{}"))), 403, "forbidden");
-        assertNothingMade();
+        Conversation conversation = started(startWithToken(token, "{}"));
+
+        assertThat(conversation.getEndUserId()).isEqualTo("eu_browser1");
+        assertThat(END_USERS.calls).isEmpty();
+        assertThat(CONVERSATIONS.calls).containsExactly("ten_other/app_other starts for eu_browser1 in null");
+    }
+
+    /** The token already names the end user, so a host ID beside it is refused before anything is made. */
+    @ParameterizedTest
+    @ValueSource(strings = {"{\"external_user_id\":\"host-user-1\"}", "{\"external_user_id\":\"\"}"})
+    void aTokenWithAnExternalUserIdIsRefused(String body) throws Exception {
+        assertRefused(startWithToken(TestApi.sessionToken("eu_browser1"), body), TOKEN_NAMES_USER);
+    }
+
+    /** The host may give the end user's language with the token, and a language in the body comes first (M2-12-2). */
+    @Test
+    void aTokensLanguageIsTheConversationsUnlessTheBodyGivesOne() throws Exception {
+        String token = TestApi.sessionToken("eu_browser1", "ja-JP");
+
+        assertThat(started(startWithToken(token, "{}")).getLocale()).isEqualTo("ja-JP");
+        assertThat(started(startWithToken(token, "{\"locale\":\"en-us\"}")).getLocale()).isEqualTo("en-US");
+        assertThat(started(startWithToken(TestApi.sessionToken("eu_browser1"), "{}")).getLocale()).isNull();
+    }
+
+    @Test
+    void aTokensRequestWithABadLocaleIsRefused() throws Exception {
+        assertRefused(startWithToken(TestApi.sessionToken("eu_browser1", "ja-JP"), "{\"locale\":\"ja_JP\"}"), LOCALE_RULE);
     }
 
     /** On-Behalf-Of: the end user and the conversation belong to the lower tenant's application. */
@@ -334,14 +373,61 @@ class ConversationControllerTest {
         assertThat(CONVERSATIONS.calls).isEmpty();
     }
 
-    /** Browser tokens come in M2-12-2. Until then a session token cannot read a conversation either. */
     @Test
-    void aSessionTokenCannotReadYet() throws Exception {
-        String token = TestApi.SESSION_TOKENS.issue(new SessionTokens.Session(
-                "ten_test", "app_test", "eu_1", IdentityLevel.VERIFIED, List.of(), Map.of(), null)).token();
+    void aTokenReadsItsOwnConversation() throws Exception {
+        String token = TestApi.sessionToken("eu_browser1");
+        HttpResponse<String> started = startWithToken(token, "{}");
 
-        assertProblem(send(request("/v1/conversations/conv_nothing").header("Authorization", "Bearer " + token)), 403, "forbidden");
-        assertThat(CONVERSATIONS.calls).isEmpty();
+        HttpResponse<String> read = readWithToken(token, started(started).getId());
+
+        assertThat(read.statusCode()).isEqualTo(200);
+        assertThat(read.body()).isEqualTo(started.body());
+    }
+
+    /** Blueprint 6.3: another end user's conversation of the same application reads as missing, as an unknown one does. */
+    @Test
+    void aTokenDoesNotReadAnotherEndUsersConversation() throws Exception {
+        String id = started(startWithToken(TestApi.sessionToken("eu_browser1"), "{}")).getId();
+        String otherToken = TestApi.sessionToken("eu_browser2");
+
+        HttpResponse<String> other = readWithToken(otherToken, id);
+        HttpResponse<String> unknown = readWithToken(otherToken, "conv_nothing");
+
+        assertProblem(other, 404, "not_found");
+        assertThat(other.body()).isEqualTo(unknown.body());
+    }
+
+    /** A token of another application reaches none of this one's conversations, whoever its end user is. */
+    @Test
+    void aTokenDoesNotReadAnotherApplicationsConversation() throws Exception {
+        String id = started(startWithToken(TestApi.sessionToken("eu_browser1"), "{}")).getId();
+        String otherApplication = TestApi.SESSION_TOKENS.issue(new SessionTokens.Session(
+                "ten_test", "app_other", "eu_browser1", IdentityLevel.VERIFIED, List.of(), Map.of(), null)).token();
+
+        assertProblem(readWithToken(otherApplication, id), 404, "not_found");
+        assertThat(CONVERSATIONS.calls).last().isEqualTo("ten_test/app_other finds " + id);
+    }
+
+    /** The same host ID is the same end user, so the host's server may start a conversation that its user's token reads. */
+    @Test
+    void aTokenReadsTheConversationItsHostStartedForItsEndUser() throws Exception {
+        Conversation conversation = started(start("{\"external_user_id\":\"host-user-1\"}"));
+
+        HttpResponse<String> read = readWithToken(TestApi.sessionToken(conversation.getEndUserId()), conversation.getId());
+
+        assertThat(read.statusCode()).isEqualTo(200);
+        assertThat(JSON.readValue(read.body(), Conversation.class)).isEqualTo(conversation);
+    }
+
+    /** A server key reaches every conversation of its application, a browser's too. */
+    @Test
+    void aServerKeyReadsABrowsersConversation() throws Exception {
+        HttpResponse<String> started = startWithToken(TestApi.sessionToken("eu_browser1"), "{}");
+
+        HttpResponse<String> read = read(started(started).getId());
+
+        assertThat(read.statusCode()).isEqualTo(200);
+        assertThat(read.body()).isEqualTo(started.body());
     }
 
     /**

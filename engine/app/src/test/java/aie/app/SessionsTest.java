@@ -180,9 +180,9 @@ class SessionsTest {
     }
 
     /**
-     * S-10 on the real api: a token it issued makes no other token and no key, and no operation takes one yet
-     * (M2-12-1). The token is refused before anything runs, so the host ID it names gets no end user, and the key it
-     * would make does not exist. A token this api did not sign is not valid at all.
+     * S-10 on the real api: a token it issued makes no other token and no key, since those operations are for servers.
+     * The token is refused before anything runs, so the host ID it names gets no end user, and the key it would make does
+     * not exist. A token this api did not sign is not valid at all.
      */
     @Test
     void aTokenTheApiIssuedIsForbiddenWhereAServerKeyIsNeeded() throws Exception {
@@ -193,8 +193,7 @@ class SessionsTest {
         List<HttpResponse<String>> refused = List.of(
                 post(token, "{\"external_user_id\":\"" + hostId + "\"}"),
                 send(token, "POST", "/v1/api-keys", "{\"name\":\"" + keyName + "\"}"),
-                send(token, "DELETE", "/v1/api-keys/key_1", null),
-                send(token, "POST", "/v1/conversations", "{}"));
+                send(token, "DELETE", "/v1/api-keys/key_1", null));
 
         assertThat(refused).allSatisfy(response -> {
             assertThat(response.statusCode()).isEqualTo(403);

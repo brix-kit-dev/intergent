@@ -480,6 +480,12 @@ final class TestApi {
         return SESSION_TOKENS.issue(session(endUserId)).token();
     }
 
+    /** The same, for an end user whose host gave this language, in standard form. */
+    static String sessionToken(String endUserId, String locale) {
+        return SESSION_TOKENS.issue(new SessionTokens.Session(OWNER.tenantId(), OWNER.applicationId(), endUserId,
+                SessionTokens.IdentityLevel.VERIFIED, List.of(), Map.of(), locale)).token();
+    }
+
     /** A token the api signed for {@link #OWNER}'s application that ran out a minute ago. */
     static String expiredSessionToken() {
         Clock issuedThen = Clock.fixed(Instant.now().minus(SessionTokens.LIFETIME).minusSeconds(60), ZoneOffset.UTC);

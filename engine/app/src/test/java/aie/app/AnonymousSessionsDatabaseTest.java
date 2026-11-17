@@ -9,6 +9,7 @@ import aie.core.tenancy.api.Provisioning.IssuedKey;
 import aie.core.tenancy.api.SessionTokens;
 import aie.core.tenancy.api.SessionTokens.IdentityLevel;
 import aie.core.tenancy.internal.DatabaseProvisioning;
+import aie.http.api.model.Conversation;
 import aie.http.api.model.Session;
 import java.io.IOException;
 import java.net.URI;
@@ -32,7 +33,8 @@ import tools.jackson.databind.json.JsonMapper;
 
 /**
  * POST /v1/anonymous-sessions on the real api role and a real database: a site key issued the way admin issues it, the
- * anonymous end users it makes, a replay, and a revoked key. AnonymousSessionsTest checks the rest with stand-ins.
+ * anonymous end users it makes, a replay, a revoked key, and the conversations its token reaches. AnonymousSessionsTest
+ * checks the rest with stand-ins.
  */
 @Testcontainers
 class AnonymousSessionsDatabaseTest {
@@ -120,6 +122,40 @@ class AnonymousSessionsDatabaseTest {
                 .containsExactly(tenant + " " + application + " true");
         assertThat(rows("SELECT count(*) FROM engine.tenancy_end_users WHERE end_user_id = '" + first.getEndUserId() + "'"))
                 .containsExactly("1");
+    }
+
+    /** A browser's token on the real database, as the page sends it, from the shop's origin. */
+    private static HttpResponse<String> conversation(String token, String method, String path, String body)
+            throws IOException, InterruptedException {
+        HttpRequest.Builder request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
+                .header("Authorization", "Bearer " + token)
+                .header("Origin", SHOP);
+        request = body == null ? request.method(method, BodyPublishers.noBody())
+                : request.header("Content-Type", "application/json").method(method, BodyPublishers.ofString(body));
+        return HttpClient.newHttpClient().send(request.build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    /**
+     * An anonymous token has the lowest rights, yet a visitor talks with the engine through it (M2-12-2): it starts a
+     * conversation for its own anonymous end user and reads it back. Another visitor's token reads it as missing.
+     */
+    @Test
+    void anAnonymousTokenStartsAndReadsAConversationOfItsOwn() throws Exception {
+        String siteKey = newSiteKey().key();
+        Session visitor = JSON.readValue(post(SHOP, siteKey).body(), Session.class);
+        Session another = JSON.readValue(post(SHOP, siteKey).body(), Session.class);
+        String endUsers = rows("SELECT count(*) FROM engine.tenancy_end_users").getFirst();
+
+        HttpResponse<String> started = conversation(visitor.getToken(), "POST", "/v1/conversations", "{}");
+        Conversation own = JSON.readValue(started.body(), Conversation.class);
+
+        assertThat(started.statusCode()).isEqualTo(201);
+        assertThat(own.getEndUserId()).isEqualTo(visitor.getEndUserId());
+        assertThat(conversation(visitor.getToken(), "GET", "/v1/conversations/" + own.getId(), null).body()).isEqualTo(started.body());
+        assertThat(conversation(another.getToken(), "GET", "/v1/conversations/" + own.getId(), null).statusCode()).isEqualTo(404);
+        assertThat(rows("SELECT tenant_id || ' ' || application_id || ' ' || end_user_id FROM engine.conversation_conversations"
+                + " WHERE conversation_id = '" + own.getId() + "'")).containsExactly(tenant + " " + application + " " + visitor.getEndUserId());
+        assertThat(rows("SELECT count(*) FROM engine.tenancy_end_users")).containsExactly(endUsers);
     }
 
     /** Another origin and a revoked key are refused before anything is made. */

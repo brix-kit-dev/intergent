@@ -21,6 +21,7 @@ import aie.http.api.model.Conversation;
 import aie.http.api.model.CreatedApiKey;
 import aie.http.api.model.Message;
 import aie.http.api.model.MessageStartedEvent;
+import aie.http.api.model.Problem;
 import aie.http.api.model.Usage;
 import aie.modules.conversation.api.Messages;
 import aie.modules.conversation.internal.DatabaseMessages;
@@ -486,6 +487,81 @@ class ApiRoleTest {
             assertThat(other.statusCode()).isEqualTo(404);
             assertThat(other.body()).isEqualTo(unknown.body());
         }
+    }
+
+    /** A browser's token for a host's user, as the host's server gets it from the real POST /v1/sessions. */
+    private static String sessionToken(String key, String body) throws Exception {
+        HttpResponse<String> session = HttpClient.newHttpClient().send(at("/v1/sessions").header("Authorization", "Bearer " + key)
+                .header("Content-Type", "application/json").POST(BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
+        assertThat(session.statusCode()).isEqualTo(201);
+        return JSON.readValue(session.body(), aie.http.api.model.Session.class).getToken();
+    }
+
+    /**
+     * Browser tokens on the real database (M2-12-2): a token starts and reads its own end user's conversations, and one
+     * the host's server started for its user; another end user's token reads it as missing; the server key reads them
+     * all. The token's language is the conversation's, and a token request makes no end user.
+     */
+    @Test
+    void aTokenStartsAndReadsOnlyItsOwnEndUsersConversations() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String application = provisioning.createApplication(tenant, "test", "internal");
+        String key = provisioning.createKey(tenant, application).key();
+        String alice = sessionToken(key, "{\"external_user_id\":\"alice\",\"locale\":\"ja-JP\"}");
+        String bob = sessionToken(key, "{\"external_user_id\":\"bob\"}");
+        String hosts = JSON.readValue(startConversation(key, "host-1", "{\"external_user_id\":\"alice\"}").body(), Conversation.class).getId();
+        long endUsers = Long.parseLong(TestDatabase.firstColumn(DATABASE, "SELECT count(*) FROM engine.tenancy_end_users").getFirst());
+
+        HttpResponse<String> started = startConversation(alice, "alice-1", "{}");
+        Conversation own = JSON.readValue(started.body(), Conversation.class);
+        HttpResponse<String> unknown = readConversation(bob, "conv_" + "0".repeat(26));
+
+        assertThat(started.statusCode()).isEqualTo(201);
+        assertThat(own.getLocale()).isEqualTo("ja-JP");
+        assertThat(readConversation(alice, own.getId()).body()).isEqualTo(started.body());
+        assertThat(readConversation(alice, hosts).statusCode()).isEqualTo(200);
+        for (String id : List.of(own.getId(), hosts)) {
+            HttpResponse<String> other = readConversation(bob, id);
+            assertThat(other.statusCode()).isEqualTo(404);
+            assertThat(other.body()).isEqualTo(unknown.body());
+            assertThat(readConversation(key, id).statusCode()).isEqualTo(200);
+        }
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT (c.end_user_id = e.end_user_id)::text FROM engine.conversation_conversations c"
+                        + " JOIN engine.tenancy_end_users e ON e.tenant_id = c.tenant_id AND e.application_id = c.application_id"
+                        + " WHERE c.conversation_id = '" + own.getId() + "' AND e.external_id = 'alice'"))
+                .containsExactly("true");
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT count(*) FROM engine.tenancy_end_users")).containsExactly(Long.toString(endUsers));
+    }
+
+    /**
+     * A browser's Idempotency-Key is kept apart by its end user (M2-12 decision 2): a retry with it gets the same
+     * conversation, while another end user, or the server key, with the same key and body gets idempotency_key_reused
+     * and never the first answer.
+     */
+    @Test
+    void aTokensRetryIsKeptApartForItsEndUser() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String application = provisioning.createApplication(tenant, "test", "internal");
+        String key = provisioning.createKey(tenant, application).key();
+        String alice = sessionToken(key, "{\"external_user_id\":\"alice\"}");
+        String bob = sessionToken(key, "{\"external_user_id\":\"bob\"}");
+
+        HttpResponse<String> first = startConversation(alice, "shared-1", "{}");
+        HttpResponse<String> retry = startConversation(alice, "shared-1", "{}");
+        HttpResponse<String> other = startConversation(bob, "shared-1", "{}");
+        HttpResponse<String> server = startConversation(key, "shared-1", "{}");
+
+        assertThat(first.statusCode()).isEqualTo(201);
+        assertThat(retry.body()).isEqualTo(first.body());
+        for (HttpResponse<String> refused : List.of(other, server)) {
+            assertThat(refused.statusCode()).isEqualTo(422);
+            assertThat(JSON.readValue(refused.body(), Problem.class).getCode()).isEqualTo("idempotency_key_reused");
+            assertThat(refused.body()).doesNotContain(JSON.readValue(first.body(), Conversation.class).getId());
+        }
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT count(*) FROM engine.conversation_conversations WHERE tenant_id = '"
+                + tenant + "'")).containsExactly("1");
     }
 
     /**
