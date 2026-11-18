@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.regex.Pattern;
 import org.jspecify.annotations.Nullable;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -36,6 +37,10 @@ class IdentityController implements IdentityApi {
 
     /** The contract allows a name of up to 100 characters. */
     static final int MAX_NAME = 100;
+    /** The contract's KeyId: this prefix, then letters and digits, at most 64 characters in all. */
+    private static final String KEY_PREFIX = "key_";
+    private static final int MAX_KEY_ID = 64;
+    private static final Pattern KEY_ID = Pattern.compile(KEY_PREFIX + "[0-9A-Za-z]+");
 
     private final ApiKeyManagement keys;
     private final EndUsers endUsers;
@@ -49,14 +54,27 @@ class IdentityController implements IdentityApi {
         this.request = request;
     }
 
-    /** A key of another application, an unknown one and a revoked one all read as missing. */
+    /**
+     * A key of another application, an unknown one and a revoked one all read as missing. A key ID the contract does not
+     * allow is refused before that, and nothing is looked up for it, as for a conversation or message ID (point 36).
+     */
     @Override
     public ResponseEntity<Void> deleteApiKey(
             String keyId, @Nullable String engineVersion, @Nullable String traceparent, @Nullable String onBehalfOf) {
-        if (!keys.revoke(caller(), keyId)) {
+        String id = keyId(keyId);
+        if (!keys.revoke(caller(), id)) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND);
         }
         return ResponseEntity.noContent().build();
+    }
+
+    /** The key ID of the path, as the contract's KeyId allows it. The whole ID has to match, as a conversation ID does. */
+    private static String keyId(String keyId) {
+        if (!KEY_ID.matcher(keyId).matches() || keyId.length() > MAX_KEY_ID) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "key_id must be " + KEY_PREFIX
+                    + " followed by 1 to " + (MAX_KEY_ID - KEY_PREFIX.length()) + " letters or digits");
+        }
+        return keyId;
     }
 
     /**

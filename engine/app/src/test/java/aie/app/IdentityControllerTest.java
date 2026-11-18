@@ -5,9 +5,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import aie.core.tenancy.api.SessionTokens;
 import aie.core.tenancy.api.SessionTokens.IdentityLevel;
+import aie.http.api.IdentityApi;
 import aie.http.api.model.CreatedApiKey;
 import aie.http.api.model.Problem;
 import aie.http.api.model.Session;
+import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Size;
+import java.lang.reflect.Parameter;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -19,12 +23,14 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.context.ConfigurableApplicationContext;
 import tools.jackson.databind.json.JsonMapper;
@@ -40,6 +46,8 @@ class IdentityControllerTest {
     private static final String KEY_RULE = "each context key must have 1 to 40 letters, digits or _ . : -";
     private static final String VALUE_RULE = "each context value must be a string of at most 200 characters";
     private static final String LOCALE_RULE = "locale must be a BCP 47 language tag of at most 35 characters, such as ja-JP";
+    private static final String KEY_ID_RULE = "key_id must be key_ followed by 1 to 60 letters or digits";
+    private static final String LONGEST_KEY_ID = "key_" + "x".repeat(60);
 
     private static ConfigurableApplicationContext context;
     private static int port;
@@ -173,6 +181,69 @@ class IdentityControllerTest {
     @Test
     void aKeyCanOnlyBeDeleted() throws Exception {
         assertProblem(send(request("/v1/api-keys/key_other").header("Authorization", TestApi.AUTHORIZATION)), 405, "invalid_request");
+    }
+
+    static Stream<String> malformedKeyIds() {
+        return Stream.of("key_", "key", "conv_1", "KEY_1", "key-1", "key_a-b", "key_a_b", "key_a.b",
+                "key_%C3%A9", "key_%EF%BC%91", "key_1%0A", "%0Akey_1", "key_1%20", "%20key_1", LONGEST_KEY_ID + "x");
+    }
+
+    /**
+     * Point 36: anything but key_ and then 1 to 60 ASCII letters or digits is refused before any lookup, as a malformed
+     * conversation ID is: wrong prefixes, other characters, a full-width digit, a line break or a space at either end,
+     * and 65 characters.
+     */
+    @ParameterizedTest
+    @MethodSource("malformedKeyIds")
+    void aMalformedKeyIdIsRefused(String keyId) throws Exception {
+        HttpResponse<String> response = revoke(keyId);
+
+        assertProblem(response, 400, "invalid_request");
+        assertThat(detail(response)).isEqualTo(KEY_ID_RULE);
+        assertThat(KEYS.calls).as("a malformed key ID is not looked up").isEmpty();
+    }
+
+    /** The contract's KeyId allows 64 characters in all, so the longest ID is looked up like any other. */
+    @Test
+    void theLongestKeyIdIsLookedUp() throws Exception {
+        assertThat(LONGEST_KEY_ID).hasSize(64);
+
+        assertProblem(revoke(LONGEST_KEY_ID), 404, "not_found");
+        assertThat(KEYS.calls).containsExactly(CALLER + " revokes " + LONGEST_KEY_ID);
+    }
+
+    /** Tomcat refuses a NUL in the path by itself, so the request never reaches the engine. It is still a 400. */
+    @Test
+    void aNulInTheKeyIdIsRefusedBeforeTheEngine() throws Exception {
+        assertProblem(revoke("key_1%00"), 400, "invalid_request");
+        assertThat(KEYS.calls).isEmpty();
+    }
+
+    /**
+     * The caller comes first, as on every operation: without a key, with a session token, or for a tenant that is not a
+     * lower one, a malformed key ID gets the answer a well-formed one would.
+     */
+    @Test
+    void theCallerIsCheckedBeforeTheKeyId() throws Exception {
+        assertProblem(send(request("/v1/api-keys/key_a-b").DELETE()), 401, "unauthorized");
+        assertProblem(send(request("/v1/api-keys/key_a-b")
+                .header("Authorization", "Bearer " + TestApi.sessionToken("eu_1")).DELETE()), 403, "forbidden");
+        assertProblem(send(request("/v1/api-keys/key_a-b")
+                .header("Authorization", TestApi.AUTHORIZATION).header("On-Behalf-Of", "ten_other").DELETE()), 403, "forbidden");
+        assertThat(KEYS.calls).isEmpty();
+    }
+
+    /**
+     * The controller copies the rule from the contract's KeyId, which the generated interface carries. If the contract
+     * changes the rule, this fails, so the controller's rule and its tests change with it.
+     */
+    @Test
+    void theKeyIdRuleIsTheContracts() throws Exception {
+        Parameter id = IdentityApi.class
+                .getMethod("deleteApiKey", String.class, String.class, String.class, String.class).getParameters()[0];
+
+        assertThat(id.getAnnotation(Pattern.class).regexp()).isEqualTo("^key_[0-9A-Za-z]+$");
+        assertThat(id.getAnnotation(Size.class).max()).isEqualTo(64);
     }
 
     @Test

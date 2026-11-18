@@ -326,6 +326,29 @@ class ApiRoleTest {
         assertThat(revoke(first.keyId(), third.key())).isEqualTo(404);
     }
 
+    /**
+     * Point 36 on the real database: a key ID the contract does not allow is refused, even when it is an issued key's ID
+     * with one character more, and that key goes on working until its own ID revokes it.
+     */
+    @Test
+    void aMalformedKeyIdRevokesNothing() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String application = provisioning.createApplication(tenant, "test", "internal");
+        IssuedKey caller = provisioning.createKey(tenant, application);
+        IssuedKey other = provisioning.createKey(tenant, application);
+
+        HttpResponse<String> refused = HttpClient.newHttpClient().send(at("/v1/api-keys/" + other.keyId() + "-1")
+                .header("Authorization", "Bearer " + caller.key()).DELETE().build(), HttpResponse.BodyHandlers.ofString());
+
+        assertThat(refused.statusCode()).isEqualTo(400);
+        assertThat(JSON.readValue(refused.body(), Problem.class).getDetail())
+                .isEqualTo("key_id must be key_ followed by 1 to 60 letters or digits");
+        assertThat(status("/v1/nothing-here", other.key())).isEqualTo(404);
+        assertThat(revoke(other.keyId(), caller.key())).isEqualTo(204);
+        assertThat(status("/v1/nothing-here", other.key())).isEqualTo(401);
+    }
+
     /** POST /v1/api-keys on the real database, retried with its Idempotency-Key: the retry never sees the key. */
     @Test
     void aKeyCreatesAnotherKeyAndARetryGetsItWithoutTheSecret() throws Exception {
