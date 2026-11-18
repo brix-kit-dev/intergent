@@ -349,6 +349,43 @@ class ApiRoleTest {
         assertThat(status("/v1/nothing-here", other.key())).isEqualTo(401);
     }
 
+    /**
+     * Point 37 on the real database: a NUL in a host's ID, a key's name or a context value is refused with 400 and the
+     * reason, where the ID and the name used to reach the database and fail with 500. Nothing is made: no end user, no
+     * conversation, no key.
+     */
+    @Test
+    void aNulIsRefusedBeforeAnythingIsMade() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String key = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "internal")).key();
+        String made = "SELECT (SELECT count(*) FROM engine.tenancy_end_users) || ' ' || "
+                + "(SELECT count(*) FROM engine.conversation_conversations) || ' ' || (SELECT count(*) FROM engine.tenancy_api_keys)";
+        List<String> before = TestDatabase.firstColumn(DATABASE, made);
+
+        assertRefusedWithNul(startConversation(key, "nul-conversation", "{\"external_user_id\":\"host\\u0000user\"}"),
+                "external_user_id cannot hold a NUL character");
+        assertRefusedWithNul(postJson("/v1/sessions", key, "{\"external_user_id\":\"host\\u0000user\"}"),
+                "external_user_id cannot hold a NUL character");
+        assertRefusedWithNul(postJson("/v1/sessions", key, "{\"external_user_id\":\"u1\",\"context\":{\"order_id\":\"A\\u0000B\"}}"),
+                "each context value cannot hold a NUL character");
+        assertRefusedWithNul(createKey(key, "nul-key", "{\"name\":\"ci\\u0000\"}"), "name cannot hold a NUL character");
+
+        assertThat(TestDatabase.firstColumn(DATABASE, made)).isEqualTo(before);
+    }
+
+    private static HttpResponse<String> postJson(String path, String key, String body) throws Exception {
+        return HttpClient.newHttpClient().send(at(path).header("Authorization", "Bearer " + key)
+                .header("Content-Type", "application/json").POST(BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    private static void assertRefusedWithNul(HttpResponse<String> response, String detail) {
+        assertThat(response.statusCode()).isEqualTo(400);
+        Problem problem = JSON.readValue(response.body(), Problem.class);
+        assertThat(problem.getCode()).isEqualTo("invalid_request");
+        assertThat(problem.getDetail()).isEqualTo(detail);
+    }
+
     /** POST /v1/api-keys on the real database, retried with its Idempotency-Key: the retry never sees the key. */
     @Test
     void aKeyCreatesAnotherKeyAndARetryGetsItWithoutTheSecret() throws Exception {

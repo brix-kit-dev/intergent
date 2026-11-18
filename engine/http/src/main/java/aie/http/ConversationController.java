@@ -531,7 +531,10 @@ class ConversationController implements ConversationsApi, StreamsApi {
                 : answer.usage(new Usage(message.usage().inputTokens(), message.usage().outputTokens()));
     }
 
-    /** The host's ID, as the contract's ExternalUserId allows it. The contract counts characters, not UTF-16 units. */
+    /**
+     * The host's ID, as the contract's ExternalUserId allows it and the database can store it: without a NUL (point 37).
+     * The contract counts characters, not UTF-16 units.
+     */
     private static String externalId(@Nullable String externalId) {
         if (externalId == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "external_user_id is required with a server key");
@@ -539,6 +542,9 @@ class ConversationController implements ConversationsApi, StreamsApi {
         if (externalId.isEmpty() || externalId.codePointCount(0, externalId.length()) > SessionRequests.MAX_EXTERNAL_ID) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "external_user_id must have 1 to " + SessionRequests.MAX_EXTERNAL_ID + " characters");
+        }
+        if (externalId.indexOf('\0') >= 0) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "external_user_id cannot hold a NUL character");
         }
         return externalId;
     }

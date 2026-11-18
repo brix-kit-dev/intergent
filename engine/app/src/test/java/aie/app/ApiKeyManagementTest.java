@@ -138,6 +138,19 @@ class ApiKeyManagementTest {
         assertThatThrownBy(() -> management.create(owner, "n".repeat(101), null)).isInstanceOf(DatabaseException.class);
     }
 
+    /** Point 37: the database cannot store a NUL, so create refuses a name with one itself, with the reason. */
+    @Test
+    void aNameWithANulIsRefusedBeforeTheDatabase() throws SQLException {
+        Owner owner = newKeyOfANewTenant().owner();
+        String keys = "SELECT count(*) FROM engine.tenancy_api_keys";
+        String before = TestDatabase.firstColumn(DATABASE, keys).get(0);
+
+        assertThatThrownBy(() -> management.create(owner, "ci\0", null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("A key's name cannot hold a NUL character");
+        assertThat(TestDatabase.firstColumn(DATABASE, keys)).containsExactly(before);
+    }
+
     /** Row-level security hides another tenant's application, so a forged caller gets no key there. */
     @Test
     void aCallerNamingAnotherTenantsApplicationGetsNoKey() throws SQLException {

@@ -302,6 +302,17 @@ class IdentityControllerTest {
         assertThat(KEYS.calls).hasSize(2);
     }
 
+    /** Point 37: the database cannot store a NUL, so a name with one is refused before any key is made. */
+    @ParameterizedTest
+    @ValueSource(strings = {"\0", "rotation\0", "\0rotation", "rot\0ation"})
+    void aNameHoldsNoNul(String name) throws Exception {
+        HttpResponse<String> response = create(JSON.writeValueAsString(Map.of("name", name)));
+
+        assertProblem(response, 400, "invalid_request");
+        assertThat(detail(response)).isEqualTo("name cannot hold a NUL character");
+        assertThat(KEYS.calls).isEmpty();
+    }
+
     @Test
     void creatingNeedsAKey() throws Exception {
         assertProblem(send(request("/v1/api-keys").header("Content-Type", "application/json").POST(BodyPublishers.ofString("{}"))),
@@ -400,6 +411,13 @@ class IdentityControllerTest {
         assertThat(createSession("{\"external_user_id\":\"" + "😀".repeat(255) + "\"}").statusCode()).isEqualTo(201);
     }
 
+    /** Point 37: the database cannot store a NUL, so a host's ID with one is refused before any end user is made. */
+    @ParameterizedTest
+    @ValueSource(strings = {"\0", "u1\0", "\0u1", "host\0user"})
+    void theHostsIdHoldsNoNul(String id) throws Exception {
+        assertRefused(createSession(sessionBody(Map.of("external_user_id", id))), "external_user_id cannot hold a NUL character");
+    }
+
     @Test
     void aSessionHasAtMostTwentyScopes() throws Exception {
         assertRefused(createSession(sessionBody(Map.of("scopes", names("s", 21)))), "scopes may have at most 20 entries");
@@ -455,6 +473,18 @@ class IdentityControllerTest {
 
         assertThat(carried(createSession(sessionBody(Map.of("context", Map.of("note", "😀".repeat(200)))))).context())
                 .containsEntry("note", "😀".repeat(200));
+    }
+
+    /**
+     * Point 37: the context goes on to the host's actions (blueprint 6.6, M5), and no value there has a use for a NUL, so
+     * one with a NUL anywhere is refused, even next to good ones.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"\0", "A-1001\0", "\0A-1001", "A\0B"})
+    void aContextValueHoldsNoNul(String value) throws Exception {
+        String rule = "each context value cannot hold a NUL character";
+        assertRefused(createSession(sessionBody(Map.of("context", Map.of("order_id", value)))), rule);
+        assertRefused(createSession(sessionBody(Map.of("context", Map.of("shop", "tokyo", "order_id", value)))), rule);
     }
 
     @ParameterizedTest

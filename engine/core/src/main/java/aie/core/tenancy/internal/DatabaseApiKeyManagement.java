@@ -23,9 +23,15 @@ public final class DatabaseApiKeyManagement implements ApiKeyManagement {
         this.database = database;
     }
 
-    /** The caller's application exists, since its key just passed; an application that is gone fails loudly. */
+    /**
+     * The caller's application exists, since its key just passed; an application that is gone fails loudly. A name with
+     * a NUL would fail in the database, so it is refused here with the reason.
+     */
     @Override
     public CreatedKey create(Owner caller, String name, Instant expiresAt) {
+        if (name != null && name.indexOf('\0') >= 0) {
+            throw new IllegalArgumentException("A key's name cannot hold a NUL character");
+        }
         KeyIssuing.Issued issued = database.inTenantTx(caller.tenantId(), tx ->
                         KeyIssuing.issue(tx, caller.tenantId(), caller.applicationId(), name, expiresAt))
                 .orElseThrow(() -> new IllegalStateException(

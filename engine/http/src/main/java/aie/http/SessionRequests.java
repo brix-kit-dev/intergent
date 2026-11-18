@@ -12,7 +12,9 @@ import org.springframework.web.server.ResponseStatusException;
 /**
  * The checks on a {@code POST /v1/sessions} body, with the limits of the contract's CreateSessionRequest. The scopes
  * and context travel inside the token, which the browser sends in a request header, so they are kept small. A body
- * that fails a check gets 400 before anything is made, so it leaves no end user behind.
+ * that fails a check gets 400 before anything is made, so it leaves no end user behind. The host's ID and the context
+ * values take no NUL (point 37): the database cannot store one, and the context goes on to the host's actions (blueprint
+ * 6.6).
  */
 final class SessionRequests {
 
@@ -39,6 +41,9 @@ final class SessionRequests {
         if (externalId == null || externalId.isEmpty() || externalId.codePointCount(0, externalId.length()) > MAX_EXTERNAL_ID) {
             throw refused("external_user_id must have 1 to " + MAX_EXTERNAL_ID + " characters");
         }
+        if (externalId.indexOf('\0') >= 0) {
+            throw refused("external_user_id cannot hold a NUL character");
+        }
         List<String> scopes = body.getScopes() == null ? List.of() : body.getScopes();
         if (scopes.size() > MAX_SCOPES) {
             throw refused("scopes may have at most " + MAX_SCOPES + " entries");
@@ -55,6 +60,9 @@ final class SessionRequests {
         }
         if (!context.values().stream().allMatch(SessionRequests::isContextValue)) {
             throw refused("each context value must be a string of at most " + MAX_CONTEXT_VALUE + " characters");
+        }
+        if (context.values().stream().anyMatch(value -> value.indexOf('\0') >= 0)) {
+            throw refused("each context value cannot hold a NUL character");
         }
         String locale = locale(body.getLocale());
         int bytes = tokens.claimsBytes(scopes, context);

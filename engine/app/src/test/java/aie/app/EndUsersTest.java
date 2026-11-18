@@ -200,6 +200,17 @@ class EndUsersTest {
         assertThat(allRows()).isEmpty();
     }
 
+    /** Point 37: the database cannot store a NUL, so resolve refuses an ID with one itself, with the reason. */
+    @Test
+    void aHostsIdWithANulIsRefusedBeforeTheDatabase() throws SQLException {
+        Owner caller = newApplication();
+
+        assertThatThrownBy(() -> endUsers.resolve(caller, "host\0user"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("A host's ID cannot hold a NUL character");
+        assertThat(allRows()).isEmpty();
+    }
+
     @Test
     void anAnonymousEndUserBelongsToTheCallersTenantOnly() throws SQLException {
         Owner mine = newApplication();

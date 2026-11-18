@@ -193,6 +193,13 @@ class ConversationControllerTest {
         assertThat(END_USERS.calls).containsExactly("ten_test/app_test resolves " + wide);
     }
 
+    /** Point 37: the database cannot store a NUL, so a host's ID with one is refused before anything is made. */
+    @ParameterizedTest
+    @ValueSource(strings = {"\0", "host-user-1\0", "\0host-user-1", "host\0user"})
+    void theHostsUserIdHoldsNoNul(String id) throws Exception {
+        assertRefused(start(body(Map.of("external_user_id", id))), "external_user_id cannot hold a NUL character");
+    }
+
     @Test
     void anIllFormedLocaleIsRefused() throws Exception {
         assertRefused(start("{\"external_user_id\":\"host-user-1\",\"locale\":\"not a tag\"}"), LOCALE_RULE);

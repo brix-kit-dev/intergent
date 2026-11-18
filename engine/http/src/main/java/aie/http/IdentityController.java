@@ -79,7 +79,8 @@ class IdentityController implements IdentityApi {
 
     /**
      * Another key for the caller's application, so old and new keys work side by side during a rotation. Only a hash of
-     * the key is kept, so the answer stored for an Idempotency-Key leaves the key out (contract: CreatedApiKey.key).
+     * the key is kept, so the answer stored for an Idempotency-Key leaves the key out (contract: CreatedApiKey.key). A
+     * name takes no NUL, which the database cannot store (point 37).
      */
     @Override
     public ResponseEntity<CreatedApiKey> createApiKey(CreateApiKeyRequest body, @Nullable String idempotencyKey,
@@ -91,6 +92,9 @@ class IdentityController implements IdentityApi {
         String name = body.getName();
         if (name != null && name.codePointCount(0, name.length()) > MAX_NAME) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "name may be at most " + MAX_NAME + " characters");
+        }
+        if (name != null && name.indexOf('\0') >= 0) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "name cannot hold a NUL character");
         }
         CreatedKey created = keys.create(caller(), name, expiresAt == null ? null : expiresAt.toInstant());
         request.setAttribute(IdempotencyFilter.NOT_STORED, Set.of("key"));

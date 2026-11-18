@@ -12,7 +12,8 @@ public interface EndUsers {
      * The end user behind the host's ID in the caller's application, made the first time it is seen. The same ID
      * always gives the same end user, also when two requests bring it at the same moment.
      *
-     * @throws IllegalArgumentException without an ID, because only {@link #anonymous} makes end users without one
+     * @throws IllegalArgumentException without an ID, because only {@link #anonymous} makes end users without one, or
+     *     for an ID that holds a NUL, which the database cannot store
      */
     String resolve(Owner caller, String externalId);
 

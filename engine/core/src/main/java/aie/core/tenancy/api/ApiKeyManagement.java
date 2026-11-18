@@ -13,6 +13,8 @@ public interface ApiKeyManagement {
      * Creates another key for the caller's application, with the application's environment and the tenant's cell.
      * Old and new keys work side by side, which is how a key is rotated. The name may be null, and so may the expiry,
      * for a key that works until it is revoked.
+     *
+     * @throws IllegalArgumentException for a name that holds a NUL, which the database cannot store
      */
     CreatedKey create(Owner caller, String name, Instant expiresAt);
 

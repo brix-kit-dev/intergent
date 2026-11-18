@@ -26,11 +26,17 @@ public final class DatabaseEndUsers implements EndUsers {
         this.database = database;
     }
 
-    /** A null ID would go in as an anonymous end user, which the lookup after it could never find. */
+    /**
+     * A null ID would go in as an anonymous end user, which the lookup after it could never find. One with a NUL would
+     * fail in the database, so it is refused here with the reason.
+     */
     @Override
     public String resolve(Owner caller, String externalId) {
         if (externalId == null) {
             throw new IllegalArgumentException("An end user found by the host's ID needs the ID");
+        }
+        if (externalId.indexOf('\0') >= 0) {
+            throw new IllegalArgumentException("A host's ID cannot hold a NUL character");
         }
         return database.inTenantTx(caller.tenantId(), tx -> {
             tx.update(ADD, Ids.next("eu"), caller.tenantId(), caller.applicationId(), externalId);
