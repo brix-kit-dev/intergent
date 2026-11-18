@@ -386,6 +386,31 @@ class ApiRoleTest {
         assertThat(problem.getDetail()).isEqualTo(detail);
     }
 
+    /**
+     * Point 38 on the real api: the model fails while the answer is written on its own thread, and the gateway's warning
+     * there carries the Request-Id the caller got and the trace ID it sent, so a search for either finds the line.
+     */
+    @Test
+    void theAnswersWarningCarriesTheIdsOfTheRequestThatAsked(CapturedOutput output) throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String key = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "internal")).key();
+        String conversation = JSON.readValue(startConversation(key, "logs-conversation", "{\"external_user_id\":\"host-user-1\"}")
+                .body(), Conversation.class).getId();
+        String trace = "0af7651916cd43dd8448eb211c80319c";
+
+        HttpResponse<String> asked = HttpClient.newHttpClient().send(at("/v1/conversations/" + conversation + "/messages")
+                .header("Authorization", "Bearer " + key).header("Content-Type", "application/json")
+                .header("traceparent", "00-" + trace + "-b7ad6b7169203331-01")
+                .POST(BodyPublishers.ofString("{\"text\":\"[fake pieces=3 fail-after=1 delay=1ms] Hi\"}")).build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        String requestId = asked.headers().firstValue("Request-Id").orElseThrow();
+        assertThat(output.getAll().lines().filter(line -> line.contains("The model fake failed the task customer_chat")))
+                .singleElement().asString()
+                .contains(" WARN ", " answer-", "] [" + requestId + "] [" + trace + "] ");
+    }
+
     /** POST /v1/api-keys on the real database, retried with its Idempotency-Key: the retry never sees the key. */
     @Test
     void aKeyCreatesAnotherKeyAndARetryGetsItWithoutTheSecret() throws Exception {

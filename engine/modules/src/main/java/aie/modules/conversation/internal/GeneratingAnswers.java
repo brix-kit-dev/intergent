@@ -26,13 +26,15 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 /**
  * {@link Answers} with a virtual thread for each answer. An ask takes one of the instance's slots before it stores
  * anything, so a full instance stores nothing. The answer's thread reads its history, asks the gateway outside any
  * transaction (A-14), and writes each piece as a delta, then the ending, each write a short transaction of its own.
  * While it writes, the instance renews the answer's lease every 5 seconds, so that a reader ends the answer only once its
- * writer has gone (blueprint 6.4).
+ * writer has gone (blueprint 6.4). The answer's thread logs with the request ID and trace ID of the request that asked;
+ * the renewals and the stopping look after every answer at once, so their lines name the answer instead.
  *
  * <p>How an answer ends:
  * <ul>
@@ -128,8 +130,25 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
         }
         Answer answer = new Answer(caller, conversationId, asked);
         running.put(answer.id(), answer);
-        threads.execute(() -> generate(answer));
+        Map<String, String> logContext = MDC.getCopyOfContextMap();
+        threads.execute(() -> generateWith(logContext, answer));
         return new Start.Started(asked, answer.ended.minimalCompletionStage());
+    }
+
+    /**
+     * On the answer's own thread, with the log context the asking thread had, or none (point 38): the request ID and the
+     * trace ID of the request that asked are in every line the writer and the gateway log for the answer, as they are in
+     * the request's own lines. A copy, so the asking thread keeps its own; it goes once the answer has ended.
+     */
+    private void generateWith(Map<String, String> logContext, Answer answer) {
+        if (logContext != null) {
+            MDC.setContextMap(logContext);
+        }
+        try {
+            generate(answer);
+        } finally {
+            MDC.clear();
+        }
     }
 
     /** On the answer's own thread. Whatever happens, the slot goes back and the waiters learn that the answer is over. */

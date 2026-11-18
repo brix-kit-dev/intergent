@@ -30,6 +30,8 @@ import aie.modules.conversation.internal.DatabaseConversations;
 import aie.modules.conversation.internal.DatabaseMessages;
 import aie.modules.conversation.internal.GeneratingAnswers;
 import aie.ports.ModelPort;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.AppenderBase;
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
@@ -43,11 +45,14 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
@@ -62,6 +67,9 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 class AnswersTest {
 
     private static final long WAIT_SECONDS = 20;
+    /** Trace IDs a caller's traceparent could carry. */
+    private static final String TRACE = "4bf92f3577b34da6a3ce929d0e0e4736";
+    private static final String OTHER_TRACE = "0af7651916cd43dd8448eb211c80319c";
 
     @Container
     private static final PostgreSQLContainer DATABASE = TestDatabase.container();
@@ -306,6 +314,143 @@ class AnswersTest {
             assertThat(answer.text()).isEqualTo("p1 ");
             assertThat(offered).hasValue(2);
             assertThat(deltas).hasValue(2);
+        }
+    }
+
+    /** A log event as it was logged: its level, thread, message, and the log context of the thread that logged it. */
+    record Logged(String level, String thread, String message, Map<String, String> context) {
+    }
+
+    /**
+     * Keeps every log event from the moment it is added. It reads the thread and the log context while the event is
+     * logged, on the thread that logs it, since an event reads them only when first asked, on whatever thread asks.
+     */
+    private static final class Listening extends AppenderBase<ILoggingEvent> {
+
+        final List<Logged> events = new CopyOnWriteArrayList<>();
+
+        @Override
+        protected void append(ILoggingEvent event) {
+            events.add(new Logged(event.getLevel().toString(), event.getThreadName(), event.getFormattedMessage(),
+                    Map.copyOf(event.getMDCPropertyMap())));
+        }
+
+        List<Logged> saying(String start) {
+            return events.stream().filter(event -> event.message().startsWith(start)).toList();
+        }
+    }
+
+    private static Listening listen() {
+        Listening listening = new Listening();
+        listening.start();
+        root().addAppender(listening);
+        return listening;
+    }
+
+    private static void stopListening(Listening listening) {
+        root().detachAppender(listening);
+        listening.stop();
+    }
+
+    private static ch.qos.logback.classic.Logger root() {
+        return (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+    }
+
+    /**
+     * Asks as a request with these IDs in its log context does, as the HTTP filters put them there, and checks that the
+     * asking thread keeps them.
+     */
+    private static Started askedBy(String requestId, String traceId, Supplier<Start> ask) {
+        MDC.put("request_id", requestId);
+        MDC.put("trace_id", traceId);
+        try {
+            Started started = started(ask.get());
+            assertThat(MDC.getCopyOfContextMap()).containsEntry("request_id", requestId).containsEntry("trace_id", traceId);
+            return started;
+        } finally {
+            MDC.clear();
+        }
+    }
+
+    /**
+     * Point 38: the answer is written on a thread of its own, and the gateway's warning when the model fails there
+     * carries the request ID and the trace ID of the request that asked, as the request's own lines do.
+     */
+    @Test
+    void theGatewaysWarningCarriesTheIdsOfTheRequestThatAsked() throws Exception {
+        Listening logs = listen();
+        try (GeneratingAnswers answers = new GeneratingAnswers(messages, fake(Duration.ofSeconds(10)))) {
+            Started started = askedBy("req_asking", TRACE, () -> answers.ask(caller, conversation, "[fake pieces=5 fail-after=2 delay=1ms] Go"));
+            awaitEnd(started);
+
+            assertThat(logs.saying("The model fake failed the task")).singleElement().satisfies(warning -> {
+                assertThat(warning.level()).isEqualTo("WARN");
+                assertThat(warning.thread()).startsWith("answer-");
+                assertThat(warning.context()).containsEntry("request_id", "req_asking").containsEntry("trace_id", TRACE);
+            });
+        } finally {
+            stopListening(logs);
+        }
+    }
+
+    /** Point 38: the writer's own error, when a write fails, carries the asking request's IDs too. */
+    @Test
+    void theWritersErrorCarriesTheIdsOfTheRequestThatAsked() throws Exception {
+        ModelPort model = (request, output) -> {
+            for (int i = 1; i <= 5; i++) {
+                output.text("p" + i + " ");
+            }
+            return new ModelPort.Completed(new ModelPort.Usage(1, 5));
+        };
+        Listening logs = listen();
+        try (GeneratingAnswers answers = new GeneratingAnswers(failingOnDelta(2, new AtomicInteger()), stub(model))) {
+            Started started = askedBy("req_fragile", TRACE, () -> answers.ask(caller, conversation, "Fragile?"));
+            awaitEnd(started);
+
+            assertThat(logs.saying("Answer " + started.asked().answer().messageId() + " went wrong before its end"))
+                    .singleElement().satisfies(error -> {
+                        assertThat(error.level()).isEqualTo("ERROR");
+                        assertThat(error.context()).containsEntry("request_id", "req_fragile").containsEntry("trace_id", TRACE);
+                    });
+        } finally {
+            stopListening(logs);
+        }
+    }
+
+    /** Point 38: two answers written at the same time each log with their own request's IDs, never the other's. */
+    @Test
+    void twoAnswersAtOnceEachLogWithTheirOwnRequestsIds() throws Exception {
+        String other = conversations.start(caller, endUsers.resolve(caller, "user-2"), null).conversationId();
+        Listening logs = listen();
+        try (GeneratingAnswers answers = new GeneratingAnswers(messages, fake(Duration.ofSeconds(10)))) {
+            Started first = askedBy("req_first", TRACE,
+                    () -> answers.ask(caller, conversation, "[fake pieces=4 fail-after=3 delay=50ms] One"));
+            Started second = askedBy("req_second", OTHER_TRACE,
+                    () -> answers.ask(caller, other, "[fake pieces=4 fail-after=3 delay=50ms] Two"));
+            awaitEnd(first);
+            awaitEnd(second);
+
+            assertThat(logs.saying("The model fake failed the task"))
+                    .extracting(warning -> warning.context().get("request_id") + " " + warning.context().get("trace_id"))
+                    .containsExactlyInAnyOrder("req_first " + TRACE, "req_second " + OTHER_TRACE);
+        } finally {
+            stopListening(logs);
+        }
+    }
+
+    /** An answer asked without any IDs, as by a test or a job, logs without any. */
+    @Test
+    void anAnswerAskedWithoutIdsLogsWithoutThem() throws Exception {
+        Listening logs = listen();
+        try (GeneratingAnswers answers = new GeneratingAnswers(messages, fake(Duration.ofSeconds(10)))) {
+            MDC.clear();
+            Started started = started(answers.ask(caller, conversation, "[fake pieces=5 fail-after=2 delay=1ms] Go"));
+            awaitEnd(started);
+
+            assertThat(logs.saying("The model fake failed the task")).singleElement()
+                    .satisfies(warning -> assertThat(warning.context()).isEmpty());
+        } finally {
+            stopListening(logs);
         }
     }
 
