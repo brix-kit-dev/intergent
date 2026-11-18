@@ -411,6 +411,88 @@ class ApiRoleTest {
                 .contains(" WARN ", " answer-", "] [" + requestId + "] [" + trace + "] ");
     }
 
+    /**
+     * Point 39 on the real api: an api stops while three answers are being written. One ends within the generator's
+     * drain, and its waiting call gets it completed. One hangs, so the drain stops it, and its waiting call gets it as it
+     * ended: failed, with stream_interrupted and its text so far. A streamed one that hangs sends its error and ends. All
+     * of that happens while Tomcat drains its requests and the pool is open, so the api stops in about the drain's 10
+     * seconds, not after Tomcat's 30 and the drain, and logs no error.
+     */
+    @Test
+    void anApiThatStopsAnswersTheCallsThatWaitForTheirAnswers(CapturedOutput output) throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String key = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "internal")).key();
+        List<String> conversations = new ArrayList<>();
+        for (String idempotencyKey : List.of("stop-1", "stop-2", "stop-3")) {
+            conversations.add(JSON.readValue(startConversation(key, idempotencyKey, "{\"external_user_id\":\"host-user-1\"}")
+                    .body(), Conversation.class).getId());
+        }
+        ConfigurableApplicationContext stopping =
+                ApiRole.start("--server.port=0", address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING);
+        int stoppingPort = ((ServletWebServerApplicationContext) stopping).getWebServer().getPort();
+        HttpClient client = HttpClient.newHttpClient();
+        CompletableFuture<HttpResponse<String>> hanging = client.sendAsync(askOn(stoppingPort, key, conversations.get(0),
+                "[fake hang-after=1 delay=1ms] Wait", "application/json"), HttpResponse.BodyHandlers.ofString());
+        CompletableFuture<HttpResponse<String>> slow = client.sendAsync(askOn(stoppingPort, key, conversations.get(1),
+                "[fake pieces=3 delay=2s] Slow", "application/json"), HttpResponse.BodyHandlers.ofString());
+        HttpResponse<InputStream> streamed = client.send(askOn(stoppingPort, key, conversations.get(2),
+                "[fake hang-after=1 delay=1ms] Streamed", "text/event-stream"), HttpResponse.BodyHandlers.ofInputStream());
+        try (BufferedReader stream = new BufferedReader(new InputStreamReader(streamed.body(), StandardCharsets.UTF_8))) {
+            assertThat(nextEvent(stream)).contains("event: message.started");
+            assertThat(nextEvent(stream)).contains("event: message.delta");
+            await().atMost(Duration.ofSeconds(10)).until(() -> TestDatabase.firstColumn(DATABASE,
+                    "SELECT count(*) FROM engine.conversation_messages WHERE role = 'assistant' AND status = 'in_progress'"
+                            + " AND conversation_id IN ('" + String.join("', '", conversations) + "')").equals(List.of("3")));
+
+            long start = System.nanoTime();
+            CompletableFuture<Void> closed = CompletableFuture.runAsync(stopping::close);
+            Message hung = JSON.readValue(hanging.get(25, TimeUnit.SECONDS).body(), Message.class);
+            HttpResponse<String> done = slow.get(25, TimeUnit.SECONDS);
+            List<String> rest = new ArrayList<>();
+            for (String event = nextEvent(stream); event != null; event = nextEvent(stream)) {
+                rest.add(event);
+            }
+            closed.get(25, TimeUnit.SECONDS);
+            Duration took = Duration.ofNanos(System.nanoTime() - start);
+
+            assertThat(hanging.get().statusCode()).isEqualTo(200);
+            assertThat(hung.getStatus()).isEqualTo("failed");
+            assertThat(hung.getCode()).isEqualTo("stream_interrupted");
+            assertThat(hung.getText()).isEqualTo("Piece 1 of 8. ");
+            assertThat(done.statusCode()).isEqualTo(200);
+            assertThat(JSON.readValue(done.body(), Message.class).getStatus()).isEqualTo("completed");
+            assertThat(rest).as("the stream ends with its error, and then the response ends").last().asString()
+                    .contains("event: error", "stream_interrupted");
+            assertThat(took).isLessThan(Duration.ofSeconds(20));
+            assertThat(output.getAll().lines().filter(line -> line.contains(" ERROR "))).isEmpty();
+        }
+    }
+
+    /**
+     * The next event of a stream that stays open, without its blank line, or null once the response has ended. A comment,
+     * such as a heartbeat, is not an event.
+     */
+    private static String nextEvent(BufferedReader stream) throws IOException {
+        StringBuilder event = new StringBuilder();
+        for (String line = stream.readLine(); line != null; line = stream.readLine()) {
+            if (!line.isEmpty()) {
+                if (!line.startsWith(":")) {
+                    event.append(event.isEmpty() ? "" : "\n").append(line);
+                }
+            } else if (!event.isEmpty()) {
+                return event.toString();
+            }
+        }
+        return event.isEmpty() ? null : event.toString();
+    }
+
+    private static HttpRequest askOn(int apiPort, String key, String conversationId, String text, String accept) {
+        return HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + apiPort + "/v1/conversations/" + conversationId + "/messages"))
+                .header("Authorization", "Bearer " + key).header("Content-Type", "application/json").header("Accept", accept)
+                .POST(BodyPublishers.ofString("{\"text\":\"" + text + "\"}")).build();
+    }
+
     /** POST /v1/api-keys on the real database, retried with its Idempotency-Key: the retry never sees the key. */
     @Test
     void aKeyCreatesAnotherKeyAndARetryGetsItWithoutTheSecret() throws Exception {

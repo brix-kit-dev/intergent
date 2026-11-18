@@ -16,7 +16,6 @@ import aie.core.tenancy.internal.DatabaseEndUsers;
 import aie.core.tenancy.internal.DatabaseIdempotencyKeys;
 import aie.core.tenancy.internal.DatabaseLowerTenants;
 import aie.core.tenancy.internal.DatabaseSiteKeyLookup;
-import aie.modules.conversation.api.Answers;
 import aie.modules.conversation.api.Conversations;
 import aie.modules.conversation.api.EventSignals;
 import aie.modules.conversation.api.Messages;
@@ -56,8 +55,10 @@ class ApiRole {
      * never opens a port. The gateway comes next, because it asks the pool whether a call comes from inside a
      * transaction (A-14); a route to a model that does not exist still refuses startup. The context closes the pool as
      * it closes, because the pool is AutoCloseable, and so is the generator of answers. Beans close in the reverse order
-     * they were registered in, so the generator lets its answers finish or end them while the pool is still open. A context that fails before it has made its beans would not, and
-     * neither would a gateway that refuses its routes, so the role closes the pool itself then.
+     * they were registered in, so the generator would end its answers while the pool is still open; it ends them even
+     * earlier, while Tomcat drains its requests, through {@link AnswersShutdown} (point 39). A context that fails before
+     * it has made its beans would not close the pool, and neither would a gateway that refuses its routes, so the role
+     * closes the pool itself then.
      */
     static ConfigurableApplicationContext start(String... args) {
         RoleSettings settings = RoleSettings.read(args);
@@ -82,7 +83,8 @@ class ApiRole {
                 Messages messages = new DatabaseMessages(database, signals);
                 context.registerBean(EventSignals.class, () -> signals);
                 context.registerBean(Messages.class, () -> messages);
-                context.registerBean(Answers.class, () -> new GeneratingAnswers(messages, gateway));
+                context.registerBean(GeneratingAnswers.class, () -> new GeneratingAnswers(messages, gateway));
+                context.registerBean(AnswersShutdown.class, () -> new AnswersShutdown(context.getBean(GeneratingAnswers.class)::close));
             }, args);
         } catch (RuntimeException e) {
             database.close();
