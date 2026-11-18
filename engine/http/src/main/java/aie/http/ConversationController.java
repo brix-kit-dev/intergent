@@ -89,19 +89,22 @@ class ConversationController implements ConversationsApi, StreamsApi {
     private final Duration wait;
     private final HttpServletRequest request;
     private final EventStream stream;
+    private final StreamSlots streams;
 
     /**
      * The wait is the contract's 120 seconds unless a test registers a shorter one. The stream wakes on the signals the
-     * role's messages ring.
+     * role's messages ring. The streams open at once are as many as the role's limit, or 256 when none is registered.
      */
     ConversationController(EndUsers endUsers, Conversations conversations, Answers answers, Messages messages,
-            EventSignals signals, ObjectProvider<AnswerWait> wait, HttpServletRequest request) {
+            EventSignals signals, ObjectProvider<AnswerWait> wait, ObjectProvider<StreamLimit> streamLimit,
+            HttpServletRequest request) {
         this.endUsers = endUsers;
         this.conversations = conversations;
         this.answers = answers;
         this.messages = messages;
         this.wait = wait.getIfAvailable(() -> AnswerWait.CONTRACT).limit();
         this.stream = new EventStream(messages, signals);
+        this.streams = new StreamSlots(streamLimit.getIfAvailable(() -> StreamLimit.DEFAULT));
         this.request = request;
     }
 
@@ -154,11 +157,12 @@ class ConversationController implements ConversationsApi, StreamsApi {
      * <p>Everything about the request is checked before anything is stored, and a refusal is a plain problem, before any
      * stream starts. A full instance answers 429 and stores nothing, so the same Idempotency-Key may come back after
      * Retry-After. A streamed answer is kept with its Idempotency-Key as its message, and a retry with the key gets the
-     * same answer's events again, from the first, without asking anything (M2-10-2). A browser speaks only in its own end
-     * user's conversations, so another end user's is missing, before anything is asked or sent again (M2-12-3). The
-     * locale is checked but not used yet: it is the language to answer in, which the prompts of M3 need. data_class is
-     * checked by its enum and waits for
-     * the trust layer of M3.
+     * same answer's events again, from the first, without asking anything (M2-10-2). A stream takes one of the instance's
+     * stream slots before anything is asked or sent again, and gives it back when it ends; with none free it is 429, and
+     * nothing is stored (point 40). A browser speaks only in its own end user's conversations, so another end user's is
+     * missing, before anything is asked or sent again (M2-12-3). The locale is checked but not used yet: it is the
+     * language to answer in, which the prompts of M3 need. data_class is checked by its enum and waits for the trust layer
+     * of M3.
      */
     @Override
     public ResponseEntity<Message> createMessage(String conversationId, CreateMessageRequest body,
@@ -175,11 +179,19 @@ class ConversationController implements ConversationsApi, StreamsApi {
         Owner caller = caller();
         requireReachable(caller, conversation);
         if (request.getAttribute(IdempotencyFilter.RESEND) instanceof String answer) {
-            send(caller, conversation, answer, 0, eventStream(currentResponse()));
-            return null;
+            return streams.stream(() -> {
+                send(caller, conversation, answer, 0, eventStream(currentResponse()));
+                return null;
+            });
+        }
+        if (streamed) {
+            return streams.stream(() -> switch (answers.ask(caller, conversation, text)) {
+                case Answers.Start.Started started -> streamed(caller, conversation, started);
+                case Answers.Start.Busy busy -> throw full();
+                case Answers.Start.NotFound missing -> throw new ResponseStatusException(HttpStatus.NOT_FOUND);
+            });
         }
         return switch (answers.ask(caller, conversation, text)) {
-            case Answers.Start.Started started when streamed -> streamed(caller, conversation, started);
             case Answers.Start.Started started -> ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON)
                     .body(answered(caller, conversation, started));
             case Answers.Start.Busy busy -> throw full();
@@ -291,7 +303,8 @@ class ConversationController implements ConversationsApi, StreamsApi {
      * browser, one in another end user's conversation (M2-12-3). Last-Event-ID
      * must be an id the stream sent (M2-8 decision 1), and an empty one is none, as the SSE standard's last event ID is
      * empty until the first event came. A caller that already has the ending gets the headers and nothing else (M2-8
-     * decision 2), and so does HEAD, which has no body to wait for.
+     * decision 2), and so does HEAD, which has no body to wait for. Only a stream that reads the log takes one of the
+     * instance's stream slots, before its first read; with none free it is 429 (point 40).
      */
     @Override
     public @Nullable ResponseEntity<String> streamMessageEvents(String conversationId, String messageId,
@@ -306,11 +319,14 @@ class ConversationController implements ConversationsApi, StreamsApi {
         messages.find(caller, conversation, answer).filter(found -> found.role() == Messages.Role.ASSISTANT)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
         boolean hasEnding = after > 0 && hasEnding(caller, conversation, answer, after);
-        HttpServletResponse response = eventStream(currentResponse());
-        if (!hasEnding && !HttpMethod.HEAD.matches(request.getMethod())) {
-            send(caller, conversation, answer, after, response);
+        if (hasEnding || HttpMethod.HEAD.matches(request.getMethod())) {
+            eventStream(currentResponse());
+            return null;
         }
-        return null;
+        return streams.stream(() -> {
+            send(caller, conversation, answer, after, eventStream(currentResponse()));
+            return null;
+        });
     }
 
     private List<MediaType> accepted() {

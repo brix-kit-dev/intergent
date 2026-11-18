@@ -12,6 +12,7 @@ import aie.core.tenancy.api.SessionTokens;
 import aie.core.tenancy.api.SiteKeyLookup;
 import aie.core.tenancy.internal.SignedSessionTokens;
 import aie.http.AnswerWait;
+import aie.http.StreamLimit;
 import aie.modules.conversation.api.Answers;
 import aie.modules.conversation.api.Conversations;
 import aie.modules.conversation.api.EventSignals;
@@ -121,7 +122,15 @@ final class TestApi {
     /** With the Idempotency-Keys a test gives too, such as ones that remember what the filter asked of them. */
     static ConfigurableApplicationContext start(ApiKeyLookup keys, ApiKeyManagement management, EndUsers endUsers,
             Conversations conversations, StandInAnswers answers, IdempotencyKeys idempotency, String... args) {
+        return start(keys, management, endUsers, conversations, answers, idempotency, StreamLimit.DEFAULT, args);
+    }
+
+    /** With a stream limit too, such as a small one a test can fill (point 40). */
+    static ConfigurableApplicationContext start(ApiKeyLookup keys, ApiKeyManagement management, EndUsers endUsers,
+            Conversations conversations, StandInAnswers answers, IdempotencyKeys idempotency, StreamLimit streams,
+            String... args) {
         return ApiRole.serve(context -> {
+            context.registerBean(StreamLimit.class, () -> streams);
             context.registerBean(ApiKeyLookup.class, () -> keys);
             context.registerBean(ApiKeyManagement.class, () -> management);
             context.registerBean(IdempotencyKeys.class, () -> idempotency);

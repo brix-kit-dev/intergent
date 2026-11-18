@@ -487,6 +487,67 @@ class ApiRoleTest {
         return event.isEmpty() ? null : event.toString();
     }
 
+    /**
+     * Point 40 on the real api: an api set to keep one stream open answers 429 with Retry-After to a second streamed
+     * message, and stores nothing for it; once the first stream ends, the next one opens.
+     */
+    @Test
+    void anApiWithEveryStreamSlotTakenStartsNoMoreStreamsAndStoresNothing() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String key = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "internal")).key();
+        String holding = JSON.readValue(startConversation(key, "slots-1", "{\"external_user_id\":\"host-user-1\"}").body(),
+                Conversation.class).getId();
+        String waiting = JSON.readValue(startConversation(key, "slots-2", "{\"external_user_id\":\"host-user-1\"}").body(),
+                Conversation.class).getId();
+        ConfigurableApplicationContext oneStream = ApiRole.start("--server.port=0", address(),
+                password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING, "--engine.streams.max=1");
+        try {
+            int onePort = ((ServletWebServerApplicationContext) oneStream).getWebServer().getPort();
+            HttpClient client = HttpClient.newHttpClient();
+            HttpResponse<InputStream> held = client.send(askOn(onePort, key, holding, "[fake hang-after=1 delay=1ms] Hold",
+                    "text/event-stream"), HttpResponse.BodyHandlers.ofInputStream());
+            try (BufferedReader stream = new BufferedReader(new InputStreamReader(held.body(), StandardCharsets.UTF_8))) {
+                String started = nextEvent(stream);
+                String answer = JSON.readValue(started.lines().filter(line -> line.startsWith("data: ")).findFirst()
+                        .orElseThrow().substring("data: ".length()), MessageStartedEvent.class).getMessageId();
+
+                HttpResponse<String> refused = client.send(askOn(onePort, key, waiting, "[fake pieces=1 delay=1ms] Hi",
+                        "text/event-stream"), HttpResponse.BodyHandlers.ofString());
+
+                assertThat(refused.statusCode()).isEqualTo(429);
+                assertThat(refused.headers().firstValue("Retry-After")).contains("5");
+                assertThat(JSON.readValue(refused.body(), Problem.class).getCode()).isEqualTo("rate_limited");
+                assertThat(TestDatabase.firstColumn(DATABASE, "SELECT count(*) FROM engine.conversation_messages"
+                        + " WHERE conversation_id = '" + waiting + "'")).as("nothing is stored").containsExactly("0");
+
+                assertThat(cancel(onePort, key, holding, answer, null).statusCode()).isEqualTo(200);
+                while (nextEvent(stream) != null) {
+                    // The held stream sends its ending and ends, which frees its slot.
+                }
+            }
+            HttpResponse<String> opened = client.send(askOn(onePort, key, waiting, "[fake pieces=1 delay=1ms] Hi",
+                    "text/event-stream"), HttpResponse.BodyHandlers.ofString());
+            assertThat(opened.statusCode()).isEqualTo(200);
+            assertThat(eventsOf(opened.body())).last().asString().contains("event: message.completed");
+        } finally {
+            oneStream.close();
+        }
+    }
+
+    /** A stream limit that is no whole number from 1 to 10 000 refuses startup, before the pool opens, by its variable. */
+    @Test
+    void aStreamLimitThatIsNoWholeNumberRefusesStartupBeforeTheDatabase(CapturedOutput output) {
+        for (String limit : List.of("0", "-1", "10001", "many", "2.5")) {
+            assertThat(ApiRole.run(address(), password("wrong-secret-value"), TestApi.SESSION_KEY_SETTING,
+                    "--engine.streams.max=" + limit)).isEqualTo(EngineApplication.EXIT_FAILED);
+        }
+
+        assertThat(output.getErr().lines().filter(line -> line.startsWith("Startup refused: ")))
+                .hasSize(5).allSatisfy(line -> assertThat(line)
+                        .isEqualTo("Startup refused: ENGINE_STREAMS_MAX must be a whole number from 1 to 10000"));
+    }
+
     private static HttpRequest askOn(int apiPort, String key, String conversationId, String text, String accept) {
         return HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + apiPort + "/v1/conversations/" + conversationId + "/messages"))
                 .header("Authorization", "Bearer " + key).header("Content-Type", "application/json").header("Accept", accept)

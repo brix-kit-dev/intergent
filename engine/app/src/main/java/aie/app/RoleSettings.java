@@ -17,6 +17,8 @@ final class RoleSettings {
     static final String SESSION_KEY = "engine.session.key";
     /** Only checks session tokens. It keeps the tokens already out working while the key changes. */
     static final String SESSION_PREVIOUS_KEY = "engine.session.previous.key";
+    /** How many event streams an api instance keeps open at once (point 40); 256 without one. */
+    static final String STREAMS_MAX = "engine.streams.max";
 
     private final Environment environment;
 

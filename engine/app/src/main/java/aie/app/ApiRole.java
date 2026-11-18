@@ -16,6 +16,7 @@ import aie.core.tenancy.internal.DatabaseEndUsers;
 import aie.core.tenancy.internal.DatabaseIdempotencyKeys;
 import aie.core.tenancy.internal.DatabaseLowerTenants;
 import aie.core.tenancy.internal.DatabaseSiteKeyLookup;
+import aie.http.StreamLimit;
 import aie.modules.conversation.api.Conversations;
 import aie.modules.conversation.api.EventSignals;
 import aie.modules.conversation.api.Messages;
@@ -38,6 +39,8 @@ class ApiRole {
 
     /** Requests run on virtual threads, so the pool, not the thread count, caps the database connections. */
     static final int POOL_SIZE = 10;
+    /** The most event streams an instance may be set to keep open, so that a slip of the keyboard does not lift the cap. */
+    static final int MAX_STREAMS = 10_000;
 
     static int run(String... args) {
         try {
@@ -50,7 +53,8 @@ class ApiRole {
     }
 
     /**
-     * The session keys are checked before the pool opens, so a missing or weak key never gets as far as the database.
+     * The session keys and the stream limit are checked before the pool opens, so a missing or weak key, or a limit that
+     * is no number, never gets as far as the database.
      * The pool runs the self-check of blueprint 7.6 before its first connection, so a role that may not serve traffic
      * never opens a port. The gateway comes next, because it asks the pool whether a call comes from inside a
      * transaction (A-14); a route to a model that does not exist still refuses startup. The context closes the pool as
@@ -65,6 +69,7 @@ class ApiRole {
         String address = settings.required(RoleSettings.DATABASE_URL);
         String password = settings.required(RoleSettings.APP_PASSWORD);
         SessionTokens sessionTokens = SessionKeys.tokens(settings, Clock.systemUTC());
+        StreamLimit streamLimit = streamLimit(settings);
         PgPool database = PgRuntime.pool(address, password, POOL_SIZE);
         try {
             Gateway gateway = Models.gateway(database::insideTx);
@@ -77,6 +82,7 @@ class ApiRole {
                 context.registerBean(EndUsers.class, () -> new DatabaseEndUsers(database));
                 context.registerBean(SiteKeyLookup.class, () -> new DatabaseSiteKeyLookup(database));
                 context.registerBean(SessionTokens.class, () -> sessionTokens);
+                context.registerBean(StreamLimit.class, () -> streamLimit);
                 context.registerBean(Gateway.class, () -> gateway);
                 context.registerBean(Conversations.class, () -> new DatabaseConversations(database));
                 EventSignals signals = new LocalEventSignals();
@@ -90,6 +96,25 @@ class ApiRole {
             database.close();
             throw e;
         }
+    }
+
+    /**
+     * How many event streams the instance keeps open at once (point 40): engine.streams.max, a whole number from 1 to
+     * {@link #MAX_STREAMS}, or 256 without one. Anything else refuses startup, by the variable an operator sets.
+     */
+    static StreamLimit streamLimit(RoleSettings settings) {
+        return settings.optional(RoleSettings.STREAMS_MAX).map(value -> {
+            try {
+                int max = Integer.parseInt(value.strip());
+                if (max >= 1 && max <= MAX_STREAMS) {
+                    return new StreamLimit(max);
+                }
+            } catch (NumberFormatException notAWholeNumber) {
+                // Refused below, with the rule.
+            }
+            throw new IllegalArgumentException(RoleSettings.variable(RoleSettings.STREAMS_MAX)
+                    + " must be a whole number from 1 to " + MAX_STREAMS);
+        }).orElse(StreamLimit.DEFAULT);
     }
 
     /** The web layer, with the beans that connect it to the rest of the engine. Tests pass stand-ins for them. */
