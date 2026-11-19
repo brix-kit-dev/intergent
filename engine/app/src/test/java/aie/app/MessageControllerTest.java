@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import aie.app.TestApi.StandInAnswers.Outcome;
 import aie.http.AnswerWait;
+import aie.http.StreamLimit;
 import aie.http.api.model.Message;
 import aie.http.api.model.Problem;
 import aie.http.api.model.Usage;
@@ -31,7 +32,7 @@ import tools.jackson.databind.json.JsonMapper;
 
 /**
  * POST /v1/conversations/{id}/messages without streaming, on the real web stack, with a stand-in that answers the way
- * each test tells it. The wait is TestApi's short one.
+ * each test tells it. The wait is TestApi's short one, except in the one test whose answer must end within it.
  */
 @ExtendWith(OutputCaptureExtension.class)
 class MessageControllerTest {
@@ -40,6 +41,8 @@ class MessageControllerTest {
     private static final TestApi.StandInAnswers ANSWERS = new TestApi.StandInAnswers();
     /** Conversations of browsers' end users, which a browser's request looks up before it does anything (M2-12-3). */
     private static final TestApi.StandInConversations CONVERSATIONS = new TestApi.StandInConversations();
+    /** A hundred times the stand-in's 100 ms before an answer that ends soon does (point 42). */
+    private static final AnswerWait LONG_WAIT = new AnswerWait(Duration.ofSeconds(10));
     /** A character outside the Basic Multilingual Plane: one character, two UTF-16 units. */
     private static final String ASTRAL = "😀";
     private static final String TEXT_RULE = "text must have 1 to 32000 characters";
@@ -74,8 +77,14 @@ class MessageControllerTest {
     }
 
     private static HttpResponse<String> sendTo(String conversationId, String body, String... headers) throws Exception {
+        return sendTo(port, conversationId, body, headers);
+    }
+
+    /** The same, to the api on the given port. */
+    private static HttpResponse<String> sendTo(int apiPort, String conversationId, String body, String... headers)
+            throws Exception {
         HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(
-                        "http://127.0.0.1:" + port + "/v1/conversations/" + conversationId + "/messages"))
+                        "http://127.0.0.1:" + apiPort + "/v1/conversations/" + conversationId + "/messages"))
                 .header("Authorization", TestApi.AUTHORIZATION).header("Content-Type", "application/json")
                 .timeout(Duration.ofSeconds(30)).POST(BodyPublishers.ofString(body));
         for (int i = 0; i < headers.length; i += 2) {
@@ -141,14 +150,23 @@ class MessageControllerTest {
         assertThat(response.body()).contains("\"completed_at\":\"2026-11-14T00:00:01Z\"").doesNotContain("\"usage\"");
     }
 
+    /**
+     * The stand-in ends the answer 100 ms after it was asked. Against the shared api's 300 ms wait, a busy machine could
+     * push that ending past the wait (point 42), so this test runs its own api, which waits a hundred times as long.
+     */
     @Test
     void theCallWaitsForAnAnswerThatEndsWithinTheWait() throws Exception {
-        ANSWERS.outcome = Outcome.COMPLETES_SOON;
+        TestApi.StandInAnswers answers = new TestApi.StandInAnswers();
+        answers.outcome = Outcome.COMPLETES_SOON;
 
-        Message answer = answered(send("{\"text\":\"Hi\"}"));
+        try (ConfigurableApplicationContext api = TestApi.start(TestApi.LOOKUP, new TestApi.StandInKeys(),
+                new TestApi.StandInEndUsers(), new TestApi.StandInConversations(), answers, TestApi.NO_REPLAYS,
+                StreamLimit.DEFAULT, LONG_WAIT, "--server.port=0")) {
+            Message answer = answered(sendTo(TestApi.port(api), "conv_1", "{\"text\":\"Hi\"}"));
 
-        assertThat(answer.getStatus()).isEqualTo("completed");
-        assertThat(answer.getText()).isEqualTo("Hello!");
+            assertThat(answer.getStatus()).isEqualTo("completed");
+            assertThat(answer.getText()).isEqualTo("Hello!");
+        }
     }
 
     @Test

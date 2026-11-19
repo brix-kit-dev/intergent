@@ -129,6 +129,13 @@ final class TestApi {
     static ConfigurableApplicationContext start(ApiKeyLookup keys, ApiKeyManagement management, EndUsers endUsers,
             Conversations conversations, StandInAnswers answers, IdempotencyKeys idempotency, StreamLimit streams,
             String... args) {
+        return start(keys, management, endUsers, conversations, answers, idempotency, streams, WAIT, args);
+    }
+
+    /** With a wait too, such as a long one that an answer must end within even on a busy machine (point 42). */
+    static ConfigurableApplicationContext start(ApiKeyLookup keys, ApiKeyManagement management, EndUsers endUsers,
+            Conversations conversations, StandInAnswers answers, IdempotencyKeys idempotency, StreamLimit streams,
+            AnswerWait wait, String... args) {
         return ApiRole.serve(context -> {
             context.registerBean(StreamLimit.class, () -> streams);
             context.registerBean(ApiKeyLookup.class, () -> keys);
@@ -142,7 +149,7 @@ final class TestApi {
             context.registerBean(Answers.class, () -> answers);
             context.registerBean(Messages.class, () -> new StandInMessages(answers));
             context.registerBean(EventSignals.class, () -> EventSignals.NONE);
-            context.registerBean(AnswerWait.class, () -> WAIT);
+            context.registerBean(AnswerWait.class, () -> wait);
         }, args);
     }
 
