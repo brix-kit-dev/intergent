@@ -537,7 +537,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 
 ## 对外契约
 
-[contracts/openapi.yaml](contracts/openapi.yaml) 是公开 API 的唯一源头，用 OpenAPI 3.1 写。现在有公共约定、身份和对话，其他资源做到时再加。目前实现了 `POST /v1/api-keys`、`DELETE /v1/api-keys/{key_id}`、`POST /v1/sessions` 和 `POST /v1/anonymous-sessions`；其他 `/v1` 路径带有效密钥时返回 404。
+[contracts/openapi.yaml](contracts/openapi.yaml) 是公开 API 的唯一源头，用 OpenAPI 3.1 写。现在有公共约定、身份和对话，其他资源做到时再加。契约里的接口都有实现。生成的 Java 接口不带默认实现，实现类少写一个方法就编译不过；但契约每多一个标签（`tags`）就多生成一个 Java 接口，没有类实现它时编译照样通过，这个标签下的接口带有效密钥也只得到 404。契约里没有的 `/v1` 路径，带有效的服务端密钥返回 404，带有效的会话令牌返回 403，不带凭证或凭证无效返回 401。
 
 改接口时先改这个文件。`engine/http` 构建时从它生成 Java 接口和数据类型，包名是 `aie.http.api`。实现类写成生成接口的实现，契约一变，对不上的代码就编译不过。
 
