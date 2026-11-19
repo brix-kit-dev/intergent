@@ -2,6 +2,7 @@ package aie.app;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import aie.core.tenancy.api.SessionTokens;
 import aie.http.api.model.Problem;
 import java.io.IOException;
 import java.net.URI;
@@ -58,7 +59,9 @@ class RequestTextTest {
     private static final Map<String, String> BODIES = Map.of(
             "createSession", "{\"external_user_id\":\"u1\",\"identity_level\":\"verified\",\"scopes\":[\"faq\"],"
                     + "\"context\":{\"order_id\":\"A-1001\"},\"locale\":\"ja-JP\"}",
-            "createAnonymousSession", "{\"site_key\":\"" + TestApi.SITE_KEY + "\",\"locale\":\"ja-JP\"}",
+            "createAnonymousSession", "{\"site_key\":\"" + TestApi.SITE_KEY + "\",\"locale\":\"ja-JP\","
+                    + "\"previous_token\":\"" + TestApi.SESSION_TOKENS.issue(new SessionTokens.Session("ten_test", "app_test",
+                            "eu_1", SessionTokens.IdentityLevel.ANONYMOUS, List.of(), Map.of(), null)).token() + "\"}",
             "createApiKey", "{\"name\":\"ci\",\"expires_at\":\"2099-01-01T00:00:00Z\"}",
             "createConversation", "{\"external_user_id\":\"host-user-1\",\"locale\":\"ja-JP\"}",
             "createMessage", "{\"text\":\"Hi\",\"locale\":\"ja-JP\",\"data_class\":\"internal\"}");

@@ -819,6 +819,14 @@ components:
           maxLength: 255
         locale:
           $ref: "#/components/schemas/Locale"
+        previous_token:
+          type: string
+          description: |
+            The visitor's last token, so that they go on as the same end user, with the same
+            conversations. It is renewed when it is an anonymous token of this site key's application
+            that has not expired, or expired less than 7 days ago. Any other token is no error: the
+            visitor is a new one then, and the end_user_id of the answer is not the one before.
+          maxLength: 4096
 
     Session:
       type: object

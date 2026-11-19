@@ -2,6 +2,7 @@ package aie.http;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import aie.http.api.model.CreateAnonymousSessionRequest;
 import aie.http.api.model.CreateSessionRequest;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
@@ -38,6 +39,15 @@ class SessionRequestsTest {
     void contextHasTheContractsLimits() throws Exception {
         assertThat(getter("getContext").getAnnotation(Size.class).max()).isEqualTo(SessionRequests.MAX_CONTEXT);
         assertThat(typeArgument("getContext", 1).getAnnotation(Size.class).max()).isEqualTo(SessionRequests.MAX_CONTEXT_VALUE);
+    }
+
+    /** An anonymous session's previous_token (point 43). */
+    @Test
+    void aPreviousTokenHasTheContractsLength() throws Exception {
+        Size size = CreateAnonymousSessionRequest.class.getMethod("getPreviousToken").getAnnotation(Size.class);
+
+        assertThat(size.min()).isZero();
+        assertThat(size.max()).isEqualTo(SessionRequests.MAX_PREVIOUS_TOKEN);
     }
 
     private static java.lang.reflect.Method getter(String name) throws NoSuchMethodException {

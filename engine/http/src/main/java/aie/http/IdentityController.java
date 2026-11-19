@@ -20,6 +20,7 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 import org.jspecify.annotations.Nullable;
@@ -127,15 +128,18 @@ class IdentityController implements IdentityApi {
 
     /**
      * A token with the lowest rights for a visitor of the host's site (blueprint 6.5): no scopes, no context, and an end
-     * user of its own for this session. SiteKeyFilter has checked the site key and the origin, so the caller is the
-     * key's application. The token is never stored, so a replay leaves it out, as it does for sessions.
+     * user of its own. A visitor who brings a token that can still be renewed keeps that token's end user, and so their
+     * conversations (point 43); any other visitor gets a new one. SiteKeyFilter has checked the site key and the origin,
+     * so the caller is the key's application. The token is never stored, so a replay leaves it out, as it does for
+     * sessions.
      */
     @Override
     public ResponseEntity<Session> createAnonymousSession(CreateAnonymousSessionRequest body,
             @Nullable String idempotencyKey, @Nullable String engineVersion, @Nullable String traceparent) {
         String locale = SessionRequests.locale(body.getLocale());
+        String previousToken = SessionRequests.previousToken(body.getPreviousToken());
         Owner caller = caller();
-        String endUserId = endUsers.anonymous(caller);
+        String endUserId = renewed(caller, previousToken).orElseGet(() -> endUsers.anonymous(caller));
         Issued issued = sessionTokens.issue(new SessionTokens.Session(caller.tenantId(), caller.applicationId(), endUserId,
                 IdentityLevel.ANONYMOUS, List.of(), Map.of(), locale));
         request.setAttribute(IdempotencyFilter.NOT_STORED, Set.of("token"));
@@ -143,6 +147,19 @@ class IdentityController implements IdentityApi {
                 .token(issued.token())
                 .scopes(List.of());
         return ResponseEntity.status(HttpStatus.CREATED).body(answer);
+    }
+
+    /**
+     * The end user of a visitor's earlier token, when SessionTokens can renew it and it is of the caller's tenant and
+     * application (point 43). Nothing else carries over: the new token has the locale this request gives, as for any
+     * visitor.
+     */
+    private Optional<String> renewed(Owner caller, @Nullable String previousToken) {
+        return Optional.ofNullable(previousToken)
+                .flatMap(sessionTokens::renewable)
+                .filter(session -> session.tenantId().equals(caller.tenantId())
+                        && session.applicationId().equals(caller.applicationId()))
+                .map(SessionTokens.Session::endUserId);
     }
 
     /** ApiKeyFilter has put the caller here before any /v1 request reaches a controller. */

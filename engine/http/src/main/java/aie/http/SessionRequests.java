@@ -24,6 +24,8 @@ final class SessionRequests {
     static final int MAX_CONTEXT = 10;
     static final int MAX_CONTEXT_KEY = 40;
     static final int MAX_CONTEXT_VALUE = 200;
+    /** An anonymous session's previous_token: more than any token the engine issues, which stay near 3 KB (point 43). */
+    static final int MAX_PREVIOUS_TOKEN = 4096;
     /** Scope names and context keys, as the contract's pattern says. It must match the whole name. */
     static final Pattern NAME = Pattern.compile("[A-Za-z0-9_.:-]+");
 
@@ -80,6 +82,23 @@ final class SessionRequests {
     static String locale(String value) {
         return value == null ? null : SessionTokens.standardLocale(value).orElseThrow(() ->
                 refused("locale must be a BCP 47 language tag of at most " + SessionTokens.MAX_LOCALE + " characters, such as ja-JP"));
+    }
+
+    /**
+     * An anonymous session's previous_token as the contract allows it, or null without one (point 43). Whether it can be
+     * renewed is not a check: a token that cannot be renewed just makes a new visitor.
+     */
+    static String previousToken(String value) {
+        if (value == null) {
+            return null;
+        }
+        if (value.codePointCount(0, value.length()) > MAX_PREVIOUS_TOKEN) {
+            throw refused("previous_token must have at most " + MAX_PREVIOUS_TOKEN + " characters");
+        }
+        if (value.indexOf('\0') >= 0) {
+            throw refused("previous_token cannot hold a NUL character");
+        }
+        return value;
     }
 
     private static boolean isName(String name, int maxLength) {

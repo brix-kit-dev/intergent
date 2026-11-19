@@ -9,7 +9,10 @@ import aie.core.tenancy.api.Provisioning.IssuedKey;
 import aie.core.tenancy.api.SessionTokens;
 import aie.core.tenancy.api.SessionTokens.IdentityLevel;
 import aie.core.tenancy.internal.DatabaseProvisioning;
+import aie.core.tenancy.internal.SignedSessionTokens;
 import aie.http.api.model.Conversation;
+import aie.http.api.model.Message;
+import aie.http.api.model.MessageList;
 import aie.http.api.model.Session;
 import java.io.IOException;
 import java.net.URI;
@@ -18,6 +21,10 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpRequest.BodyPublishers;
 import java.net.http.HttpResponse;
 import java.sql.SQLException;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -33,8 +40,8 @@ import tools.jackson.databind.json.JsonMapper;
 
 /**
  * POST /v1/anonymous-sessions on the real api role and a real database: a site key issued the way admin issues it, the
- * anonymous end users it makes, a replay, a revoked key, and the conversations its token reaches. AnonymousSessionsTest
- * checks the rest with stand-ins.
+ * anonymous end users it makes, a replay, a revoked key, the conversations its token reaches, and a visitor who comes
+ * back with their token (point 43). AnonymousSessionsTest checks the rest with stand-ins.
  */
 @Testcontainers
 class AnonymousSessionsDatabaseTest {
@@ -156,6 +163,63 @@ class AnonymousSessionsDatabaseTest {
         assertThat(rows("SELECT tenant_id || ' ' || application_id || ' ' || end_user_id FROM engine.conversation_conversations"
                 + " WHERE conversation_id = '" + own.getId() + "'")).containsExactly(tenant + " " + application + " " + visitor.getEndUserId());
         assertThat(rows("SELECT count(*) FROM engine.tenancy_end_users")).containsExactly(endUsers);
+    }
+
+    /** A visitor who brings their earlier token, through the site key given. */
+    private static HttpResponse<String> renew(String siteKey, String previousToken) throws IOException, InterruptedException {
+        HttpRequest request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/v1/anonymous-sessions"))
+                .header("Content-Type", "application/json")
+                .header("Origin", SHOP)
+                .POST(BodyPublishers.ofString("{\"site_key\":\"" + siteKey + "\",\"previous_token\":\"" + previousToken + "\"}"))
+                .build();
+        return HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
+    }
+
+    /** A visitor's token as this api would have issued it at that moment. */
+    private static String issuedAt(Instant moment, String endUserId) {
+        return new SignedSessionTokens(Clock.fixed(moment, ZoneOffset.UTC), TestApi.SESSION_KEY, List.of())
+                .issue(new SessionTokens.Session(tenant, application, endUserId, IdentityLevel.ANONYMOUS, List.of(), Map.of(), null))
+                .token();
+    }
+
+    /**
+     * A visitor who comes back with their token goes on as the same end user, even with a token that expired days ago:
+     * the new token reads the conversation and its history, and no end user is made (point 43). A token that expired
+     * over seven days ago, or one brought to another application's site key, makes a new visitor, who reads that
+     * conversation as missing.
+     */
+    @Test
+    void aRenewedTokenReadsTheConversationAndHistoryOfTheOldOne() throws Exception {
+        String siteKey = newSiteKey().key();
+        Session visitor = JSON.readValue(post(SHOP, siteKey).body(), Session.class);
+        String id = JSON.readValue(conversation(visitor.getToken(), "POST", "/v1/conversations", "{}").body(), Conversation.class).getId();
+        Message answer = JSON.readValue(conversation(visitor.getToken(), "POST", "/v1/conversations/" + id + "/messages",
+                "{\"text\":\"[fake pieces=2 delay=1ms] Hi\"}").body(), Message.class);
+        String history = conversation(visitor.getToken(), "GET", "/v1/conversations/" + id + "/messages", null).body();
+        String endUsers = rows("SELECT count(*) FROM engine.tenancy_end_users").getFirst();
+
+        Session renewed = JSON.readValue(renew(siteKey, visitor.getToken()).body(), Session.class);
+        Session late = JSON.readValue(renew(siteKey, issuedAt(Instant.now().minus(Duration.ofDays(2)), visitor.getEndUserId())).body(),
+                Session.class);
+
+        assertThat(answer.getStatus()).isEqualTo("completed");
+        assertThat(JSON.readValue(history, MessageList.class).getData()).extracting(Message::getRole).containsExactly("user", "assistant");
+        for (Session same : List.of(renewed, late)) {
+            assertThat(same.getEndUserId()).isEqualTo(visitor.getEndUserId());
+            assertThat(conversation(same.getToken(), "GET", "/v1/conversations/" + id, null).statusCode()).isEqualTo(200);
+            assertThat(conversation(same.getToken(), "GET", "/v1/conversations/" + id + "/messages", null).body()).isEqualTo(history);
+        }
+        assertThat(rows("SELECT count(*) FROM engine.tenancy_end_users")).as("no end user is made").containsExactly(endUsers);
+
+        String otherSiteKey = provisioning.createSiteKey(
+                tenant, provisioning.createApplication(tenant, "test", "internal"), List.of(SHOP)).key();
+        Session tooLate = JSON.readValue(renew(siteKey, issuedAt(Instant.now().minus(Duration.ofDays(8)), visitor.getEndUserId())).body(),
+                Session.class);
+        Session elsewhere = JSON.readValue(renew(otherSiteKey, visitor.getToken()).body(), Session.class);
+        for (Session stranger : List.of(tooLate, elsewhere)) {
+            assertThat(stranger.getEndUserId()).isNotEqualTo(visitor.getEndUserId());
+            assertThat(conversation(stranger.getToken(), "GET", "/v1/conversations/" + id, null).statusCode()).isEqualTo(404);
+        }
     }
 
     /** Another origin and a revoked key are refused before anything is made. */
