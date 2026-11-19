@@ -166,6 +166,52 @@ class TextRulesTest {
                 "A-5: core/src/main/resources/db/migration/tenancy/V1__a.sql:2: region code \"cn\"");
     }
 
+    /**
+     * M3-1: the region pack loader may speak of regions, since it reads the pack DEPLOY_REGION names, but a region code
+     * is a region in the code even there.
+     */
+    @Test
+    void theRegionPackLoaderMaySpeakOfRegionsButNotNameOne() throws IOException {
+        write("app/src/main/java/aie/app/RegionPacks.java", """
+                class RegionPacks {
+                    static final String SETTING = "deploy.region";
+                    static RegionPack read(String region) { return null; }
+                    String fallback = "jp";
+                }
+                """);
+        write("app/src/main/java/aie/app/RegionPack.java", "record RegionPack(String region) {}");
+
+        assertThat(TextRules.violations(engine)).containsExactly("A-5: app/src/main/java/aie/app/RegionPacks.java:4: region code \"jp\"");
+    }
+
+    /** The rest of the startup entry may name the loader's classes to load its pack, and no other region word. */
+    @Test
+    void theStartupEntryMayNameTheLoaderAndNothingElse() throws IOException {
+        write("app/src/main/java/aie/app/ApiRole.java", """
+                class ApiRole {
+                    RegionPack pack = RegionPacks.read(null);
+                    String regionName;
+                    String text = "region";
+                }
+                """);
+
+        assertThat(TextRules.violations(engine)).containsExactly(
+                "A-5: app/src/main/java/aie/app/ApiRole.java:3: region in the name regionName",
+                "A-5: app/src/main/java/aie/app/ApiRole.java:4: region in the text region");
+    }
+
+    /** Outside the startup entry, even the loader's names are a region in the code, and so is a loader of another module. */
+    @Test
+    void onlyTheStartupEntryHasTheLoader() throws IOException {
+        write("core/src/main/java/aie/core/gateway/Pick.java", "class Pick { RegionPack pack; }");
+        write("http/src/main/java/aie/http/RegionPacks.java", "class RegionPacks { String region; }");
+
+        assertThat(TextRules.violations(engine)).containsExactly(
+                "A-5: core/src/main/java/aie/core/gateway/Pick.java:1: region in the name RegionPack",
+                "A-5: http/src/main/java/aie/http/RegionPacks.java:1: region in the name RegionPacks",
+                "A-5: http/src/main/java/aie/http/RegionPacks.java:1: region in the name region");
+    }
+
     /** Unlike model names, a region in an adapter is still a region in the code. */
     @Test
     void anAdapterMayNotBranchOnARegionEither() throws IOException {

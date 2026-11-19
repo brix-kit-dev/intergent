@@ -53,8 +53,9 @@ class ApiRole {
     }
 
     /**
-     * The session keys and the stream limit are checked before the pool opens, so a missing or weak key, or a limit that
-     * is no number, never gets as far as the database.
+     * The session keys, the stream limit and the region pack are checked before the pool opens, so a missing or weak
+     * key, a limit that is no number, or a pack that is missing or does not pass its checks (M3-1) never gets as far as
+     * the database.
      * The pool runs the self-check of blueprint 7.6 before its first connection, so a role that may not serve traffic
      * never opens a port. The gateway comes next, because it asks the pool whether a call comes from inside a
      * transaction (A-14); a route to a model that does not exist still refuses startup. The context closes the pool as
@@ -70,9 +71,10 @@ class ApiRole {
         String password = settings.required(RoleSettings.APP_PASSWORD);
         SessionTokens sessionTokens = SessionKeys.tokens(settings, Clock.systemUTC());
         StreamLimit streamLimit = streamLimit(settings);
+        RegionPack pack = RegionPacks.read(settings.required(RegionPacks.SETTING));
         PgPool database = PgRuntime.pool(address, password, POOL_SIZE);
         try {
-            Gateway gateway = Models.gateway(database::insideTx);
+            Gateway gateway = Models.gateway(pack, database::insideTx);
             return serve(context -> {
                 context.registerBean(PgPool.class, () -> database);
                 context.registerBean(ApiKeyLookup.class, () -> new DatabaseApiKeyLookup(database));

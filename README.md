@@ -162,8 +162,10 @@ curl http://127.0.0.1:18080/healthz
 真实单元这样运行：
 
 ```bash
-ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD=... ENGINE_SESSION_KEY=... java -jar engine.jar --role=api
+ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD=... ENGINE_SESSION_KEY=... DEPLOY_REGION=jp java -jar engine.jar --role=api
 ```
+
+**区域包：** `DEPLOY_REGION` 是必填项，选这个单元用哪个区域包，见[网关](#网关)里的“区域包”。它没有默认值：漏写的部署直接停下，而不是把数据送到别的区域的模型那里。开发环境里 `api.sh` 填 `jp`。`api` 在连数据库之前就读区域包并检查，没写、写的不是区域名、没有这个区域包、区域包没通过检查，都拒绝启动，退出码 1，并写明原因。
 
 `api` 总是用 `engine_app` 连接，地址里写的用户和会话参数都不起作用。
 
@@ -342,7 +344,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 
 - **读什么：** 引擎每个模块 `src/main/java` 下的 Java 和 `src/main/resources` 下的 SQL，只看名字和字符串。注释、测试、文档、配置文件和对外契约都不读，所以注释里可以举例。守卫自己也不读，因为名单就写在它里面。
 - **模型名怎么认：** 按常见模型家族的开头认，不分大小写：`gpt-`、`chatgpt`、`o1-`/`o3-`/`o4-`、`claude-`、`gemini-`、`gemma`、`llama`、`mistral`、`mixtral`、`codestral`、`qwen`、`deepseek`、`command-r`、`text-embedding-`。家族名必须在词首，所以 `ollama` 不算；驼峰写法的名字逐个词看，所以 `QwenClient` 也算。
-- **地区怎么认：** 地区代码不分大小写，只认整个字符串，所以 `jp1`、`us-east-1` 不算。获批的名单里原本还有 `"eu"`，但它正是终端用户号的前缀（`eu_...`），所以拿掉了；真要按欧洲判断，多半要写到 `region`，仍会被抓住。`Locale` 的语言常量（比如 `JAPANESE`）不算。`A-5` 连适配器也查；以后做区域包时，只给加载区域包的地方开例外。
+- **地区怎么认：** 地区代码不分大小写，只认整个字符串，所以 `jp1`、`us-east-1` 不算。获批的名单里原本还有 `"eu"`，但它正是终端用户号的前缀（`eu_...`），所以拿掉了；真要按欧洲判断，多半要写到 `region`，仍会被抓住。`Locale` 的语言常量（比如 `JAPANESE`）不算。`A-5` 连适配器也查。只有加载区域包的地方是例外（M3-1）：`app` 里的 `RegionPack.java`、`RegionPacks.java` 可以用 `region` 这个词，`app` 的其他代码可以写这两个类名；地区代码在哪里都不许写，这两个文件也一样。
 - **宿主和行业词怎么认：** 不分大小写，复数也算，但必须是完整的词，所以 `cartridge` 不算 `cart`、`Brixton` 不算 `brix`。`order` 故意不放进名单，因为 Spring 的写法和普通英语里到处都是。`A-6` 和 `A-3` 一样不查适配器，因为对接外部系统的适配器可以用那个系统的词。
 - **模块和前缀怎么认：** 模块就是迁移所在的文件夹名，或者 `aie.core`、`aie.modules` 下面的包名，比如 `tenancy`。前缀就是“模块名加下划线”，所以以别的模块名加下划线开头的名字都算那个模块的。策略和触发器的名字只在各自的表里有效，不要求前缀。只查模块自己的迁移和代码；模块以外的代码（比如启动入口）不算跨模块。Java 里的名字是代码不是 SQL，只看字符串。现在只有 `tenancy` 一个模块，跨模块的那半条用两个模块的样例来测。
 - **租户怎么认：** 只许读，不许写。`current_setting('app.tenant_id', true)` 可以，策略就是这样读的；`FROM tenancy_applications app WHERE app.tenant_id = ?` 里的 `app.tenant_id` 是表的列，也不算。Java 的字符串当 SQL 读，SQL 里的字符串也当 SQL 读（两个单引号还原成一个），因为 `EXECUTE` 会执行它。`pg_settings` 视图里没有 `app.tenant_id` 这种自定义设置，改它改不到租户，所以不算。只有 `adapters/store-postgres` 例外，以后加别的数据库适配器时也要给它开例外。拼字符串、换写法存心绕过的，扫描抓不全，要靠代码审查。
@@ -388,14 +390,27 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 
 | 表 | 内容 | 现在 |
 | --- | --- | --- |
-| 注册表 | 模型号 → 适配器 | 只有 `fake` |
-| 路由表 | 任务 → 模型号列表和超时，列表顺序就是优先级 | `customer_chat` → `fake`，一次回答最多 2 分钟 |
+| 注册表 | 模型号 → 适配器和合同属性 | 只有 `fake` |
+| 路由表 | 任务 → 模型号列表、超时和检查方式，列表顺序就是优先级 | `customer_chat` → `fake`，一次回答最多 2 分钟，按句检查 |
 
 - **超时：** 每次调用都带上路由配的超时（`A-9` 的一部分）。路由的超时必须大于零，至少要有一个模型。
 - **只用第一个模型：** 备用和重试到 M3 才有。
-- **启动时就检查：** api 角色先打开数据库连接池，再构造网关，因为网关要问连接池当前线程在不在事务里。路由引用了注册表里没有的模型时，启动被拒绝，退出码 1，连接池随之关闭。
+- **启动时就检查：** 两张表来自区域包，api 角色在打开数据库连接池之前就读出来并检查，见下面的“区域包”。连接池打开后再构造网关，因为网关要问连接池当前线程在不在事务里。
 - **检查的位置：** 输入检查在选模型之前，输出检查在每段交给调用方之前。现在都直接放行，测试锁住了先后顺序；M3 换成信任层。
-- **以后：** 两张表现在写在 `engine/app` 的 `Models` 里。接入真实模型时（M3），它们搬进区域包。
+
+**区域包（M3-1）：** 两张表写在仓库根目录的 `regions/<区域>/` 里，`DEPLOY_REGION` 选用哪个（蓝图 12.2）。现在只有 `regions/jp`：
+
+- **文件：**
+  - `models.yaml` 是注册表。每个模型写明 `id`（部署/模型）、`adapter`、`family`（取哪套提示词，M3-2 用）、`processing_region`（在哪里处理数据）、`retention`（厂商保留多久：`none` 或天数如 `30d`）、`training`（厂商能不能拿来训练）、`max_data_class`（最高收哪一级数据）、`capabilities`、`price`（每百万词元多少美元，进和出，M3-6 计量用）。
+  - `routes.yaml` 是路由表。每个任务写明 `models`（第一个是首选，后面的是备用，M3-12 才用）、`timeout_seconds`（`A-9`）和 `checks`（`sentence` 按句、`full` 全文、`input` 只查输入；检查本身 M3-4 做）。
+- **打进 jar：** 构建时把 `regions/` 整个复制进 `engine.jar`，`DEPLOY_REGION` 只能从里面选一个，不能改里面的内容。租户和运维以后设的任何东西都改不了模型的范围（`R-2`）。区域名只能是小写字母、数字和 `-`，所以指不到包外面的文件。
+- **检查（`R-4`）：** 下面任何一条不满足，`api` 拒绝启动，并写明文件和是哪个模型、哪个任务。`RegionPacksTest` 在 CI 里用同样的检查读仓库里的每个区域包。
+  - 每个字段都要写，也不能多写，写错名字的字段不会被悄悄忽略；同一个键写两次也拒绝。
+  - 合同属性要配得上数据等级（蓝图 7.3）：收 `internal` 及以上的，厂商不能拿来训练；收 `sensitive` 的，`retention` 必须是 `none`。
+  - 每个模型的适配器引擎都有（现在只有 `fake`），模型号不重复。
+  - 路由只能引用 `models.yaml` 里的模型；每个任务都要写检查方式，没写就不是一条完整的路由（`A-15`）；超时要大于零。
+  - 引擎要用的每个任务都有路由，现在是 `customer_chat`。
+- **以后：** 真实模型随适配器加进 `models.yaml`（M3-9 到 11）；地区门禁的策略在 M3-4 加进区域包。
 
 ## 会话
 

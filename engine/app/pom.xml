@@ -42,6 +42,11 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webmvc</artifactId>
         </dependency>
+        <!-- Reads the region packs (M3-1). The jar already carries it for Spring Boot's own YAML. -->
+        <dependency>
+            <groupId>org.yaml</groupId>
+            <artifactId>snakeyaml</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
@@ -67,6 +72,19 @@
 
     <build>
         <finalName>engine</finalName>
+        <!--
+            The region packs go into the jar from the repository's regions/ (M3-1), so every pack is fixed when the engine
+            is built and checked by CI, and DEPLOY_REGION only picks one.
+        -->
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+            </resource>
+            <resource>
+                <directory>../../regions</directory>
+                <targetPath>regions</targetPath>
+            </resource>
+        </resources>
         <plugins>
             <plugin>
                 <groupId>org.springframework.boot</groupId>

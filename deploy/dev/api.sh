@@ -13,5 +13,7 @@ ENGINE_SESSION_PREVIOUS_KEY=$(sed -n 's/^ENGINE_SESSION_PREVIOUS_KEY=//p' .env)
 if [ -n "$ENGINE_SESSION_PREVIOUS_KEY" ]; then
   export ENGINE_SESSION_PREVIOUS_KEY
 fi
+# The region pack the api loads. The dev server is no cell; it runs the pack of jp-general, the first cell.
+export DEPLOY_REGION=jp
 
 exec java -jar ../../engine/app/target/engine.jar --role=api "$@"

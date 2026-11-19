@@ -67,7 +67,7 @@ class AnonymousSessionsDatabaseTest {
                         "--engine.database.url=" + DATABASE.getJdbcUrl(), "--engine.owner.password=" + TestDatabase.OWNER_PASSWORD))
                 .isZero();
         context = ApiRole.start("--server.port=0", "--engine.database.url=" + DATABASE.getJdbcUrl(),
-                "--engine.app.password=" + TestDatabase.APP_PASSWORD, TestApi.SESSION_KEY_SETTING);
+                "--engine.app.password=" + TestDatabase.APP_PASSWORD, TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING);
         port = ((ServletWebServerApplicationContext) context).getWebServer().getPort();
         provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
         tenant = provisioning.createTenant("jp1", null);

@@ -14,6 +14,7 @@ import aie.core.tenancy.api.EndUsers;
 import aie.core.tenancy.api.Provisioning;
 import aie.core.tenancy.internal.DatabaseEndUsers;
 import aie.core.tenancy.internal.DatabaseProvisioning;
+import aie.core.trust.api.CheckMode;
 import aie.modules.conversation.api.Answers;
 import aie.modules.conversation.api.Answers.Start;
 import aie.modules.conversation.api.Answers.Start.Started;
@@ -104,13 +105,13 @@ class CancellingAnswersTest {
     /** The real gateway with the fake model, on a route that lets an answer take a minute. */
     private static Gateway fake() {
         return new RoutingGateway(Map.of(FakeModel.MODEL, new FakeModel()),
-                Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), Duration.ofSeconds(60))), pool::insideTx);
+                Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), Duration.ofSeconds(60), CheckMode.SENTENCE)), pool::insideTx);
     }
 
     /** The real gateway with a stub model. */
     private static Gateway stub(ModelPort model) {
         return new RoutingGateway(Map.of("stub", model),
-                Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30))), pool::insideTx);
+                Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), CheckMode.SENTENCE)), pool::insideTx);
     }
 
     private static Started started(Start start) {

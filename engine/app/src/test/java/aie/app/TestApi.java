@@ -45,6 +45,8 @@ final class TestApi {
     /** 256 bits for tests that start the real api role, so its tokens are test tokens. */
     static final byte[] SESSION_KEY = sessionKey(7);
     static final String SESSION_KEY_SETTING = "--engine.session.key=" + Base64.getEncoder().encodeToString(SESSION_KEY);
+    /** The region pack for tests that start the real api role, which needs one (M3-1). */
+    static final String REGION_SETTING = "--deploy.region=jp";
     /** Real tokens signed with {@link #SESSION_KEY}, which need no database, so a test can check what the api issued. */
     static final SessionTokens SESSION_TOKENS = new SignedSessionTokens(Clock.systemUTC(), SESSION_KEY, List.of());
     /** Well formed, so it passes the format check of a real lookup too. Public, as every site key is. */

@@ -12,6 +12,7 @@ import aie.core.gateway.api.Gateway.Result;
 import aie.core.gateway.api.Gateway.Role;
 import aie.core.gateway.api.Gateway.Turn;
 import aie.core.gateway.api.Gateway.Usage;
+import aie.core.trust.api.CheckMode;
 import aie.ports.ModelPort;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -54,7 +55,7 @@ class RoutingGatewayTest {
     }
 
     private static Route route(String... models) {
-        return new Route(List.of(models), MINUTE);
+        return new Route(List.of(models), MINUTE, CheckMode.SENTENCE);
     }
 
     private static Request ask(String task, String said) {
@@ -94,8 +95,8 @@ class RoutingGatewayTest {
     @Test
     void everyCallCarriesTheTimeOfItsRoute() {
         Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of(
-                "quick", new Route(List.of("m"), Duration.ofSeconds(3)),
-                "slow", new Route(List.of("m"), Duration.ofSeconds(90))), OUTSIDE);
+                "quick", new Route(List.of("m"), Duration.ofSeconds(3), CheckMode.SENTENCE),
+                "slow", new Route(List.of("m"), Duration.ofSeconds(90), CheckMode.SENTENCE)), OUTSIDE);
 
         answer(gateway, ask("quick", "Hello"));
         answer(gateway, ask("slow", "Hello"));
@@ -257,16 +258,24 @@ class RoutingGatewayTest {
     @Test
     void aRouteNeedsAModelAndATimeAboveZero() {
         List<Runnable> wrong = List.of(
-                () -> new Route(List.of(), MINUTE),
-                () -> new Route(null, MINUTE),
-                () -> new Route(Arrays.asList("m", null), MINUTE),
-                () -> new Route(List.of("m"), Duration.ZERO),
-                () -> new Route(List.of("m"), Duration.ofSeconds(-1)),
-                () -> new Route(List.of("m"), null));
+                () -> new Route(List.of(), MINUTE, CheckMode.SENTENCE),
+                () -> new Route(null, MINUTE, CheckMode.SENTENCE),
+                () -> new Route(Arrays.asList("m", null), MINUTE, CheckMode.SENTENCE),
+                () -> new Route(List.of("m"), Duration.ZERO, CheckMode.SENTENCE),
+                () -> new Route(List.of("m"), Duration.ofSeconds(-1), CheckMode.SENTENCE),
+                () -> new Route(List.of("m"), null, CheckMode.SENTENCE));
 
         for (Runnable route : wrong) {
             assertThatThrownBy(route::run).isInstanceOf(IllegalArgumentException.class);
         }
+    }
+
+    /** A task cannot reach a model unchecked by leaving its checks out (A-15, M3-1). */
+    @Test
+    void aRouteNeedsItsChecks() {
+        assertThatThrownBy(() -> new Route(List.of("m"), MINUTE, null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("A route needs its checks: sentence, full or input");
     }
 
     @Test
@@ -274,7 +283,7 @@ class RoutingGatewayTest {
         Map<String, ModelPort> models = new HashMap<>(Map.of("m", model("m", DONE)));
         Map<String, Route> routes = new HashMap<>(Map.of("chat", route("m")));
         List<String> preference = new ArrayList<>(List.of("m"));
-        Route route = new Route(preference, MINUTE);
+        Route route = new Route(preference, MINUTE, CheckMode.SENTENCE);
         Gateway gateway = new RoutingGateway(models, routes, OUTSIDE);
         Gateway second = new RoutingGateway(models, Map.of("chat", route), OUTSIDE);
 

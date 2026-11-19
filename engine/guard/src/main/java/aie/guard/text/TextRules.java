@@ -43,6 +43,16 @@ public final class TextRules {
     /** A-5: a name or a text with region as a word, such as getRegion or REGION_PACK. Only a region pack loader may. */
     static final Pattern REGION_WORD = Pattern.compile("(?i)(?<![a-z0-9])region");
     /**
+     * A-5: the region pack loader of the startup entry (M3-1), which reads the pack that DEPLOY_REGION names, and so is
+     * the one code that may speak of regions. A region code is still a region in the code, even here.
+     */
+    static final Set<String> REGION_PACK_LOADER = Set.of(
+            "app/src/main/java/aie/app/RegionPack.java", "app/src/main/java/aie/app/RegionPacks.java");
+    /** A-5: the loader's class names, which the rest of the startup entry names to load its pack, and nothing more. */
+    static final Set<String> REGION_PACK_NAMES = Set.of("RegionPack", "RegionPacks");
+    /** The startup entry, the only module that loads a region pack. */
+    private static final String STARTUP_ENTRY = "app/";
+    /**
      * A-6: the engine knows no host and no industry; a host's world reaches it only as data, such as a session's
      * context. These are the host's own name and words that belong to one industry. A word counts with its plural and
      * only as a whole word, so cartridge is not cart. "order" is left out, because Spring and plain English use it
@@ -107,7 +117,7 @@ public final class TextRules {
                     modelName(token).ifPresent(name -> problems.add("A-3: " + where + "model name " + name));
                     hostWord(token).ifPresent(found -> problems.add("A-6: " + where + found));
                 }
-                region(token, i == 0 ? null : tokens.get(i - 1)).ifPresent(found -> problems.add("A-5: " + where + found));
+                region(path, token, i == 0 ? null : tokens.get(i - 1)).ifPresent(found -> problems.add("A-5: " + where + found));
             }
             if (!path.startsWith(DATABASE_ADAPTER)) {
                 problems.addAll(tenantContext(path, tokens));
@@ -150,6 +160,14 @@ public final class TextRules {
      * right after the name Locale, or region as a word. {@code previous} is the token before, or null.
      */
     static Optional<String> region(Token token, Token previous) {
+        return region("", token, previous);
+    }
+
+    /**
+     * The same in the file at this path, relative to the engine: region as a word is the region pack loader's to use
+     * (M3-1), as are its class names in the startup entry. Region codes and Locale's countries count everywhere.
+     */
+    static Optional<String> region(String path, Token token, Token previous) {
         if (token.kind() == SourceText.Kind.STRING && REGION_CODES.contains(token.text().toLowerCase(Locale.ROOT))) {
             return Optional.of("region code \"" + token.text() + "\"");
         }
@@ -157,10 +175,16 @@ public final class TextRules {
                 && previous != null && previous.kind() == SourceText.Kind.IDENTIFIER && previous.text().equals("Locale")) {
             return Optional.of("country constant Locale." + token.text());
         }
-        if (REGION_WORD.matcher(words(token)).find()) {
+        if (REGION_WORD.matcher(words(token)).find() && !mayNameRegions(path, token)) {
             return Optional.of("region in " + (token.kind() == SourceText.Kind.IDENTIFIER ? "the name " : "the text ") + token.text());
         }
         return Optional.empty();
+    }
+
+    /** Whether the token may hold region as a word: anything in the loader, or the loader's names in the startup entry. */
+    private static boolean mayNameRegions(String path, Token token) {
+        return REGION_PACK_LOADER.contains(path) || path.startsWith(STARTUP_ENTRY)
+                && token.kind() == SourceText.Kind.IDENTIFIER && REGION_PACK_NAMES.contains(token.text());
     }
 
     /** The host or industry word in the token and where it was, or empty. A camel-case name is read word by word. */

@@ -104,6 +104,7 @@ class PackagedJarIT {
         Started api = start(Map.of(
                 "ENGINE_APP_PASSWORD", TestDatabase.APP_PASSWORD,
                 "ENGINE_SESSION_KEY", Base64.getEncoder().encodeToString(sessionKey),
+                "DEPLOY_REGION", "jp",
                 "SERVER_PORT", Integer.toString(port)), "--role=api");
         HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
         try {

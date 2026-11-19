@@ -1,0 +1,24 @@
+# The models the jp region may use, and what each one's contract allows (blueprint 8.3). Routing holds to these
+# fields, so they are the contract in code: a model that takes internal data or above may not be trained on, and one
+# that takes sensitive data must keep nothing (blueprint 7.3). The engine checks this file before it starts (R-4).
+#
+# id                 the deployment and the model; routes use it
+# adapter            the adapter that calls it: fake so far, the real ones come in M3-9 to 11
+# family             the prompt templates it takes (M3-2)
+# processing_region  where the deployment processes the data
+# retention          how long the provider keeps what it is sent: none, or a number of days such as 30d
+# training           whether the provider may train on it: yes or no
+# max_data_class     the highest class it takes: public, internal, personal or sensitive
+# capabilities       text, vision, tools, structured_output, prompt_cache
+# price              US dollars per million tokens, in and out (M3-6 counts from it)
+models:
+  # The engine's own stand-in: the data never leaves the process.
+  - id: fake
+    adapter: fake
+    family: fake
+    processing_region: jp
+    retention: none
+    training: no
+    max_data_class: sensitive
+    capabilities: [text]
+    price: { input: 0, output: 0 }

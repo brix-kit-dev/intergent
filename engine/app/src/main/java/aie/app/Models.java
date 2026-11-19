@@ -2,45 +2,46 @@ package aie.app;
 
 import aie.adapters.modelfake.FakeModel;
 import aie.core.gateway.api.Gateway;
-import aie.core.gateway.internal.Route;
 import aie.core.gateway.internal.RoutingGateway;
 import aie.modules.conversation.api.Answers;
 import aie.ports.ModelPort;
-import java.time.Duration;
-import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 
 /**
- * The models of the engine and the routes to them (blueprint 8.3 and 8.4). There is only the fake model so far. When
- * real models come, the registry and the route table move into the region pack, and this class goes.
+ * The adapters this engine has, the tasks it asks the gateway for, and the gateway built from a region pack (blueprint
+ * 8.3 and 8.4). Which models a region uses and how each task is routed is the region pack's, not this class's (M3-1).
  */
 final class Models {
 
-    /** The task of answering in a conversation, the example of blueprint 2.1, named by the conversation module. */
-    static final String CUSTOMER_CHAT = Answers.TASK;
-    /** The longest one answer may take. */
-    static final Duration ANSWER_TIME = Duration.ofMinutes(2);
+    /** The adapters by the name a region pack's models give, each making a new one. Real adapters come in M3-9 to 11. */
+    static final Map<String, Supplier<ModelPort>> ADAPTERS = Map.of("fake", FakeModel::new);
+    /** The tasks the engine asks the gateway for, so a region pack must route each of them. */
+    static final Set<String> TASKS = Set.of(Answers.TASK);
 
     private Models() {
     }
 
-    /** Each model's ID and the adapter that calls it. */
-    static Map<String, ModelPort> registry() {
-        return Map.of(FakeModel.MODEL, new FakeModel());
-    }
-
-    /** Each task's route. */
-    static Map<String, Route> routes() {
-        return Map.of(CUSTOMER_CHAT, new Route(List.of(FakeModel.MODEL), ANSWER_TIME));
-    }
-
     /**
+     * The gateway of a region pack: each of its models called through a new adapter of the model's kind, and its routes.
+     *
      * @param insideTx whether the calling thread is inside a database transaction, so that the gateway can refuse such a
      *     call (A-14): {@code insideTx} of the role's pool
-     * @throws IllegalArgumentException for a route to a model that is not in the registry
+     * @throws IllegalArgumentException for a model whose adapter this engine does not have
      */
-    static Gateway gateway(BooleanSupplier insideTx) {
-        return new RoutingGateway(registry(), routes(), insideTx);
+    static Gateway gateway(RegionPack pack, BooleanSupplier insideTx) {
+        Map<String, ModelPort> registry = new LinkedHashMap<>();
+        pack.models().forEach((id, spec) -> {
+            Supplier<ModelPort> adapter = ADAPTERS.get(spec.adapter());
+            if (adapter == null) {
+                throw new IllegalArgumentException("The model " + id + " needs the adapter " + spec.adapter()
+                        + ", which this engine does not have");
+            }
+            registry.put(id, adapter.get());
+        });
+        return new RoutingGateway(registry, pack.routes(), insideTx);
     }
 }

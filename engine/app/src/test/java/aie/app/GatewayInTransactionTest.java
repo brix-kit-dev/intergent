@@ -13,6 +13,7 @@ import aie.core.gateway.api.Gateway.Request;
 import aie.core.gateway.api.Gateway.Result;
 import aie.core.gateway.api.Gateway.Role;
 import aie.core.gateway.api.Gateway.Turn;
+import aie.modules.conversation.api.Answers;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.List;
@@ -54,7 +55,7 @@ class GatewayInTransactionTest {
                         DATABASE, "owner_password=" + TestDatabase.OWNER_PASSWORD, "app_password=" + TestDatabase.APP_PASSWORD)
                 .getExitCode()).isZero();
         pool = PgRuntime.pool(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD, 1);
-        gateway = Models.gateway(pool::insideTx);
+        gateway = Models.gateway(RegionPacks.read("jp"), pool::insideTx);
     }
 
     @AfterAll
@@ -63,7 +64,7 @@ class GatewayInTransactionTest {
     }
 
     private Result ask() {
-        return gateway.answer(new Request(Models.CUSTOMER_CHAT, List.of(new Turn(Role.USER, "Hello")), () -> false), pieces::add);
+        return gateway.answer(new Request(Answers.TASK, List.of(new Turn(Role.USER, "Hello")), () -> false), pieces::add);
     }
 
     @Test

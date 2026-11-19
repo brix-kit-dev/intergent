@@ -1,0 +1,11 @@
+# Where each task of the jp region goes (blueprint 8.4). Code names only the task, so changing models changes this
+# file and no code. The engine checks this file before it starts (R-4).
+#
+# models           IDs from models.yaml, first choice first; the rest are fallbacks (M3-12)
+# timeout_seconds  the longest one call may take (A-9)
+# checks           how the answer is checked while it streams (blueprint 9.2, A-15): sentence, full or input
+routes:
+  customer_chat:
+    models: [fake]
+    timeout_seconds: 120
+    checks: sentence
