@@ -63,7 +63,7 @@ class EventStreamDatabaseTest {
         pool = PgRuntime.pool(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD, 4);
         messages = new DatabaseMessages(pool);
         answers = new GeneratingAnswers(messages, new RoutingGateway(Map.of(FakeModel.MODEL, new FakeModel()),
-                Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), Duration.ofSeconds(30), CheckMode.SENTENCE)), pool::insideTx));
+                Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), Duration.ofSeconds(30), CheckMode.SENTENCE, TestApi.prompts(List.of(FakeModel.MODEL)))), pool::insideTx));
         DatabaseProvisioning provisioning = new DatabaseProvisioning(pool);
         String tenant = provisioning.createTenant("jp1", null);
         caller = new Owner("key_unused", tenant, provisioning.createApplication(tenant, "test", "internal"));
@@ -110,7 +110,7 @@ class EventStreamDatabaseTest {
         LocalEventSignals signals = new LocalEventSignals();
         Messages ringing = new DatabaseMessages(pool, signals);
         try (GeneratingAnswers ringingAnswers = new GeneratingAnswers(ringing, new RoutingGateway(Map.of(FakeModel.MODEL, new FakeModel()),
-                Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), Duration.ofSeconds(30), CheckMode.SENTENCE)), pool::insideTx))) {
+                Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), Duration.ofSeconds(30), CheckMode.SENTENCE, TestApi.prompts(List.of(FakeModel.MODEL)))), pool::insideTx))) {
             Started started = (Started) ringingAnswers.ask(caller, conversation, "[fake pieces=3 delay=200ms] Quick");
 
             long start = System.nanoTime();

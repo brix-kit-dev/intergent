@@ -116,13 +116,13 @@ class AnswersTest {
     /** The real gateway with the fake model, on a route that lets an answer take this long at most. */
     private static Gateway fake(Duration routeTime) {
         return new RoutingGateway(Map.of(FakeModel.MODEL, new FakeModel()),
-                Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), routeTime, CheckMode.SENTENCE)), pool::insideTx);
+                Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), routeTime, CheckMode.SENTENCE, TestApi.prompts(List.of(FakeModel.MODEL)))), pool::insideTx);
     }
 
     /** The real gateway with a stub model. */
     private static Gateway stub(ModelPort model) {
         return new RoutingGateway(Map.of("stub", model),
-                Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), CheckMode.SENTENCE)), pool::insideTx);
+                Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), CheckMode.SENTENCE, TestApi.prompts(List.of("stub")))), pool::insideTx);
     }
 
     private static Started started(Start start) {

@@ -33,6 +33,8 @@ class FakeModelTest {
 
     private static final Cancellation NEVER = () -> false;
     private static final Duration LONG = Duration.ofSeconds(30);
+    /** What the gateway sends as the task's prompt (M3-2). */
+    private static final String INSTRUCTIONS = "Answer the customers of a business.";
 
     /** Fast by default, so that only the tests about time wait. */
     private final ModelPort model = new FakeModel(Duration.ofMillis(1));
@@ -40,7 +42,7 @@ class FakeModelTest {
     private final List<Long> arrivals = new CopyOnWriteArrayList<>();
 
     private static Request request(String said, Duration timeout, Cancellation cancellation) {
-        return new Request(FakeModel.MODEL, List.of(new Turn(Role.USER, said)), timeout, cancellation);
+        return new Request(FakeModel.MODEL, INSTRUCTIONS, List.of(new Turn(Role.USER, said)), timeout, cancellation);
     }
 
     private Result generate(Request request) {
@@ -73,7 +75,7 @@ class FakeModelTest {
 
     @Test
     void itCountsTheCharactersOfEveryTurnAsInput() {
-        Request request = new Request(FakeModel.MODEL, List.of(
+        Request request = new Request(FakeModel.MODEL, INSTRUCTIONS, List.of(
                 new Turn(Role.USER, "こんにちは"), new Turn(Role.ASSISTANT, "Hi"), new Turn(Role.USER, "😀 ok")), LONG, NEVER);
 
         assertThat(generate(request).usage().inputTokens()).isEqualTo(5 + 2 + 4);
@@ -185,14 +187,34 @@ class FakeModelTest {
     @Test
     void aMistakeInTheRequestIsAnException() {
         Turn hello = new Turn(Role.USER, "Hello");
-        assertThatThrownBy(() -> generate(new Request("other", List.of(hello), LONG, NEVER))).isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> generate(new Request(FakeModel.MODEL, List.of(hello), Duration.ZERO, NEVER)))
+        assertThatThrownBy(() -> generate(new Request("other", INSTRUCTIONS, List.of(hello), LONG, NEVER))).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> generate(new Request(FakeModel.MODEL, INSTRUCTIONS, List.of(hello), Duration.ZERO, NEVER)))
                 .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> generate(new Request(FakeModel.MODEL, List.of(hello), LONG, null)))
+        assertThatThrownBy(() -> generate(new Request(FakeModel.MODEL, INSTRUCTIONS, List.of(hello), LONG, null)))
                 .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> generate(new Request(FakeModel.MODEL, List.of(), LONG, NEVER))).isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> generate(new Request(FakeModel.MODEL, List.of(new Turn(Role.ASSISTANT, "Hi")), LONG, NEVER)))
+        assertThatThrownBy(() -> generate(new Request(FakeModel.MODEL, INSTRUCTIONS, List.of(), LONG, NEVER))).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> generate(new Request(FakeModel.MODEL, INSTRUCTIONS, List.of(new Turn(Role.ASSISTANT, "Hi")), LONG, NEVER)))
                 .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> generate(new Request(FakeModel.MODEL, null, List.of(hello), LONG, NEVER)))
+                .isInstanceOf(IllegalArgumentException.class).hasMessage("A request needs its instructions, the prompt of the task");
+    }
+
+    /** M3-2: echo=instructions answers with the prompt the gateway sent, in one piece, so a test can see it arrived. */
+    @Test
+    void itEchoesTheInstructionsWhenAsked() {
+        Result result = generate("[fake echo=instructions] Hello");
+
+        assertThat(pieces).containsExactly(INSTRUCTIONS);
+        assertThat(result).isEqualTo(new Completed(new Usage("[fake echo=instructions] Hello".length(), INSTRUCTIONS.length())));
+    }
+
+    @Test
+    void itEchoesNothingElse() {
+        Result result = generate("[fake echo=turns]");
+
+        assertThat(pieces).isEmpty();
+        assertThat(result).isInstanceOf(Failed.class);
+        assertThat(((Failed) result).reason()).isEqualTo("The fake model echoes instructions, not turns");
     }
 
     @Test

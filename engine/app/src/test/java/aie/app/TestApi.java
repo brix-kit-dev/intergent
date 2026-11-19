@@ -1,5 +1,6 @@
 package aie.app;
 
+import aie.core.gateway.internal.Prompt;
 import aie.core.tenancy.api.ApiKeyLookup;
 import aie.core.tenancy.api.ApiKeyLookup.Owner;
 import aie.core.tenancy.api.ApiKeyManagement;
@@ -23,8 +24,10 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -45,6 +48,15 @@ final class TestApi {
     /** 256 bits for tests that start the real api role, so its tokens are test tokens. */
     static final byte[] SESSION_KEY = sessionKey(7);
     static final String SESSION_KEY_SETTING = "--engine.session.key=" + Base64.getEncoder().encodeToString(SESSION_KEY);
+    /** The same test prompt for each model of a route the test makes itself (M3-2), or none for a list it refuses. */
+    static Map<String, Prompt> prompts(List<String> models) {
+        Map<String, Prompt> prompts = new HashMap<>();
+        if (models != null) {
+            models.stream().filter(Objects::nonNull).forEach(model -> prompts.put(model, new Prompt("customer_chat/test/v1", "Answer the test.")));
+        }
+        return prompts;
+    }
+
     /** The region pack for tests that start the real api role, which needs one (M3-1). */
     static final String REGION_SETTING = "--deploy.region=jp";
     /** Real tokens signed with {@link #SESSION_KEY}, which need no database, so a test can check what the api issued. */

@@ -21,6 +21,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
@@ -34,6 +35,7 @@ class RoutingGatewayTest {
     private static final Gateway.Cancellation NEVER = () -> false;
     /** Not inside a database transaction. */
     private static final BooleanSupplier OUTSIDE = () -> false;
+    private static final Prompt PROMPT = new Prompt("chat/test/v1", "Answer the test.");
     private static final Duration MINUTE = Duration.ofMinutes(1);
     private static final ModelPort.Result DONE = new ModelPort.Completed(new ModelPort.Usage(5, 2));
 
@@ -54,8 +56,17 @@ class RoutingGatewayTest {
         };
     }
 
+    /** The same test prompt for each model, or none for a list a route refuses anyway. */
+    static Map<String, Prompt> prompts(List<String> models) {
+        Map<String, Prompt> prompts = new HashMap<>();
+        if (models != null) {
+            models.stream().filter(Objects::nonNull).forEach(model -> prompts.put(model, PROMPT));
+        }
+        return prompts;
+    }
+
     private static Route route(String... models) {
-        return new Route(List.of(models), MINUTE, CheckMode.SENTENCE);
+        return new Route(List.of(models), MINUTE, CheckMode.SENTENCE, prompts(List.of(models)));
     }
 
     private static Request ask(String task, String said) {
@@ -95,8 +106,8 @@ class RoutingGatewayTest {
     @Test
     void everyCallCarriesTheTimeOfItsRoute() {
         Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of(
-                "quick", new Route(List.of("m"), Duration.ofSeconds(3), CheckMode.SENTENCE),
-                "slow", new Route(List.of("m"), Duration.ofSeconds(90), CheckMode.SENTENCE)), OUTSIDE);
+                "quick", new Route(List.of("m"), Duration.ofSeconds(3), CheckMode.SENTENCE, prompts(List.of("m"))),
+                "slow", new Route(List.of("m"), Duration.ofSeconds(90), CheckMode.SENTENCE, prompts(List.of("m")))), OUTSIDE);
 
         answer(gateway, ask("quick", "Hello"));
         answer(gateway, ask("slow", "Hello"));
@@ -113,6 +124,7 @@ class RoutingGatewayTest {
                 new Turn(Role.USER, "Hi"), new Turn(Role.ASSISTANT, "Hello"), new Turn(Role.USER, "Bye")), cancel::get));
 
         ModelPort.Request call = calls.getFirst();
+        assertThat(call.instructions()).isEqualTo("Answer the test.");
         assertThat(call.turns()).containsExactly(new ModelPort.Turn(ModelPort.Role.USER, "Hi"),
                 new ModelPort.Turn(ModelPort.Role.ASSISTANT, "Hello"), new ModelPort.Turn(ModelPort.Role.USER, "Bye"));
         assertThat(call.cancellation().requested()).isFalse();
@@ -141,7 +153,7 @@ class RoutingGatewayTest {
 
         Result result = answer(gateway, ask("chat", "Hello"));
 
-        assertThat(output).contains("The model m failed the task chat after 1 piece(s): the vendor is out of quota");
+        assertThat(output).contains("The model m failed the task chat with the prompt chat/test/v1 after 1 piece(s): the vendor is out of quota");
         assertThat(result).hasToString("Failed[pieces=1, usage=Usage[inputTokens=5, outputTokens=3]]");
     }
 
@@ -258,22 +270,75 @@ class RoutingGatewayTest {
     @Test
     void aRouteNeedsAModelAndATimeAboveZero() {
         List<Runnable> wrong = List.of(
-                () -> new Route(List.of(), MINUTE, CheckMode.SENTENCE),
-                () -> new Route(null, MINUTE, CheckMode.SENTENCE),
-                () -> new Route(Arrays.asList("m", null), MINUTE, CheckMode.SENTENCE),
-                () -> new Route(List.of("m"), Duration.ZERO, CheckMode.SENTENCE),
-                () -> new Route(List.of("m"), Duration.ofSeconds(-1), CheckMode.SENTENCE),
-                () -> new Route(List.of("m"), null, CheckMode.SENTENCE));
+                () -> new Route(List.of(), MINUTE, CheckMode.SENTENCE, prompts(List.of())),
+                () -> new Route(null, MINUTE, CheckMode.SENTENCE, prompts(null)),
+                () -> new Route(Arrays.asList("m", null), MINUTE, CheckMode.SENTENCE, prompts(Arrays.asList("m", null))),
+                () -> new Route(List.of("m"), Duration.ZERO, CheckMode.SENTENCE, prompts(List.of("m"))),
+                () -> new Route(List.of("m"), Duration.ofSeconds(-1), CheckMode.SENTENCE, prompts(List.of("m"))),
+                () -> new Route(List.of("m"), null, CheckMode.SENTENCE, prompts(List.of("m"))));
 
         for (Runnable route : wrong) {
             assertThatThrownBy(route::run).isInstanceOf(IllegalArgumentException.class);
         }
     }
 
+    /** M3-2: the model that answers gets the prompt its route gives that model, not another model's. */
+    @Test
+    void theModelGetsItsOwnPromptOfTheRoute() {
+        Map<String, Prompt> prompts = Map.of("first", new Prompt("chat/first/v2", "First family."),
+                "second", new Prompt("chat/second/v1", "Second family."));
+        Gateway gateway = new RoutingGateway(Map.of("first", model("first", DONE), "second", model("second", DONE)),
+                Map.of("chat", new Route(List.of("first", "second"), MINUTE, CheckMode.SENTENCE, prompts)), OUTSIDE);
+
+        answer(gateway, ask("chat", "Hi"));
+
+        assertThat(calls).singleElement().extracting(ModelPort.Request::instructions).isEqualTo("First family.");
+    }
+
+    /** M3-2: a route has one prompt for each of its models and no other, so no model is called without one. */
+    @Test
+    void aRouteNeedsAPromptForEachModelAndNoOther() {
+        Map<String, Prompt> withNull = new HashMap<>();
+        withNull.put("m", null);
+        List<Runnable> wrong = List.of(
+                () -> new Route(List.of("m"), MINUTE, CheckMode.SENTENCE, null),
+                () -> new Route(List.of("m"), MINUTE, CheckMode.SENTENCE, Map.of()),
+                () -> new Route(List.of("m"), MINUTE, CheckMode.SENTENCE, Map.of("m", PROMPT, "other", PROMPT)),
+                () -> new Route(List.of("m", "n"), MINUTE, CheckMode.SENTENCE, Map.of("m", PROMPT)),
+                () -> new Route(List.of("m"), MINUTE, CheckMode.SENTENCE, withNull));
+
+        for (Runnable route : wrong) {
+            assertThatThrownBy(route::run).isInstanceOf(IllegalArgumentException.class).hasMessageStartingWith("A route needs a prompt");
+        }
+    }
+
+    /** M3-2: a route keeps its own copy, so changing the map it was given changes nothing. */
+    @Test
+    void aRouteKeepsItsOwnPrompts() {
+        Map<String, Prompt> given = new HashMap<>(Map.of("m", PROMPT));
+        Route route = new Route(List.of("m"), MINUTE, CheckMode.SENTENCE, given);
+        given.put("m", new Prompt("chat/test/v2", "Changed."));
+
+        assertThat(route.prompts()).containsExactly(Map.entry("m", PROMPT));
+    }
+
+    /** M3-2: a prompt is named task/family/vN and has a text. */
+    @Test
+    void aPromptHasAVersionedNameAndAText() {
+        assertThat(new Prompt("customer_chat/fake/v12", "Answer.").id()).isEqualTo("customer_chat/fake/v12");
+        for (String id : new String[] {null, "customer_chat/fake", "customer_chat/fake/v0", "customer_chat/fake/1",
+                "Customer/fake/v1", "customer_chat/Fake/v1", "customer_chat/fake/v1/x", "customer_chat/fake/v12345"}) {
+            assertThatThrownBy(() -> new Prompt(id, "Answer.")).hasMessage(
+                    "A prompt is named task/family/vN, such as customer_chat/fake/v1, not " + id);
+        }
+        assertThatThrownBy(() -> new Prompt("customer_chat/fake/v1", " \n")).hasMessage("The prompt customer_chat/fake/v1 has no text");
+        assertThatThrownBy(() -> new Prompt("customer_chat/fake/v1", null)).hasMessage("The prompt customer_chat/fake/v1 has no text");
+    }
+
     /** A task cannot reach a model unchecked by leaving its checks out (A-15, M3-1). */
     @Test
     void aRouteNeedsItsChecks() {
-        assertThatThrownBy(() -> new Route(List.of("m"), MINUTE, null))
+        assertThatThrownBy(() -> new Route(List.of("m"), MINUTE, null, prompts(List.of("m"))))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("A route needs its checks: sentence, full or input");
     }
@@ -283,7 +348,7 @@ class RoutingGatewayTest {
         Map<String, ModelPort> models = new HashMap<>(Map.of("m", model("m", DONE)));
         Map<String, Route> routes = new HashMap<>(Map.of("chat", route("m")));
         List<String> preference = new ArrayList<>(List.of("m"));
-        Route route = new Route(preference, MINUTE, CheckMode.SENTENCE);
+        Route route = new Route(preference, MINUTE, CheckMode.SENTENCE, prompts(preference));
         Gateway gateway = new RoutingGateway(models, routes, OUTSIDE);
         Gateway second = new RoutingGateway(models, Map.of("chat", route), OUTSIDE);
 

@@ -17,8 +17,11 @@ import java.util.regex.Pattern;
  *   <li>{@code pieces}: how many, 1 to 1000;
  *   <li>{@code delay}: the wait before each piece, such as {@code 200ms} or {@code 2s}, up to 60 seconds;
  *   <li>{@code fail-after}: fail after that many pieces;
- *   <li>{@code hang-after}: stop after that many pieces until the answer is cancelled or out of time.
+ *   <li>{@code hang-after}: stop after that many pieces until the answer is cancelled or out of time;
+ *   <li>{@code echo=instructions}: answer with the instructions the gateway sent, as one piece, so that a test can see
+ *       which prompt reached the model (M3-2).
  * </ul>
+ * It counts the turns as its input, not the instructions.
  * A bracket it cannot read fails the answer and says why.
  */
 public final class FakeModel implements ModelPort {
@@ -55,6 +58,10 @@ public final class FakeModel implements ModelPort {
             settings = Settings.read(said, delay);
         } catch (IllegalArgumentException e) {
             return new Failed(e.getMessage(), 0, new Usage(input, 0));
+        }
+        if (settings.echo()) {
+            output.text(request.instructions());
+            return new Completed(new Usage(input, characters(request.instructions())));
         }
         long deadline = System.nanoTime() + request.timeout().toNanos();
         long written = 0;
@@ -95,6 +102,9 @@ public final class FakeModel implements ModelPort {
         if (request.cancellation() == null) {
             throw new IllegalArgumentException("A request needs a cancellation, even one that never asks to stop");
         }
+        if (request.instructions() == null) {
+            throw new IllegalArgumentException("A request needs its instructions, the prompt of the task");
+        }
         List<Turn> turns = request.turns();
         if (turns == null || turns.isEmpty() || turns.getLast().role() != Role.USER || turns.getLast().text() == null) {
             throw new IllegalArgumentException("A request ends with the user's turn");
@@ -133,12 +143,12 @@ public final class FakeModel implements ModelPort {
     }
 
     /** What one bracket asks for. A count of -1 means it does not ask for that. */
-    private record Settings(int pieces, Duration delay, int failAfter, int hangAfter) {
+    private record Settings(int pieces, Duration delay, int failAfter, int hangAfter, boolean echo) {
 
         static Settings read(String said, Duration delay) {
             Matcher bracket = BRACKET.matcher(said);
             if (!bracket.find()) {
-                return new Settings(PIECES, delay, -1, -1);
+                return new Settings(PIECES, delay, -1, -1, false);
             }
             String inside = bracket.group(1) == null ? "" : bracket.group(1).trim();
             if (bracket.find()) {
@@ -147,6 +157,7 @@ public final class FakeModel implements ModelPort {
             int pieces = PIECES;
             int failAfter = -1;
             int hangAfter = -1;
+            boolean echo = false;
             Duration wait = delay;
             for (String part : inside.split("\\s+")) {
                 if (part.isEmpty()) {
@@ -162,11 +173,19 @@ public final class FakeModel implements ModelPort {
                     case "delay" -> wait = duration(value);
                     case "fail-after" -> failAfter = count(value, 0, MAX_PIECES, "fail-after");
                     case "hang-after" -> hangAfter = count(value, 0, MAX_PIECES, "hang-after");
+                    case "echo" -> echo = echo(value);
                     default -> throw new IllegalArgumentException(
-                            "The fake model knows pieces, delay, fail-after and hang-after, not " + setting.group(1));
+                            "The fake model knows pieces, delay, fail-after, hang-after and echo, not " + setting.group(1));
                 }
             }
-            return new Settings(pieces, wait, failAfter, hangAfter);
+            return new Settings(pieces, wait, failAfter, hangAfter, echo);
+        }
+
+        private static boolean echo(String value) {
+            if (!value.equals("instructions")) {
+                throw new IllegalArgumentException("The fake model echoes instructions, not " + value);
+            }
+            return true;
         }
 
         private static int count(String value, int least, int most, String name) {

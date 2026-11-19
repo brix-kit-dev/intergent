@@ -84,6 +84,14 @@
                 <directory>../../regions</directory>
                 <targetPath>regions</targetPath>
             </resource>
+            <!-- The prompts the region packs name (M3-2). The list of their hashes is for CI, not for the jar. -->
+            <resource>
+                <directory>../../prompts</directory>
+                <targetPath>prompts</targetPath>
+                <excludes>
+                    <exclude>versions.lock</exclude>
+                </excludes>
+            </resource>
         </resources>
         <plugins>
             <plugin>

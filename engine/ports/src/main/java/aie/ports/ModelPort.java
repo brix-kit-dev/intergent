@@ -21,11 +21,13 @@ public interface ModelPort {
      * What to generate.
      *
      * @param model the model's ID in the gateway's registry
+     * @param instructions the task's prompt for this model's family, as the gateway chose it after the model (M3-2); an
+     *     adapter sends it as the system prompt
      * @param turns the conversation so far, oldest first, ending with the user's turn
      * @param timeout the longest the whole answer may take
      * @param cancellation asked often, at least between pieces, whether the caller wants the answer to stop
      */
-    record Request(String model, List<Turn> turns, Duration timeout, Cancellation cancellation) {
+    record Request(String model, String instructions, List<Turn> turns, Duration timeout, Cancellation cancellation) {
     }
 
     /** One turn of the conversation. */

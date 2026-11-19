@@ -13,7 +13,8 @@ import org.slf4j.LoggerFactory;
  * {@link Gateway} by route table (blueprint 8.2 to 8.4). It is built once from the models and the routes, and refuses a
  * route to a model it was not given, so that such a mistake stops the role at startup instead of failing requests
  * later. Every call carries its route's time limit (A-9). A call from inside a database transaction is refused before
- * anything else (A-14). Fallback, retries, budgets and prompts are not here yet.
+ * anything else (A-14). The model gets its family's prompt as instructions (M3-2). Fallback, retries and budgets are
+ * not here yet.
  */
 public final class RoutingGateway implements Gateway {
 
@@ -64,15 +65,16 @@ public final class RoutingGateway implements Gateway {
         Route route = routeOf(request);
         checks.input(request);
         String model = route.models().getFirst();
-        ModelPort.Request call = new ModelPort.Request(model, request.turns().stream().map(RoutingGateway::turn).toList(),
-                route.timeout(), request.cancellation()::requested);
+        Prompt prompt = route.prompts().get(model);
+        ModelPort.Request call = new ModelPort.Request(model, prompt.text(),
+                request.turns().stream().map(RoutingGateway::turn).toList(), route.timeout(), request.cancellation()::requested);
         ModelPort.Result result = models.get(model).generate(call, piece -> output.text(checks.output(request.task(), piece)));
         return switch (result) {
             case ModelPort.Completed done -> new Completed(usage(done.usage()));
             case ModelPort.Cancelled cancelled -> new Cancelled(usage(cancelled.usage()));
             case ModelPort.Failed failed -> {
-                LOG.warn("The model {} failed the task {} after {} piece(s): {}",
-                        model, request.task(), failed.pieces(), failed.reason());
+                LOG.warn("The model {} failed the task {} with the prompt {} after {} piece(s): {}",
+                        model, request.task(), prompt.id(), failed.pieces(), failed.reason());
                 yield new Failed(failed.pieces(), usage(failed.usage()));
             }
         };

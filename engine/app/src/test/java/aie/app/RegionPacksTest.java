@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.params.provider.Arguments.arguments;
 
 import aie.core.gateway.api.ModelSpec;
+import aie.core.gateway.internal.Prompt;
 import aie.core.gateway.internal.Route;
 import aie.core.trust.api.CheckMode;
 import aie.core.trust.api.DataClass;
@@ -27,6 +28,8 @@ class RegionPacksTest {
 
     /** The repository's packs, which the build copies into the jar. */
     private static final Path REGIONS = Path.of("../../regions");
+    /** The repository's prompts, which the build copies into the jar too (M3-2). */
+    private static final Path PROMPTS = Path.of("../../prompts");
     private static final String MODELS = """
             models:
               - id: fake
@@ -45,17 +48,20 @@ class RegionPacksTest {
                 models: [fake]
                 timeout_seconds: 120
                 checks: sentence
+                prompts:
+                  fake: { version: customer_chat/fake/v1 }
             """;
 
     @Test
-    void theJpPackHasTheFakeModelAndRoutesCustomerChatToIt() {
+    void theJpPackHasTheFakeModelAndRoutesCustomerChatToIt() throws IOException {
         RegionPack jp = RegionPacks.read("jp");
 
         assertThat(jp.region()).isEqualTo("jp");
         assertThat(jp.models()).isEqualTo(Map.of("fake", new ModelSpec("fake", "fake", "fake", "jp", 0, false,
                 DataClass.SENSITIVE, Set.of(ModelSpec.Capability.TEXT), new ModelSpec.Price(BigDecimal.ZERO, BigDecimal.ZERO))));
         assertThat(jp.routes()).isEqualTo(Map.of("customer_chat",
-                new Route(List.of("fake"), Duration.ofSeconds(120), CheckMode.SENTENCE)));
+                new Route(List.of("fake"), Duration.ofSeconds(120), CheckMode.SENTENCE, Map.of("fake",
+                        new Prompt("customer_chat/fake/v1", Files.readString(PROMPTS.resolve("customer_chat/fake/v1.txt")))))));
     }
 
     /** R-4 in CI: every pack of the repository passes the checks the api role runs, and the jar carries it unchanged. */
@@ -91,7 +97,7 @@ class RegionPacksTest {
                         routes + ": the route of customer_chat needs the field checks"),
                 arguments(MODELS, ROUTES.replace("checks: sentence", "checks: words"),
                         routes + ": the route of customer_chat: checks must be sentence, full or input, not words"),
-                arguments(MODELS, ROUTES.replace("customer_chat:", "document_translate:"),
+                arguments(MODELS, ROUTES.replace("customer_chat", "other_task"),
                         routes + " has no route for customer_chat, which the engine asks for"),
                 arguments(MODELS, ROUTES.replace("timeout_seconds: 120", "timeout_seconds: 0"),
                         routes + ": the route of customer_chat: timeout_seconds must be a whole number above zero, not 0"),
@@ -127,6 +133,20 @@ class RegionPacksTest {
                 arguments(MODELS.replace("id: fake", "id: Fake Model"), ROUTES, models + ": A model's id is a deployment and a model"
                         + " such as bedrock-jp/sonnet, in lower-case letters, digits and . _ -, not Fake Model"),
                 arguments("models: []\n", ROUTES, models + ": models must be a list of at least one item"),
+                arguments(MODELS, ROUTES.replace("    prompts:\n      fake: { version: customer_chat/fake/v1 }\n", ""),
+                        routes + ": the route of customer_chat needs the field prompts"),
+                arguments(MODELS, ROUTES.replace("fake: { version", "claude: { version"),
+                        routes + ": the route of customer_chat: prompts names the family claude, which none of its models is"),
+                arguments(MODELS, ROUTES.replace("      fake: { version: customer_chat/fake/v1 }\n", "      {}\n").replace("prompts:\n      {}", "prompts: {}"),
+                        routes + ": the route of customer_chat needs a prompt for the family fake"),
+                arguments(MODELS, ROUTES.replace("version: customer_chat/fake/v1", "version: document_translate/fake/v1"), routes
+                        + ": the route of customer_chat: the prompt of fake: version must be customer_chat/fake/v and a number, not document_translate/fake/v1"),
+                arguments(MODELS, ROUTES.replace("version: customer_chat/fake/v1", "version: customer_chat/fake/v9"),
+                        routes + ": the route of customer_chat: the prompt of fake: the engine has no prompts/customer_chat/fake/v9.txt"),
+                arguments(MODELS, ROUTES.replace("{ version: customer_chat/fake/v1 }", "{ version: customer_chat/fake/v1, canary: customer_chat/fake/v2 }"),
+                        routes + ": the route of customer_chat: the prompt of fake has the unknown field canary"),
+                arguments(MODELS, ROUTES.replace("{ version: customer_chat/fake/v1 }", "customer_chat/fake/v1"),
+                        routes + ": the route of customer_chat: the prompt of fake must be a map of names to values"),
                 arguments(MODELS + "models: []\n", ROUTES, models + " is not valid YAML: "));
     }
 

@@ -1,0 +1,1 @@
+A prompt that only the tests have, for a task the engine does not ask for.

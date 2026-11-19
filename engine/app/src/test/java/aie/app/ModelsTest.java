@@ -50,7 +50,7 @@ class ModelsTest {
         ModelSpec claude = new ModelSpec("bedrock-jp/claude-sonnet-5-5", "anthropic", "claude", "jp", 0, false,
                 DataClass.PERSONAL, Set.of(ModelSpec.Capability.TEXT), new ModelSpec.Price(BigDecimal.ONE, BigDecimal.TEN));
         RegionPack pack = new RegionPack("jp", Map.of(claude.id(), claude),
-                Map.of(Answers.TASK, new Route(List.of(claude.id()), Duration.ofMinutes(2), CheckMode.SENTENCE)));
+                Map.of(Answers.TASK, new Route(List.of(claude.id()), Duration.ofMinutes(2), CheckMode.SENTENCE, TestApi.prompts(List.of(claude.id())))));
 
         assertThatThrownBy(() -> Models.gateway(pack, () -> false))
                 .isInstanceOf(IllegalArgumentException.class)

@@ -4,8 +4,12 @@
 # models           IDs from models.yaml, first choice first; the rest are fallbacks (M3-12)
 # timeout_seconds  the longest one call may take (A-9)
 # checks           how the answer is checked while it streams (blueprint 9.2, A-15): sentence, full or input
+# prompts          for each family of the models, the prompt version it gets: task/family/vN in the repository's
+#                  prompts/ (blueprint 8.7). A canary will go next to the version when canaries come.
 routes:
   customer_chat:
     models: [fake]
     timeout_seconds: 120
     checks: sentence
+    prompts:
+      fake: { version: customer_chat/fake/v1 }

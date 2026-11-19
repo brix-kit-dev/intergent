@@ -3,6 +3,7 @@ package aie.app;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 import aie.core.gateway.api.ModelSpec;
+import aie.core.gateway.internal.Prompt;
 import aie.core.gateway.internal.Route;
 import aie.core.trust.api.CheckMode;
 import aie.core.trust.api.DataClass;
@@ -12,10 +13,12 @@ import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.yaml.snakeyaml.LoaderOptions;
@@ -32,6 +35,7 @@ import org.yaml.snakeyaml.error.YAMLException;
  *   <li>every field a model or a route needs is there, and no other: a misspelt field would otherwise be dropped;
  *   <li>every model's contract allows the highest data class it takes (blueprint 7.3), and the engine has its adapter;
  *   <li>every route names models of the pack, a time limit and its checks (A-15);
+ *   <li>every route names one prompt version for each family of its models, and the jar has its text (M3-2);
  *   <li>every task the engine asks for has a route.
  * </ul>
  * Each refusal names the file, and the model or the task, so that the operator knows what to fix.
@@ -55,7 +59,9 @@ final class RegionPacks {
     private static final List<String> MODEL_FIELDS = List.of(
             "id", "adapter", "family", "processing_region", "retention", "training", "max_data_class", "capabilities", "price");
     private static final List<String> PRICE_FIELDS = List.of("input", "output");
-    private static final List<String> ROUTE_FIELDS = List.of("models", "timeout_seconds", "checks");
+    private static final List<String> ROUTE_FIELDS = List.of("models", "timeout_seconds", "checks", "prompts");
+    /** A prompt's fields. Only the version so far; a canary goes next to it when one comes (blueprint 8.7). */
+    private static final List<String> PROMPT_FIELDS = List.of("version");
 
     private RegionPacks() {
     }
@@ -76,13 +82,22 @@ final class RegionPacks {
 
     private static String resource(String region, String file) {
         String path = "regions/" + region + "/" + file;
+        try {
+            return resource(path);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("There is no region pack " + region + ": " + e.getMessage(), e);
+        }
+    }
+
+    /** A file of the engine's jar. */
+    private static String resource(String path) {
         try (InputStream in = RegionPacks.class.getClassLoader().getResourceAsStream(path)) {
             if (in == null) {
-                throw new IllegalArgumentException("There is no region pack " + region + ": the engine has no " + path);
+                throw new IllegalArgumentException("the engine has no " + path);
             }
             return new String(in.readAllBytes(), UTF_8);
         } catch (IOException e) {
-            throw new IllegalArgumentException("The engine cannot read " + path + ": " + e.getMessage(), e);
+            throw new IllegalArgumentException("the engine cannot read " + path + ": " + e.getMessage(), e);
         }
     }
 
@@ -174,12 +189,50 @@ final class RegionPacks {
             }
             CheckMode checks = CheckMode.fromWireName(text(route.get("checks"), what + ": checks")).orElseThrow(
                     () -> new IllegalArgumentException(what + ": checks must be sentence, full or input, not " + route.get("checks")));
-            routes.put(task, new Route(names, Duration.ofSeconds(number), checks));
+            routes.put(task, new Route(names, Duration.ofSeconds(number), checks, prompts(task, what, route.get("prompts"), names, models)));
         });
         if (routes.isEmpty()) {
             throw new IllegalArgumentException(where + " has no route");
         }
         return routes;
+    }
+
+    /**
+     * Each model's prompt. The route names one version for each family of its models, as {@code family: {version:
+     * task/family/vN}}, and no other family; the version is for the route's own task and that family, and its text is
+     * in the jar, from the repository's prompts/ (blueprint 8.7).
+     */
+    private static Map<String, Prompt> prompts(String task, String what, Object node, List<String> names,
+            Map<String, ModelSpec> models) {
+        Map<String, Object> named = map(node, what + ": prompts");
+        Set<String> families = new TreeSet<>();
+        names.forEach(name -> families.add(models.get(name).family()));
+        for (String family : named.keySet()) {
+            if (!families.contains(family)) {
+                throw new IllegalArgumentException(what + ": prompts names the family " + family + ", which none of its models is");
+            }
+        }
+        Map<String, Prompt> byFamily = new HashMap<>();
+        for (String family : families) {
+            String where = what + ": the prompt of " + family;
+            if (!named.containsKey(family)) {
+                throw new IllegalArgumentException(what + " needs a prompt for the family " + family);
+            }
+            Map<String, Object> prompt = map(named.get(family), where);
+            fields(prompt, PROMPT_FIELDS, PROMPT_FIELDS, where);
+            String version = text(prompt.get("version"), where + ": version");
+            if (!version.matches(Pattern.quote(task + "/" + family + "/") + "v[1-9][0-9]{0,3}")) {
+                throw new IllegalArgumentException(where + ": version must be " + task + "/" + family + "/v and a number, not " + version);
+            }
+            try {
+                byFamily.put(family, new Prompt(version, resource("prompts/" + version + ".txt")));
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException(where + ": " + e.getMessage(), e);
+            }
+        }
+        Map<String, Prompt> byModel = new LinkedHashMap<>();
+        names.forEach(name -> byModel.put(name, byFamily.get(models.get(name).family())));
+        return byModel;
     }
 
     private static int retentionDays(Object value, String what) {
