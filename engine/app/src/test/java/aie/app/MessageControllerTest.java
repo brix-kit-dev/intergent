@@ -41,7 +41,7 @@ class MessageControllerTest {
     private static final TestApi.StandInAnswers ANSWERS = new TestApi.StandInAnswers();
     /** Conversations of browsers' end users, which a browser's request looks up before it does anything (M2-12-3). */
     private static final TestApi.StandInConversations CONVERSATIONS = new TestApi.StandInConversations();
-    /** A hundred times the stand-in's 100 ms before an answer that ends soon does (point 42). */
+    /** Ten times the second after which the wait test's answer ends, room for a busy machine (points 42 and 48). */
     private static final AnswerWait LONG_WAIT = new AnswerWait(Duration.ofSeconds(10));
     /** A character outside the Basic Multilingual Plane: one character, two UTF-16 units. */
     private static final String ASTRAL = "😀";
@@ -151,13 +151,15 @@ class MessageControllerTest {
     }
 
     /**
-     * The stand-in ends the answer 100 ms after it was asked. Against the shared api's 300 ms wait, a busy machine could
-     * push that ending past the wait (point 42), so this test runs its own api, which waits a hundred times as long.
+     * The stand-in ends the answer a second after it was asked, so an engine that waits less, such as 50 ms or the
+     * shared api's 300 ms, finds it still in progress whatever its first request costs (point 48). The test runs its
+     * own api, which waits 10 s, so that a busy machine cannot push the ending past the wait (point 42).
      */
     @Test
     void theCallWaitsForAnAnswerThatEndsWithinTheWait() throws Exception {
         TestApi.StandInAnswers answers = new TestApi.StandInAnswers();
         answers.outcome = Outcome.COMPLETES_SOON;
+        answers.soon = Duration.ofSeconds(1);
 
         try (ConfigurableApplicationContext api = TestApi.start(TestApi.LOOKUP, new TestApi.StandInKeys(),
                 new TestApi.StandInEndUsers(), new TestApi.StandInConversations(), answers, TestApi.NO_REPLAYS,

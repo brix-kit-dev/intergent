@@ -251,7 +251,7 @@ final class TestApi {
             COMPLETED,
             /** "Hel", then the model fails, at once. */
             FAILED,
-            /** "Hello!", a tenth of a second after the ask. */
+            /** "Hello!", {@link StandInAnswers#soon} after the ask: a tenth of a second unless a test sets it. */
             COMPLETES_SOON,
             /** "Hel" so far, and no end. */
             NEVER_ENDS,
@@ -280,6 +280,8 @@ final class TestApi {
         final Map<String, Messages.Message> questions = new ConcurrentHashMap<>();
         final Map<String, List<Messages.Event>> events = new ConcurrentHashMap<>();
         volatile Outcome outcome = Outcome.COMPLETED;
+        /** How long after its ask an answer that COMPLETES_SOON ends (point 48). */
+        volatile Duration soon = Duration.ofMillis(100);
         volatile Cancelling cancelling = Cancelling.AT_ONCE;
         /** The answers a cancel was asked for, each once. */
         final Set<String> requested = ConcurrentHashMap.newKeySet();
@@ -357,7 +359,7 @@ final class TestApi {
             switch (now) {
                 case COMPLETED -> end(started, Messages.Status.COMPLETED, "Hello!", new Messages.Usage(6, 2), null, ended);
                 case FAILED -> end(started, Messages.Status.FAILED, "Hel", null, Messages.ErrorCode.MODEL_FAILED, ended);
-                case COMPLETES_SOON -> CompletableFuture.delayedExecutor(100, TimeUnit.MILLISECONDS).execute(() ->
+                case COMPLETES_SOON -> CompletableFuture.delayedExecutor(soon.toMillis(), TimeUnit.MILLISECONDS).execute(() ->
                         end(started, Messages.Status.COMPLETED, "Hello!", new Messages.Usage(6, 2), null, ended));
                 default -> {
                     answers.put(started.messageId(), new Messages.Message(started.messageId(), conversationId,
