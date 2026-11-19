@@ -289,6 +289,58 @@ class IdentityControllerTest {
         assertThat(KEYS.calls).isEmpty();
     }
 
+    /**
+     * Point 46: an expiry is taken in the contract's form, RFC 3339, and in all of it: T and Z in either case, a fraction
+     * of a second, and any offset written with a colon, -00:00 too.
+     */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            2030-01-01T00:00:00Z           | 2030-01-01T00:00:00Z
+            2030-01-01T09:00:00+09:00      | 2030-01-01T00:00:00Z
+            2029-12-31T19:00:00-05:00      | 2030-01-01T00:00:00Z
+            2030-01-01t00:00:00z           | 2030-01-01T00:00:00Z
+            2030-01-01T00:00:00-00:00      | 2030-01-01T00:00:00Z
+            2030-01-01T00:00:00.5Z         | 2030-01-01T00:00:00.500Z
+            2030-01-01T00:00:00.123456789Z | 2030-01-01T00:00:00.123456789Z
+            """)
+    void anExpiryInTheContractsFormIsKept(String expiry, String kept) throws Exception {
+        HttpResponse<String> response = create("{\"expires_at\":\"" + expiry + "\"}");
+
+        assertThat(response.statusCode()).as(response.body()).isEqualTo(201);
+        assertThat(KEYS.calls).containsExactly(CALLER + " creates null until " + kept);
+    }
+
+    /**
+     * Point 46: any other form is refused before a key is made, with the 400 of any value that is no date. Jackson's own
+     * reader trimmed the text, so a NUL or a space at either end passed; it read an empty or blank string as no expiry,
+     * which made a key that never expires; and it took a number of seconds and an offset without a colon.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "\"\\u00002030-01-01T00:00:00Z\"", "\"2030-01-01T00:00:00Z\\u0000\"", "\"\\u0000\"",
+        "\" 2030-01-01T00:00:00Z\"", "\"2030-01-01T00:00:00Z \"", "\"\\t2030-01-01T00:00:00Z\"", "\"2030-01-01T00:00:00Z\\n\"",
+        "\"\"", "\"   \"", "1893456000", "1893456000.5",
+        "\"2030-01-01T09:00:00+0900\"", "\"2030-01-01T09:00:00+09\"", "\"2030-01-01T09:00:00+09:00:00\"",
+        "\"2030-01-01T00:00Z\"", "\"+12030-01-01T00:00:00Z\"", "\"2030-02-30T00:00:00Z\"", "\"2030-01-01 00:00:00Z\"",
+        "true", "[]", "{}"})
+    void anExpiryInAnyOtherFormIsRefused(String value) throws Exception {
+        HttpResponse<String> response = create("{\"expires_at\":" + value + "}");
+
+        assertProblem(response, 400, "invalid_request");
+        assertThat(detail(response)).isEqualTo("expires_at must be a date and time such as 2026-01-01T00:00:00Z");
+        assertThat(KEYS.calls).isEmpty();
+    }
+
+    /** A JSON null is no expiry, as leaving the field out is; point 46 keeps it so. */
+    @Test
+    void aNullExpiryIsNoExpiry() throws Exception {
+        HttpResponse<String> response = create("{\"expires_at\":null}");
+
+        assertThat(response.statusCode()).isEqualTo(201);
+        assertThat(response.body()).doesNotContain("expires_at");
+        assertThat(KEYS.calls).containsExactly(CALLER + " creates null");
+    }
+
     /** The contract counts characters, so a name of 100 symbols outside the basic plane passes too. */
     @Test
     void aNameMayHaveOneHundredCharactersAndNoMore() throws Exception {

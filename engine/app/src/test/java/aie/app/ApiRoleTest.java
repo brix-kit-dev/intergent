@@ -595,6 +595,31 @@ class ApiRoleTest {
         assertThat(status("/v1/nothing-here", first)).isEqualTo(404);
     }
 
+    /**
+     * Point 46 on the real database: an expiry that is not in the contract's form makes no key, where an empty one used
+     * to make a key that never expires. Written in the contract's form, the same request makes a key with that expiry.
+     */
+    @Test
+    void anExpiryNotInTheContractsFormMakesNoKey() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String key = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "internal")).key();
+
+        List<String> refused = new ArrayList<>();
+        for (String expiry : List.of("\"\"", "\"   \"", "\"\\u0000\"", "\"2030-01-01T00:00:00Z\\u0000\"", "1893456000")) {
+            HttpResponse<String> response = createKey(key, "strict-" + refused.size(), "{\"expires_at\":" + expiry + "}");
+            refused.add(response.statusCode() + " " + JSON.readValue(response.body(), Problem.class).getDetail());
+        }
+        HttpResponse<String> made = createKey(key, "strict-made", "{\"expires_at\":\"2030-01-01T09:00:00+09:00\"}");
+
+        assertThat(refused).hasSize(5).containsOnly("400 expires_at must be a date and time such as 2026-01-01T00:00:00Z");
+        assertThat(made.statusCode()).isEqualTo(201);
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT count(*) FROM engine.tenancy_api_keys WHERE tenant_id = '" + tenant + "'"))
+                .containsExactly("2");
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT extract(epoch FROM expires_at)::bigint FROM engine.tenancy_api_keys"
+                + " WHERE key_id = '" + JSON.readValue(made.body(), CreatedApiKey.class).getId() + "'")).containsExactly("1893456000");
+    }
+
     /** On-Behalf-Of on the real database: the platform's key works as its lower tenant's application, and nowhere else. */
     @Test
     void aPlatformActsForItsLowerTenant() throws Exception {

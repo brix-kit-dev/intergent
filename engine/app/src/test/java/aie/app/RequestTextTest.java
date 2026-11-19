@@ -42,8 +42,7 @@ import tools.jackson.databind.json.JsonMapper;
  * check and holds every string of its schema; without one, this test fails and says what to add.
  *
  * <p>The one exception is the anonymous session's site_key. It is a credential, and a credential that is wrong in any
- * way reads as unknown, 401, as an API key does. A string that still takes a NUL is named in OPEN_POINTS with the point
- * that will refuse it.
+ * way reads as unknown, 401, as an API key does.
  */
 class RequestTextTest {
 
@@ -67,14 +66,6 @@ class RequestTextTest {
             "createMessage", "{\"text\":\"Hi\",\"locale\":\"ja-JP\",\"data_class\":\"internal\"}");
     /** The strings that are credentials, as operation and path. Wrong in any way, a credential reads as unknown. */
     private static final Set<String> CREDENTIALS = Set.of("createAnonymousSession: site_key");
-    /**
-     * Strings that still take a NUL, each with the point at the end of the list that will refuse it. A date-time is
-     * trimmed before it is parsed, and String.trim() takes a NUL at either end for blank space (point 46). This test
-     * holds them to that, so the day a point refuses one, it fails here until the entry goes.
-     */
-    private static final Map<String, String> OPEN_POINTS = Map.of(
-            "createApiKey: expires_at, NUL at the start", "46",
-            "createApiKey: expires_at, NUL at the end", "46");
     /** Stands in a path for every value of a map, such as each value of a session's context. */
     private static final String EACH = "*";
 
@@ -308,10 +299,9 @@ class RequestTextTest {
     @Test
     void theContractNamesTheStringsOfItsBodies() throws IOException {
         assertThat(texts().map(Text::field).distinct()).contains("createSession: external_user_id", "createSession: scopes[0]",
-                "createSession: context.*", "createAnonymousSession: site_key", "createApiKey: name",
+                "createSession: context.*", "createAnonymousSession: site_key", "createApiKey: name", "createApiKey: expires_at",
                 "createConversation: external_user_id", "createMessage: text", "createMessage: locale");
         assertThat(texts().map(Text::field).distinct().filter(CREDENTIALS::contains)).containsExactlyInAnyOrderElementsOf(CREDENTIALS);
-        assertThat(texts().map(Text::name).filter(OPEN_POINTS::containsKey)).containsExactlyInAnyOrderElementsOf(OPEN_POINTS.keySet());
     }
 
     /** The body here passes every check, so a refusal below comes from its NUL alone. */
@@ -328,12 +318,6 @@ class RequestTextTest {
     void aNulInAnyStringIsRefusedBeforeAnythingIsMade(Text text) throws Exception {
         HttpResponse<String> response = send(text.operation(), withNul(text));
 
-        String point = OPEN_POINTS.get(text.name());
-        if (point != null) {
-            assertThat(response.statusCode()).as(text.name() + " still takes a NUL. Once point " + point
-                    + " refuses it, take it out of OPEN_POINTS").isBetween(200, 299);
-            return;
-        }
         assertThat(response.headers().firstValue("Content-Type")).contains("application/problem+json");
         Problem problem = JSON.readValue(response.body(), Problem.class);
         if (CREDENTIALS.contains(text.field())) {
