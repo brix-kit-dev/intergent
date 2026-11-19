@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import aie.core.tenancy.api.IdempotencyKeys;
 import aie.http.StreamLimit;
+import aie.http.api.model.Message;
 import aie.http.api.model.MessageStartedEvent;
 import aie.http.api.model.Problem;
 import aie.modules.conversation.api.Messages;
@@ -197,15 +198,23 @@ class StreamLimitTest {
         assertThat(open("conv_3").answerId()).startsWith("msg_");
     }
 
-    /** A resumed stream takes a slot too, before it reads anything of the log. */
+    /**
+     * A resumed stream takes a slot too, before it reads anything of the log. It resumes an answer that was asked as JSON
+     * before the slots filled, so no stream reads that answer's log and every read counted here would be the resume's
+     * own. An open stream reads its own answer's log every 200 ms, so it cannot be the one resumed here (point 47).
+     */
     @Test
     void aResumeWaitsForASlotLikeAnyStream() throws Exception {
-        Stream first = open("conv_1");
+        HttpResponse<String> asked = sendForString(ask("conv_3", "application/json"));
+        assertThat(asked.statusCode()).isEqualTo(200);
+        Message unread = JSON.readValue(asked.body(), Message.class);
+        assertThat(unread.getStatus()).isEqualTo("in_progress");
+        open("conv_1");
         open("conv_2");
-        int reads = messages.reads(first.answerId());
+        int reads = messages.reads(unread.getId());
 
-        assertFull(sendForString(resume(first.conversationId(), first.answerId())));
-        assertThat(messages.reads(first.answerId())).as("a stream that cannot open reads nothing").isEqualTo(reads);
+        assertFull(sendForString(resume("conv_3", unread.getId())));
+        assertThat(messages.reads(unread.getId())).as("a stream that cannot open reads nothing").isEqualTo(reads);
     }
 
     /** A streamed retry that would join its answer's stream takes a slot too, and the key stays for when one is free. */
