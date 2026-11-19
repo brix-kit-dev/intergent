@@ -32,6 +32,7 @@ import javax.crypto.spec.SecretKeySpec;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 /**
@@ -48,6 +49,9 @@ class SessionTokensTest {
     private static final long EXP = IAT + 3600;
     private static final Session SESSION = new Session(
             "ten_A", "app_A", "eu_A", IdentityLevel.VERIFIED, List.of("orders.read"), Map.of("order", "A-1001"), "ja-JP");
+    /** A visitor's session as the anonymous endpoint makes it: no scopes and no context. */
+    private static final Session VISITOR =
+            new Session("ten_A", "app_A", "eu_V", IdentityLevel.ANONYMOUS, List.of(), Map.of(), "ja-JP");
     private static final Base64.Encoder URL = Base64.getUrlEncoder().withoutPadding();
     /** A well-formed tag of exactly {@link SessionTokens#MAX_LOCALE} characters, and one a character longer. */
     private static final String LONGEST_LOCALE = "en-US-x-aaaaaaa-bbbbbbbb-cccccccc-d";
@@ -85,6 +89,11 @@ class SessionTokensTest {
 
     private static String claims(String more) {
         return "{\"sub\":\"eu_A\",\"ten\":\"ten_A\",\"app\":\"app_A\",\"lvl\":\"verified\",\"iat\":" + IAT + ",\"exp\":" + EXP + more + "}";
+    }
+
+    /** The same claims for a visitor. */
+    private static String anonymous(String more) {
+        return claims(more).replace("\"lvl\":\"verified\"", "\"lvl\":\"anonymous\"");
     }
 
     @Test
@@ -259,6 +268,78 @@ class SessionTokensTest {
     @Test
     void noTokenFails() {
         assertThat(tokens(NOW, KEY).verify(null)).isEmpty();
+    }
+
+    /** A visitor's token names its end user for a new token while it works, and until seven days after it expired. */
+    @Test
+    void anAnonymousTokenStaysRenewableUntilSevenDaysAfterItExpired() {
+        String token = tokens(NOW, KEY).issue(VISITOR).token();
+        Instant expired = NOW.plus(Duration.ofHours(1));
+        Instant windowEnds = expired.plus(Duration.ofDays(7));
+
+        assertThat(SessionTokens.RENEWAL_WINDOW).isEqualTo(Duration.ofDays(7));
+        assertThat(tokens(NOW, KEY).renewable(token)).contains(VISITOR);
+        assertThat(tokens(expired, KEY).verify(token)).isEmpty();
+        assertThat(tokens(expired, KEY).renewable(token)).contains(VISITOR);
+        assertThat(tokens(windowEnds.minusMillis(1), KEY).renewable(token)).contains(VISITOR);
+        assertThat(tokens(windowEnds, KEY).renewable(token)).isEmpty();
+    }
+
+    /** Only the host vouches for its own end users, so their tokens never renew, not even while they work. */
+    @ParameterizedTest
+    @EnumSource(value = IdentityLevel.class, names = {"UNVERIFIED", "VERIFIED"})
+    void aTokenOfAHostsEndUserIsNeverRenewable(IdentityLevel level) {
+        String token = tokens(NOW, KEY).issue(new Session("ten_A", "app_A", "eu_A", level, List.of(), Map.of(), null)).token();
+
+        assertThat(tokens(NOW, KEY).verify(token)).isPresent();
+        assertThat(tokens(NOW, KEY).renewable(token)).isEmpty();
+        assertThat(tokens(NOW.plus(Duration.ofHours(2)), KEY).renewable(token)).isEmpty();
+    }
+
+    /** Proves the hand-made visitor tokens below are right, so their failures come from what each one changes. */
+    @Test
+    void aHandMadeAnonymousTokenIsRenewableAfterItExpired() throws Exception {
+        String token = handMade(header("HS256", KEY), anonymous(""), KEY, "HmacSHA256");
+
+        assertThat(tokens(Instant.ofEpochSecond(EXP).plus(Duration.ofDays(3)), KEY).renewable(token))
+                .contains(new Session("ten_A", "app_A", "eu_A", IdentityLevel.ANONYMOUS, List.of(), Map.of(), null));
+    }
+
+    /** What verify refuses for its signature, header or claims is not renewable either, however recently it expired. */
+    @Test
+    void aVisitorTokenThatDoesNotCheckOutIsNotRenewable() throws Exception {
+        String[] parts = tokens(NOW, KEY).issue(SESSION).token().split("\\.");
+        String claims = new String(Base64.getUrlDecoder().decode(parts[1]), UTF_8);
+        assertThat(claims).contains("\"lvl\":\"verified\"");
+        String madeAnonymous = parts[0] + "."
+                + URL.encodeToString(claims.replace("\"lvl\":\"verified\"", "\"lvl\":\"anonymous\"").getBytes(UTF_8)) + "." + parts[2];
+        String noExpiry = "{\"sub\":\"eu_A\",\"ten\":\"ten_A\",\"app\":\"app_A\",\"lvl\":\"anonymous\",\"iat\":" + IAT + "}";
+        SessionTokens later = tokens(Instant.ofEpochSecond(EXP).plus(Duration.ofDays(1)), KEY);
+
+        for (String token : List.of(
+                madeAnonymous,
+                handMade(header("HS256", KEY), anonymous(""), NEXT_KEY, "HmacSHA256"),
+                handMade("{\"alg\":\"none\",\"kid\":\"" + kid(KEY) + "\"}", anonymous(""), null, null),
+                handMade(header("RS256", KEY), anonymous(""), KEY, "HmacSHA256"),
+                handMade("{\"alg\":\"HS256\",\"typ\":\"JWT\"}", anonymous(""), KEY, "HmacSHA256"),
+                handMade(header("HS256", KEY), noExpiry, KEY, "HmacSHA256"),
+                handMade(header("HS256", KEY), anonymous(",\"loc\":\"ja-jp\""), KEY, "HmacSHA256"),
+                handMade(header("HS256", KEY), anonymous("").replace("\"ten_A\"", "\"app_A\""), KEY, "HmacSHA256"),
+                "",
+                "a.b.c")) {
+            assertThat(later.renewable(token)).as(token).isEmpty();
+        }
+        assertThat(later.renewable(null)).isEmpty();
+    }
+
+    /** A previous key still renews what it signed, until it is dropped. */
+    @Test
+    void aVisitorTokenSignedBeforeARotationRenewsUntilThePreviousKeyIsDropped() {
+        String before = tokens(NOW, KEY).issue(VISITOR).token();
+        Instant later = NOW.plus(Duration.ofDays(2));
+
+        assertThat(tokens(later, NEXT_KEY, KEY).renewable(before)).contains(VISITOR);
+        assertThat(tokens(later, NEXT_KEY).renewable(before)).isEmpty();
     }
 
     /** The message gives the length found, so whoever set the key sees what is wrong. */

@@ -13,12 +13,19 @@ import java.util.regex.Pattern;
  * The short-lived end user tokens of blueprint 6.5. The host's server trades its key for one, and the browser then
  * uses it. A token names its tenant, application and end user, how far the host vouches for that user, what the token
  * may do, the identifiers the host bound to the session, and the end user's language when the host gave one. It is
- * signed, so checking it reads no table (blueprint 7.6), and it ends after {@link #LIFETIME}.
+ * signed, so checking it reads no table (blueprint 7.6), and it ends after {@link #LIFETIME}. An anonymous one can be
+ * traded for a new token of the same end user until {@link #RENEWAL_WINDOW} after that.
  */
 public interface SessionTokens {
 
     /** How long every token lives. It is fixed, so no caller can ask for a long-lived one. */
     Duration LIFETIME = Duration.ofHours(1);
+
+    /**
+     * How long after it expired an anonymous token still names its end user for a new token, so that a visitor who
+     * comes back within it goes on with the same conversations (point 43). It is fixed, like {@link #LIFETIME}.
+     */
+    Duration RENEWAL_WINDOW = Duration.ofDays(7);
 
     /**
      * The shapes of the IDs a token carries: the type prefix of blueprint 6.2, then 1 to 60 letters and digits. An ID
@@ -75,6 +82,15 @@ public interface SessionTokens {
      * unknown key, or expired. Every failure looks the same, so a caller learns nothing about why.
      */
     Optional<Verified> verify(String token);
+
+    /**
+     * The session in an anonymous token that a visitor may trade for a new token of the same end user (point 43): one
+     * that {@link #verify} would take but for its expiry, and that has not expired, or expired less than
+     * {@link #RENEWAL_WINDOW} ago. Empty for any other token, and every failure looks the same, as for {@link #verify}.
+     * A token of a host's end user is never renewable, not even while it works, because only the host vouches for that
+     * user. Like {@link #verify}, it reads no table.
+     */
+    Optional<Session> renewable(String token);
 
     /** How far the host vouches for the end user. Anonymous tokens come from site keys, not from a server key. */
     enum IdentityLevel {

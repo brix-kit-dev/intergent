@@ -116,6 +116,26 @@ public final class SignedSessionTokens implements SessionTokens {
 
     @Override
     public Optional<Verified> verify(String token) {
+        Instant now = clock.instant();
+        return signed(token).filter(signed -> now.isBefore(signed.expiresAt()));
+    }
+
+    /** A token of a host's end user is left out before its expiry is looked at, so it fails the same whenever it comes. */
+    @Override
+    public Optional<Session> renewable(String token) {
+        Instant now = clock.instant();
+        return signed(token)
+                .filter(signed -> signed.session().identityLevel() == IdentityLevel.ANONYMOUS)
+                .filter(signed -> now.isBefore(signed.expiresAt().plus(RENEWAL_WINDOW)))
+                .map(Verified::session);
+    }
+
+    /**
+     * The session and expiry of a token signed with HS256 by a known key, whether or not it has expired; empty when it
+     * is malformed, changed, signed with another algorithm or an unknown key, has no expiry, or holds a claim of the
+     * wrong shape.
+     */
+    private Optional<Verified> signed(String token) {
         if (token == null) {
             return Optional.empty();
         }
@@ -128,7 +148,7 @@ public final class SignedSessionTokens implements SessionTokens {
             }
             JWTClaimsSet claims = jwt.getJWTClaimsSet();
             Date expiresAt = claims.getExpirationTime();
-            if (expiresAt == null || !clock.instant().isBefore(expiresAt.toInstant())) {
+            if (expiresAt == null) {
                 return Optional.empty();
             }
             return session(claims).map(session -> new Verified(session, expiresAt.toInstant()));
