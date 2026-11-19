@@ -164,6 +164,7 @@ class AnswerEndingsTest {
         String answer = newAnswer(caller, conversation);
         messages.addDelta(caller, conversation, answer, "Hal");
         messages.addDelta(caller, conversation, answer, "f");
+        messages.requestCancel(caller, conversation, answer);
 
         assertThat(messages.cancel(caller, conversation, answer, new Usage(5, 2))).isEqualTo(new Added(4));
 
@@ -185,6 +186,7 @@ class AnswerEndingsTest {
         Owner caller = newApplication();
         String conversation = newConversation(caller);
         String answer = newAnswer(caller, conversation);
+        messages.requestCancel(caller, conversation, answer);
 
         assertThat(messages.cancel(caller, conversation, answer, new Usage(5, 0))).isEqualTo(new Added(2));
 
@@ -487,10 +489,36 @@ class AnswerEndingsTest {
         assertRefused(() -> addRow(caller, answer, "error", null, null, null, "output_blocked"), "conversation_events_code");
         assertRefused(() -> addRow(caller, answer, "error", null, 1L, 1L, "model_failed"), "conversation_events_usage");
         assertRefused(() -> addRow(caller, answer, "error", "text", null, null, "model_failed"), "conversation_events_text");
+        messages.requestCancel(caller, conversation, answer);
         assertRefused(() -> addRow(caller, answer, "message.cancelled", null, null, null, null), "conversation_events_usage");
         assertRefused(() -> addRow(caller, answer, "message.cancelled", "Whole", 1L, 1L, null), "and that is not it");
 
         assertThat(addRow(caller, answer, "message.cancelled", "Half", 1L, 1L, null)).isEqualTo(3);
+        assertThat(found(caller, conversation, answer).text()).isEqualTo("Half");
+    }
+
+    /**
+     * Point 41: message.cancelled means that someone asked, so an answer without a cancel request does not take it, by
+     * DatabaseMessages or by SQL of its own. The refusal names the reason, and the answer goes on as it was.
+     */
+    @Test
+    void anAnswerEndsAsCancelledOnlyWithARequest() {
+        Owner caller = newApplication();
+        String conversation = newConversation(caller);
+        String answer = newAnswer(caller, conversation);
+        messages.addDelta(caller, conversation, answer, "Hal");
+        String reason = "Answer " + answer + " has no request to cancel it, so it cannot end as cancelled";
+
+        assertRefused(() -> messages.cancel(caller, conversation, answer, USAGE), reason);
+        assertRefused(() -> addRow(caller, answer, "message.cancelled", null, 1L, 1L, null), reason);
+
+        assertThat(found(caller, conversation, answer).status()).isEqualTo(Status.IN_PROGRESS);
+        assertThat(events(caller, conversation, answer)).extracting(Event::seq).containsExactly(1L, 2L);
+        assertThat(messages.addDelta(caller, conversation, answer, "f")).isEqualTo(new Added(3));
+
+        messages.requestCancel(caller, conversation, answer);
+        assertThat(messages.cancel(caller, conversation, answer, USAGE)).isEqualTo(new Added(4));
+        assertThat(found(caller, conversation, answer).status()).isEqualTo(Status.CANCELLED);
         assertThat(found(caller, conversation, answer).text()).isEqualTo("Half");
     }
 

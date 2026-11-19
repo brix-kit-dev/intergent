@@ -439,6 +439,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
   - 请求记下之后，这条回答不再收增量，结束事件也只收 `message.cancelled`。`addDelta`、`complete` 和 `fail` 都拿到 `Written.CancelRequested`，什么都不写。`cancel` 照常写 `message.cancelled`，带已生成的增量和用量。
   - 先到先得：请求和事件一样，先锁住这条回答再检查。回答已经结束，请求就不记，回答保持原样。请求先记下，回答就只能以 `message.cancelled` 结束，即使模型随后正好完成或失败。
   - 表自己也守这些规则，绕过 `Messages` 直接写 SQL 也一样：已经结束的回答和用户消息不收请求，有请求的回答只收 `message.cancelled`。
+  - 反过来也一样（第 41 点，V7）：没有取消请求的回答不收 `message.cancelled`，所以“已取消”一定说明有人要求过。生成方和读取方本来就只在有请求时写它；`Messages.cancel` 遇到没有请求的回答，数据库拒绝，原因原样抛出，回答照常进行。这只会是代码漏了先登记请求。
   - 调用方经下面的取消接口发请求。生成方怎么得知请求、怎么结束回答，见“生成”里的取消。
 - **租约（M2-11）：** 表 `conversation_answer_leases`，每条回答一行，记下生成方的租约到期时间（蓝图 6.4）。建回答时同一个事务里给 30 秒（`Messages.LEASE`）。到期时间常变，所以不放进只随事件变的消息表（M2-11 第 1 项）。
   - `Messages.renew` 是生成方的续约：把到期时间推到 30 秒以后，只有进行中的回答能续。结果是 `Renewed`，带上有没有取消请求，这样不出新段的模型也能得知；或者 `AlreadyEnded`、`NotFound`。

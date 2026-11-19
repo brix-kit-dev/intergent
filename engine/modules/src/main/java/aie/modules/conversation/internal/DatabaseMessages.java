@@ -280,7 +280,10 @@ public final class DatabaseMessages implements Messages {
         return write(caller, conversationId, messageId, EventType.MESSAGE_COMPLETED, null, required(usage), null);
     }
 
-    /** The database fills in what was generated, from the deltas, under the same lock that numbers the event. */
+    /**
+     * The database fills in what was generated, from the deltas, under the same lock that numbers the event. It refuses
+     * the event for an answer without a cancel request (V7); the answer is in progress then, so the refusal goes on.
+     */
     @Override
     public Written cancel(Owner caller, String conversationId, String messageId, Usage usage) {
         return write(caller, conversationId, messageId, EventType.MESSAGE_CANCELLED, null, required(usage), null);

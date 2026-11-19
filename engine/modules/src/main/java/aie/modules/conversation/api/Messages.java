@@ -68,7 +68,11 @@ public interface Messages {
 
     /**
      * Ends an answer with message.cancelled, which carries what the deltas so far say, and the usage so far. It is the
-     * one event an answer with a cancel request still takes.
+     * one event an answer with a cancel request still takes, and it needs that request ({@link #requestCancel}):
+     * message.cancelled always means that someone asked (point 41).
+     *
+     * @throws aie.ports.DatabaseException for an answer in progress without a cancel request, which the database
+     *     refuses, with its reason; only code that skipped the request gets here
      */
     Written cancel(Owner caller, String conversationId, String messageId, Usage usage);
 

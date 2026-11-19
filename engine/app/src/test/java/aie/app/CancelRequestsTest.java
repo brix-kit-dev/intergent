@@ -249,7 +249,10 @@ class CancelRequestsTest {
         assertThat(requests()).containsExactly(answer);
     }
 
-    /** An answer that ended before the request stays as it ended, and the request is not kept. */
+    /**
+     * An answer that ended before the request stays as it ended, and the request is not kept. A cancelled one had its own
+     * request before it ended, since message.cancelled needs one (point 41); a later request adds nothing to it.
+     */
     @ParameterizedTest
     @EnumSource(value = Status.class, names = "IN_PROGRESS", mode = EnumSource.Mode.EXCLUDE)
     void aRequestAfterTheEndingChangesNothing(Status ending) throws SQLException {
@@ -258,15 +261,20 @@ class CancelRequestsTest {
         String answer = newAnswer(caller, conversation);
         switch (ending) {
             case COMPLETED -> messages.complete(caller, conversation, answer, USAGE);
-            case CANCELLED -> messages.cancel(caller, conversation, answer, USAGE);
+            case CANCELLED -> {
+                messages.requestCancel(caller, conversation, answer);
+                messages.cancel(caller, conversation, answer, USAGE);
+            }
             default -> messages.fail(caller, conversation, answer, ErrorCode.MODEL_FAILED);
         }
         Message ended = found(caller, conversation, answer);
+        List<String> before = requests();
 
         assertThat(messages.requestCancel(caller, conversation, answer)).isEqualTo(new CancelRequest.AlreadyEnded(ending));
         assertThat(messages.requestCancel(caller, conversation, answer)).isEqualTo(new CancelRequest.AlreadyEnded(ending));
 
-        assertThat(requests()).isEmpty();
+        assertThat(before).isEqualTo(ending == Status.CANCELLED ? List.of(answer) : List.of());
+        assertThat(requests()).isEqualTo(before);
         assertThat(found(caller, conversation, answer)).isEqualTo(ended);
         assertThat(ended.status()).isEqualTo(ending);
         assertThat(events(caller, conversation, answer)).hasSize(3);

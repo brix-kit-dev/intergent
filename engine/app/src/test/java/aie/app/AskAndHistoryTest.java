@@ -117,7 +117,10 @@ class AskAndHistoryTest {
         }
         switch (ending) {
             case COMPLETED -> messages.complete(caller, conversation, answer, USAGE);
-            case CANCELLED -> messages.cancel(caller, conversation, answer, USAGE);
+            case CANCELLED -> {
+                messages.requestCancel(caller, conversation, answer);
+                messages.cancel(caller, conversation, answer, USAGE);
+            }
             case FAILED -> messages.fail(caller, conversation, answer, ErrorCode.MODEL_FAILED);
             case IN_PROGRESS -> {
             }
