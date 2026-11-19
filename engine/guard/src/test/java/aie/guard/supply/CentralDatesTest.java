@@ -38,7 +38,7 @@ class CentralDatesTest {
     private static final Instant PUBLISHED = Instant.parse("2025-06-03T10:15:30Z");
     /** Short, so that a test does not wait 5 seconds between tries. */
     private static final Duration SHORT_DELAY = Duration.ofMillis(1);
-    /** Long enough that a busy machine adds little to it, compared with the delay itself. */
+    /** Long enough that a retry sent without waiting reaches the fake well before it, even on a busy machine. */
     private static final Duration MEASURED_DELAY = Duration.ofMillis(500);
     /** Planned in place of a status: drop the connection without an answer. */
     private static final int DROP = -1;
@@ -52,8 +52,14 @@ class CentralDatesTest {
         central.close();
     }
 
+    /** Sleeps between tries, as the build does. */
     private Map<String, Instant> published(List<String> paths, Duration retryDelay) {
         return CentralDates.published(paths, central.address(), retryDelay, new PrintStream(logged, true, StandardCharsets.UTF_8));
+    }
+
+    /** Waits between tries the way the test says, such as noting each delay and going on at once. */
+    private Map<String, Instant> published(List<String> paths, Duration retryDelay, CentralDates.Sleeper sleeper) {
+        return CentralDates.published(paths, central.address(), retryDelay, sleeper, new PrintStream(logged, true, StandardCharsets.UTF_8));
     }
 
     private Map<String, Instant> published(List<String> paths) {
@@ -122,18 +128,32 @@ class CentralDatesTest {
     }
 
     /**
-     * The build waits the same 5 seconds before every retry, not longer each time. The gaps are measured where Central sees
-     * the requests, so starting the client does not count, and a busy machine has the whole delay as room (code point 33).
+     * The build waits the same 5 seconds before every retry, not longer each time. The test notes each wait the code asks
+     * for and goes on at once, rather than timing the requests, so a busy machine cannot fail it (point 45).
      */
     @Test
     void everyRetryWaitsTheSameDelay() {
         central.plan("a.pom", List.of(503, 503, 503));
+        Queue<Duration> waits = new ConcurrentLinkedQueue<>();
+
+        assertThat(published(List.of("a.pom"), CentralDates.RETRY_DELAY, waits::add)).isEqualTo(Map.of("a.pom", PUBLISHED));
+
+        assertThat(waits).containsExactly(CentralDates.RETRY_DELAY, CentralDates.RETRY_DELAY, CentralDates.RETRY_DELAY);
+        assertThat(central.requests("a.pom")).isEqualTo(4);
+    }
+
+    /**
+     * The build's sleep really waits: each retry reaches Central at least the delay after the try before. The gaps are
+     * measured where Central sees the requests (code point 33), and only this lower bound is checked, because a busy
+     * machine can only make them longer (point 45).
+     */
+    @Test
+    void aRetryReallyWaitsTheDelay() {
+        central.plan("a.pom", List.of(503, 503, 503));
 
         assertThat(published(List.of("a.pom"), MEASURED_DELAY)).containsKey("a.pom");
 
-        assertThat(central.gaps("a.pom")).hasSize(3).allSatisfy(gap -> assertThat(gap)
-                .isGreaterThanOrEqualTo(MEASURED_DELAY)
-                .isLessThan(MEASURED_DELAY.multipliedBy(2)));
+        assertThat(central.gaps("a.pom")).hasSize(3).allSatisfy(gap -> assertThat(gap).isGreaterThanOrEqualTo(MEASURED_DELAY));
     }
 
     /** The files after the first 16 wait in a queue, so they start only once a file has given up. */

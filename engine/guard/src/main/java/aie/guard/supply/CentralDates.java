@@ -39,6 +39,12 @@ final class CentralDates {
     /** The answers {@code verify.sh} has Maven try again. Any other answer, such as 404, is final. */
     static final Set<Integer> TEMPORARY = Set.of(408, 429, 500, 502, 503, 504);
 
+    /** How a request waits before it is tried again. The build sleeps; a test can note the delay instead (point 45). */
+    @FunctionalInterface
+    interface Sleeper {
+        void sleep(Duration delay) throws InterruptedException;
+    }
+
     private CentralDates() {
     }
 
@@ -46,12 +52,18 @@ final class CentralDates {
         return published(paths, CENTRAL, RETRY_DELAY, System.err);
     }
 
+    /** Sleeps the delay before each retry, as the build does. */
     static Map<String, Instant> published(
             Collection<String> paths, String central, Duration retryDelay, PrintStream log) {
+        return published(paths, central, retryDelay, Thread::sleep, log);
+    }
+
+    static Map<String, Instant> published(
+            Collection<String> paths, String central, Duration retryDelay, Sleeper sleeper, PrintStream log) {
         Map<String, Instant> dates = new ConcurrentHashMap<>();
         try (HttpClient client = HttpClient.newBuilder().connectTimeout(TIMEOUT).build();
                 ExecutorService requests = Executors.newFixedThreadPool(PARALLEL_REQUESTS)) {
-            Run run = new Run(client, central, retryDelay, log, dates, new AtomicBoolean());
+            Run run = new Run(client, central, retryDelay, sleeper, log, dates, new AtomicBoolean());
             paths.forEach(path -> requests.execute(() -> run.fetch(path)));
         }
         return dates;
@@ -66,6 +78,7 @@ final class CentralDates {
             HttpClient client,
             String central,
             Duration retryDelay,
+            Sleeper sleeper,
             PrintStream log,
             Map<String, Instant> dates,
             AtomicBoolean gaveUp) {
@@ -78,7 +91,7 @@ final class CentralDates {
             try {
                 for (int attempt = 0; attempt <= RETRIES; attempt++) {
                     if (attempt > 0) {
-                        Thread.sleep(retryDelay);
+                        sleeper.sleep(retryDelay);
                     }
                     if (gaveUp.get() || !failedForNow(request, path)) {
                         return;
