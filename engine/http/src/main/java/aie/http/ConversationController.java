@@ -167,7 +167,8 @@ class ConversationController implements ConversationsApi, StreamsApi {
      * missing, before anything is asked or sent again (M2-12-3). The locale is checked but not used yet. The call's data
      * class starts at the application's default, and data_class can only raise it (blueprint 7.3, M3-3-1); the answer
      * raises it further to the conversation's watermark, and both messages keep the result. A call that no model of its
-     * task takes is 422 no_eligible_model before any stream starts, and nothing is stored (M3-3-2).
+     * task takes is 422 no_eligible_model before any stream starts, and nothing is stored (M3-3-2). So is a text that the
+     * input check blocks, as 422 input_blocked (M3-4-1).
      */
     @Override
     public ResponseEntity<Message> createMessage(String conversationId, CreateMessageRequest body,
@@ -196,6 +197,7 @@ class ConversationController implements ConversationsApi, StreamsApi {
                 case Answers.Start.Busy busy -> throw full();
                 case Answers.Start.NotFound missing -> throw new ResponseStatusException(HttpStatus.NOT_FOUND);
                 case Answers.Start.NoEligibleModel refused -> throw new NoEligibleModel(refused);
+                case Answers.Start.InputBlocked blocked -> throw new InputBlocked(blocked);
             });
         }
         return switch (answers.ask(caller, conversation, text, floor)) {
@@ -204,6 +206,7 @@ class ConversationController implements ConversationsApi, StreamsApi {
             case Answers.Start.Busy busy -> throw full();
             case Answers.Start.NotFound missing -> throw new ResponseStatusException(HttpStatus.NOT_FOUND);
             case Answers.Start.NoEligibleModel refused -> throw new NoEligibleModel(refused);
+            case Answers.Start.InputBlocked blocked -> throw new InputBlocked(blocked);
         };
     }
 
@@ -215,6 +218,16 @@ class ConversationController implements ConversationsApi, StreamsApi {
     @ExceptionHandler(NoEligibleModel.class)
     ResponseEntity<Object> noEligibleModel(NoEligibleModel refused) {
         return Problems.response(HttpStatus.UNPROCESSABLE_CONTENT.value(), "no_eligible_model", refused.getMessage(),
+                HttpHeaders.EMPTY);
+    }
+
+    /**
+     * A text the input check blocked (M3-4-1): the request fails before anything is stored or sent, and before any stream
+     * starts (blueprint 6.4). The detail names the rule, never the text.
+     */
+    @ExceptionHandler(InputBlocked.class)
+    ResponseEntity<Object> inputBlocked(InputBlocked blocked) {
+        return Problems.response(HttpStatus.UNPROCESSABLE_CONTENT.value(), "input_blocked", blocked.getMessage(),
                 HttpHeaders.EMPTY);
     }
 
@@ -481,7 +494,6 @@ class ConversationController implements ConversationsApi, StreamsApi {
         return text;
     }
 
-    /** The instance generates as many answers as it may. Nothing was stored, so the same Idempotency-Key may come back. */
     /** A refused call, before anything was stored or written, so that its handler can still answer with a problem. */
     private static final class NoEligibleModel extends RuntimeException {
 
@@ -493,6 +505,18 @@ class ConversationController implements ConversationsApi, StreamsApi {
         }
     }
 
+    /** A blocked text, before anything was stored or written, so that its handler can still answer with a problem. */
+    private static final class InputBlocked extends RuntimeException {
+
+        private static final long serialVersionUID = 1L;
+
+        InputBlocked(Answers.Start.InputBlocked blocked) {
+            super("The input check blocked the text by its rule " + blocked.rule() + ", so nothing was sent or stored", null,
+                    false, false);
+        }
+    }
+
+    /** The instance generates as many answers as it may. Nothing was stored, so the same Idempotency-Key may come back. */
     private static ErrorResponseException full() {
         ErrorResponseException full = new ErrorResponseException(HttpStatus.TOO_MANY_REQUESTS, ProblemDetail.forStatusAndDetail(
                 HttpStatus.TOO_MANY_REQUESTS, "This instance answers as many messages as it can, so try again after Retry-After"),

@@ -23,7 +23,9 @@ public interface Answers {
     /**
      * Stores what the end user said, starts its answer and generates it in the background. Nothing is stored when the
      * conversation is out of reach, when this instance already generates as many answers as it may, when it is stopping,
-     * or when no model of {@link #TASK} takes the call's data class (M3-3-2).
+     * when the input check blocks what the end user said (M3-4-1), or when no model of {@link #TASK} takes the call's data
+     * class (M3-3-2). The input check comes before anything is stored, and the same text is not checked again for the
+     * answer.
      *
      * @param floor the least data class of the call, the higher of the application's default and the class the caller
      *     declared; {@link Messages#ask} raises it to the conversation's watermark (M3-3)
@@ -69,6 +71,16 @@ public interface Answers {
          * @param ceiling the highest class the task's models take
          */
         record NoEligibleModel(DataClass dataClass, DataClass ceiling) implements Start {
+        }
+
+        /**
+         * The input check blocked what the end user said (M3-4-1), so it goes to no model. Nothing was stored, and the
+         * conversation's watermark stayed as it was: what no model was sent neither joins the history nor raises the
+         * watermark (blueprint 7.3).
+         *
+         * @param rule the rule that stopped it, a stable name such as {@code instruction_override}
+         */
+        record InputBlocked(String rule) implements Start {
         }
     }
 }

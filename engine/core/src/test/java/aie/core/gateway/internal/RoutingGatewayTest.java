@@ -4,7 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import aie.core.gateway.api.Gateway;
+import aie.core.gateway.api.Gateway.Blocked;
 import aie.core.gateway.api.Gateway.Cancelled;
+import aie.core.gateway.api.Gateway.Checked;
 import aie.core.gateway.api.Gateway.Completed;
 import aie.core.gateway.api.Gateway.Failed;
 import aie.core.gateway.api.Gateway.Request;
@@ -13,6 +15,7 @@ import aie.core.gateway.api.Gateway.Role;
 import aie.core.gateway.api.Gateway.Turn;
 import aie.core.gateway.api.Gateway.Usage;
 import aie.core.trust.api.CheckMode;
+import aie.core.trust.api.Checks;
 import aie.core.trust.api.DataClass;
 import aie.ports.ModelPort;
 import java.time.Duration;
@@ -39,6 +42,18 @@ class RoutingGatewayTest {
     private static final Prompt PROMPT = new Prompt("chat/test/v1", "Answer the test.");
     private static final Duration MINUTE = Duration.ofMinutes(1);
     private static final ModelPort.Result DONE = new ModelPort.Completed(new ModelPort.Usage(5, 2));
+    /** Checks that pass every text and every piece as it is. */
+    private static final Checks PASSING = new Checks() {
+        @Override
+        public Input input(String task, String text) {
+            return new Passed();
+        }
+
+        @Override
+        public String output(String task, String piece) {
+            return piece;
+        }
+    };
 
     /** What happened, in order: the checks, the models' calls and the pieces the caller got. */
     private final List<String> events = new CopyOnWriteArrayList<>();
@@ -75,8 +90,14 @@ class RoutingGatewayTest {
         return new Route(List.of(models), MINUTE, CheckMode.SENTENCE, prompts(List.of(models)));
     }
 
-    private static Request ask(String task, String said) {
-        return new Request(task, List.of(new Turn(Role.USER, said)), NEVER, DataClass.PUBLIC);
+    /** The gateway's receipt for a text it passed, as a request for that text needs it (M3-4-1). */
+    private static Checked checked(Gateway gateway, String task, String text) {
+        return (Checked) gateway.checkInput(task, text);
+    }
+
+    /** One turn of the user, of public data, checked by the gateway first. */
+    private static Request ask(Gateway gateway, String task, String said) {
+        return new Request(task, List.of(new Turn(Role.USER, said)), NEVER, DataClass.PUBLIC, checked(gateway, task, said));
     }
 
     private Result answer(Gateway gateway, Request request) {
@@ -87,9 +108,9 @@ class RoutingGatewayTest {
     void itAnswersWithTheFirstModelOfTheTasksRoute() {
         Gateway gateway = new RoutingGateway(
                 Map.of("first", model("first", DONE, "a", "b"), "second", model("second", DONE, "x")),
-                Map.of("chat", route("first", "second")), OUTSIDE);
+                Map.of("chat", route("first", "second")), PASSING, OUTSIDE);
 
-        Result result = answer(gateway, ask("chat", "Hello"));
+        Result result = answer(gateway, ask(gateway, "chat", "Hello"));
 
         assertThat(events).containsExactly("model first", "caller a", "caller b");
         assertThat(calls).singleElement().extracting(ModelPort.Request::model).isEqualTo("first");
@@ -106,10 +127,11 @@ class RoutingGatewayTest {
                         "internal", model("internal", DataClass.INTERNAL, DONE),
                         "sensitive", model("sensitive", DataClass.SENSITIVE, DONE),
                         "public", model("public", DataClass.PUBLIC, DONE)),
-                Map.of("chat", route("internal", "sensitive", "public")), OUTSIDE);
+                Map.of("chat", route("internal", "sensitive", "public")), PASSING, OUTSIDE);
+        Checked hello = checked(gateway, "chat", "Hello");
 
         for (DataClass dataClass : DataClass.values()) {
-            answer(gateway, new Request("chat", List.of(new Turn(Role.USER, "Hello")), NEVER, dataClass));
+            answer(gateway, new Request("chat", List.of(new Turn(Role.USER, "Hello")), NEVER, dataClass, hello));
         }
 
         assertThat(calls).extracting(ModelPort.Request::model).containsExactly("internal", "internal", "sensitive", "sensitive");
@@ -124,7 +146,7 @@ class RoutingGatewayTest {
                         "personal", model("personal", DataClass.PERSONAL, DONE),
                         "sensitive", model("sensitive", DataClass.SENSITIVE, DONE)),
                 Map.of("chat", route("public"), "translate", route("internal", "public"), "search", route("public", "personal"),
-                        "care", route("public", "sensitive", "internal")), OUTSIDE);
+                        "care", route("public", "sensitive", "internal")), PASSING, OUTSIDE);
 
         assertThat(gateway.ceiling("chat")).isEqualTo(DataClass.PUBLIC);
         assertThat(gateway.ceiling("translate")).isEqualTo(DataClass.INTERNAL);
@@ -138,23 +160,25 @@ class RoutingGatewayTest {
 
     /**
      * M3-3-2: a call above its task's ceiling goes to no model, not even to one of a lower class: the caller should have
-     * refused it, so it is a mistake, refused before the checks. One at the ceiling is answered.
+     * refused it, so it is a mistake, refused before the model. One at the ceiling is answered.
      */
     @Test
     void aCallAboveTheCeilingReachesNoModel() {
         Gateway gateway = new RoutingGateway(Map.of("low", model("low", DataClass.INTERNAL, DONE, "a")),
                 Map.of("chat", route("low")), noting(), OUTSIDE);
         Turn hello = new Turn(Role.USER, "Hello");
+        Checked checked = checked(gateway, "chat", "Hello");
 
         for (DataClass above : List.of(DataClass.PERSONAL, DataClass.SENSITIVE)) {
-            assertThatThrownBy(() -> answer(gateway, new Request("chat", List.of(hello), NEVER, above)))
+            assertThatThrownBy(() -> answer(gateway, new Request("chat", List.of(hello), NEVER, above, checked)))
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessage("No model of the task chat takes " + above.wireName()
                             + " data, only up to internal, so the caller refuses such a call before anything goes");
         }
-        assertThat(events).isEmpty();
-        assertThat(answer(gateway, new Request("chat", List.of(hello), NEVER, DataClass.INTERNAL))).isInstanceOf(Completed.class);
-        assertThat(events).containsExactly("input chat", "model low", "output chat a", "caller A");
+        assertThat(events).containsExactly("input chat Hello");
+        assertThat(answer(gateway, new Request("chat", List.of(hello), NEVER, DataClass.INTERNAL, checked)))
+                .isInstanceOf(Completed.class);
+        assertThat(events).containsExactly("input chat Hello", "model low", "output chat a", "caller A");
     }
 
     @Test
@@ -171,10 +195,10 @@ class RoutingGatewayTest {
     void eachTaskGoesToItsOwnRoute() {
         Gateway gateway = new RoutingGateway(
                 Map.of("one", model("one", DONE), "two", model("two", DONE)),
-                Map.of("chat", route("one"), "translate", route("two")), OUTSIDE);
+                Map.of("chat", route("one"), "translate", route("two")), PASSING, OUTSIDE);
 
-        answer(gateway, ask("translate", "Hello"));
-        answer(gateway, ask("chat", "Hello"));
+        answer(gateway, ask(gateway, "translate", "Hello"));
+        answer(gateway, ask(gateway, "chat", "Hello"));
 
         assertThat(events).containsExactly("model two", "model one");
     }
@@ -184,21 +208,22 @@ class RoutingGatewayTest {
     void everyCallCarriesTheTimeOfItsRoute() {
         Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of(
                 "quick", new Route(List.of("m"), Duration.ofSeconds(3), CheckMode.SENTENCE, prompts(List.of("m"))),
-                "slow", new Route(List.of("m"), Duration.ofSeconds(90), CheckMode.SENTENCE, prompts(List.of("m")))), OUTSIDE);
+                "slow", new Route(List.of("m"), Duration.ofSeconds(90), CheckMode.SENTENCE, prompts(List.of("m")))),
+                PASSING, OUTSIDE);
 
-        answer(gateway, ask("quick", "Hello"));
-        answer(gateway, ask("slow", "Hello"));
+        answer(gateway, ask(gateway, "quick", "Hello"));
+        answer(gateway, ask(gateway, "slow", "Hello"));
 
         assertThat(calls).extracting(ModelPort.Request::timeout).containsExactly(Duration.ofSeconds(3), Duration.ofSeconds(90));
     }
 
     @Test
     void theModelGetsTheConversationAndTheCancel() {
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), OUTSIDE);
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), PASSING, OUTSIDE);
         AtomicBoolean cancel = new AtomicBoolean();
 
-        answer(gateway, new Request("chat", List.of(
-                new Turn(Role.USER, "Hi"), new Turn(Role.ASSISTANT, "Hello"), new Turn(Role.USER, "Bye")), cancel::get, DataClass.PUBLIC));
+        answer(gateway, new Request("chat", List.of(new Turn(Role.USER, "Hi"), new Turn(Role.ASSISTANT, "Hello"),
+                new Turn(Role.USER, "Bye")), cancel::get, DataClass.PUBLIC, checked(gateway, "chat", "Bye")));
 
         ModelPort.Request call = calls.getFirst();
         assertThat(call.instructions()).isEqualTo("Answer the test.");
@@ -214,10 +239,10 @@ class RoutingGatewayTest {
         Gateway gateway = new RoutingGateway(Map.of(
                 "stops", model("stops", new ModelPort.Cancelled(new ModelPort.Usage(4, 1))),
                 "breaks", model("breaks", new ModelPort.Failed("the model's own words", 2, new ModelPort.Usage(4, 6)))),
-                Map.of("stop", route("stops"), "break", route("breaks")), OUTSIDE);
+                Map.of("stop", route("stops"), "break", route("breaks")), PASSING, OUTSIDE);
 
-        assertThat(answer(gateway, ask("stop", "Hello"))).isEqualTo(new Cancelled(new Usage(4, 1)));
-        assertThat(answer(gateway, ask("break", "Hello"))).isEqualTo(new Failed(2, new Usage(4, 6)));
+        assertThat(answer(gateway, ask(gateway, "stop", "Hello"))).isEqualTo(new Cancelled(new Usage(4, 1)));
+        assertThat(answer(gateway, ask(gateway, "break", "Hello"))).isEqualTo(new Failed(2, new Usage(4, 6)));
     }
 
     /** The model's reason is for the logs; the result has no place for it, so it cannot reach the user. */
@@ -226,38 +251,47 @@ class RoutingGatewayTest {
     void aFailureIsLoggedWithTheModelsReason(CapturedOutput output) {
         Gateway gateway = new RoutingGateway(
                 Map.of("m", model("m", new ModelPort.Failed("the vendor is out of quota", 1, new ModelPort.Usage(5, 3)), "a")),
-                Map.of("chat", route("m")), OUTSIDE);
+                Map.of("chat", route("m")), PASSING, OUTSIDE);
 
-        Result result = answer(gateway, ask("chat", "Hello"));
+        Result result = answer(gateway, ask(gateway, "chat", "Hello"));
 
         assertThat(output).contains("The model m failed the task chat with the prompt chat/test/v1 after 1 piece(s): the vendor is out of quota");
         assertThat(result).hasToString("Failed[pieces=1, usage=Usage[inputTokens=5, outputTokens=3]]");
     }
 
+    /** A task without a route is a mistake, whether its text is checked or answered, and no check or model sees it. */
     @Test
     void aTaskWithoutARouteIsAMistake() {
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), OUTSIDE);
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), noting(), OUTSIDE);
+        Checked hello = checked(gateway, "chat", "Hello");
+        events.clear();
 
-        assertThatThrownBy(() -> answer(gateway, ask("translate", "Hello")))
+        assertThatThrownBy(() -> gateway.checkInput("translate", "Hello"))
                 .isInstanceOf(IllegalArgumentException.class).hasMessage("No route answers the task translate");
-        assertThatThrownBy(() -> answer(gateway, ask(null, "Hello"))).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> gateway.checkInput(null, "Hello")).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> answer(gateway, new Request("translate", List.of(new Turn(Role.USER, "Hello")), NEVER,
+                DataClass.PUBLIC, hello))).isInstanceOf(IllegalArgumentException.class).hasMessage("No route answers the task translate");
+        assertThatThrownBy(() -> answer(gateway, new Request(null, List.of(new Turn(Role.USER, "Hello")), NEVER,
+                DataClass.PUBLIC, hello))).isInstanceOf(IllegalArgumentException.class);
+        assertThat(events).isEmpty();
         assertThat(calls).isEmpty();
     }
 
     @Test
     void aRequestThatIsNotWellFormedIsAMistake() {
-        Checks noting = noting();
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), noting, OUTSIDE);
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), noting(), OUTSIDE);
+        Checked checked = checked(gateway, "chat", "Hello");
+        events.clear();
         Turn hello = new Turn(Role.USER, "Hello");
         List<Request> wrong = List.of(
-                new Request("chat", List.of(), NEVER, DataClass.PUBLIC),
-                new Request("chat", null, NEVER, DataClass.PUBLIC),
-                new Request("chat", List.of(hello, new Turn(Role.ASSISTANT, "Hi")), NEVER, DataClass.PUBLIC),
-                new Request("chat", List.of(new Turn(Role.USER, null)), NEVER, DataClass.PUBLIC),
-                new Request("chat", List.of(new Turn(null, "Hello")), NEVER, DataClass.PUBLIC),
-                new Request("chat", Arrays.asList(null, hello), NEVER, DataClass.PUBLIC),
-                new Request("chat", List.of(hello), null, DataClass.PUBLIC),
-                new Request("chat", List.of(hello), NEVER, null));
+                new Request("chat", List.of(), NEVER, DataClass.PUBLIC, checked),
+                new Request("chat", null, NEVER, DataClass.PUBLIC, checked),
+                new Request("chat", List.of(hello, new Turn(Role.ASSISTANT, "Hi")), NEVER, DataClass.PUBLIC, checked),
+                new Request("chat", List.of(new Turn(Role.USER, null)), NEVER, DataClass.PUBLIC, checked),
+                new Request("chat", List.of(new Turn(null, "Hello")), NEVER, DataClass.PUBLIC, checked),
+                new Request("chat", Arrays.asList(null, hello), NEVER, DataClass.PUBLIC, checked),
+                new Request("chat", List.of(hello), null, DataClass.PUBLIC, checked),
+                new Request("chat", List.of(hello), NEVER, null, checked));
 
         for (Request request : wrong) {
             assertThatThrownBy(() -> answer(gateway, request)).as(request.toString()).isInstanceOf(IllegalArgumentException.class);
@@ -265,21 +299,68 @@ class RoutingGatewayTest {
         assertThat(events).isEmpty();
     }
 
-    /** Blueprint 8.2: the input check comes before the model, and the caller sees only what the output check passed. */
+    /**
+     * Blueprint 8.2 and 9.1: the input check comes before the model, once, when the text is checked; the answer does not
+     * check it again. The caller sees only what the output check passed.
+     */
     @Test
     void theChecksStandBetweenTheCallerAndTheModel() {
         Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a", "b")), Map.of("chat", route("m")), noting(), OUTSIDE);
 
-        answer(gateway, ask("chat", "Hello"));
+        answer(gateway, ask(gateway, "chat", "Hello"));
 
-        assertThat(events).containsExactly("input chat", "model m", "output chat a", "caller A", "output chat b", "caller B");
+        assertThat(events).containsExactly("input chat Hello", "model m", "output chat a", "caller A", "output chat b", "caller B");
     }
 
+    /** M3-4-1: a text that passes comes back as the gateway's receipt for that task and that very text. */
     @Test
-    void aRequestTheInputCheckStopsReachesNoModel() {
-        Checks refusing = new Checks() {
+    void aTextThatPassesComesBackAsItsReceipt() {
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), noting(), OUTSIDE);
+
+        Gateway.InputCheck check = gateway.checkInput("chat", "Hello there");
+
+        assertThat(check).isInstanceOf(Checked.class);
+        assertThat(((Checked) check).task()).isEqualTo("chat");
+        assertThat(((Checked) check).text()).isEqualTo("Hello there");
+        assertThat(events).containsExactly("input chat Hello there");
+        assertThat(calls).isEmpty();
+    }
+
+    /**
+     * M3-4-1: a text the input check blocks comes back blocked, by the check's rule, with no receipt, so it can reach no
+     * model. The log names the rule and the task, never the words.
+     */
+    @Test
+    @ExtendWith(OutputCaptureExtension.class)
+    void aTextTheInputCheckBlocksReachesNoModel(CapturedOutput output) {
+        Checks blocking = new Checks() {
             @Override
-            public void input(Request request) {
+            public Input input(String task, String text) {
+                events.add("input " + task + " " + text);
+                return new Checks.Blocked("test_rule");
+            }
+
+            @Override
+            public String output(String task, String piece) {
+                return piece;
+            }
+        };
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a")), Map.of("chat", route("m")), blocking, OUTSIDE);
+
+        assertThat(gateway.checkInput("chat", "the secret words")).isEqualTo(new Blocked("test_rule"));
+
+        assertThat(events).containsExactly("input chat the secret words");
+        assertThat(calls).isEmpty();
+        assertThat(output).contains("The input check blocked a text for the task chat by the rule test_rule")
+                .doesNotContain("the secret words");
+    }
+
+    /** An exception of the input check reaches the caller, and no receipt comes of it. */
+    @Test
+    void aCheckThatFailsGivesNoReceipt() {
+        Checks failing = new Checks() {
+            @Override
+            public Input input(String task, String text) {
                 throw new IllegalStateException("not this one");
             }
 
@@ -288,10 +369,70 @@ class RoutingGatewayTest {
                 return piece;
             }
         };
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a")), Map.of("chat", route("m")), refusing, OUTSIDE);
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a")), Map.of("chat", route("m")), failing, OUTSIDE);
 
-        assertThatThrownBy(() -> answer(gateway, ask("chat", "Hello"))).hasMessage("not this one");
+        assertThatThrownBy(() -> gateway.checkInput("chat", "Hello")).hasMessage("not this one");
+        assertThat(calls).isEmpty();
+    }
+
+    @Test
+    void theInputCheckNeedsAText() {
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), noting(), OUTSIDE);
+
+        assertThatThrownBy(() -> gateway.checkInput("chat", null))
+                .isInstanceOf(IllegalArgumentException.class).hasMessage("The input check needs the text the end user said");
         assertThat(events).isEmpty();
+    }
+
+    /**
+     * A-15: a question reaches a model only with this gateway's own receipt for it: not without one, not with one made
+     * elsewhere that says the same, not with another gateway's, and not with one for another task or another text, such as
+     * an earlier turn's. Nothing is checked or called then.
+     */
+    @Test
+    void aQuestionWithoutThisGatewaysReceiptReachesNoModel() {
+        Map<String, RoutingGateway.Model> models = Map.of("m", model("m", DONE));
+        Map<String, Route> routes = Map.of("chat", route("m"), "translate", route("m"));
+        Gateway gateway = new RoutingGateway(models, routes, noting(), OUTSIDE);
+        Gateway other = new RoutingGateway(models, routes, noting(), OUTSIDE);
+        Checked made = new Checked() {
+            @Override
+            public String task() {
+                return "chat";
+            }
+
+            @Override
+            public String text() {
+                return "Bye";
+            }
+        };
+        List<Checked> wrong = Arrays.asList(null, made, checked(other, "chat", "Bye"), checked(gateway, "translate", "Bye"),
+                checked(gateway, "chat", "Hi"), checked(gateway, "chat", "bye"));
+        List<Turn> turns = List.of(new Turn(Role.USER, "Hi"), new Turn(Role.ASSISTANT, "Hello"), new Turn(Role.USER, "Bye"));
+        events.clear();
+
+        for (Checked receipt : wrong) {
+            assertThatThrownBy(() -> answer(gateway, new Request("chat", turns, NEVER, DataClass.PUBLIC, receipt)))
+                    .as(String.valueOf(receipt)).isInstanceOf(IllegalArgumentException.class)
+                    .hasMessage("A question reaches a model only with this gateway's receipt of its input check, for the same task"
+                            + " and the same text (A-15)");
+        }
+        assertThat(events).isEmpty();
+        assertThat(calls).isEmpty();
+        assertThat(answer(gateway, new Request("chat", turns, NEVER, DataClass.PUBLIC, checked(gateway, "chat", "Bye"))))
+                .isInstanceOf(Completed.class);
+    }
+
+    /** Blueprint 9.1: the same text is checked once, so its receipt serves every call for it, each without a check. */
+    @Test
+    void aReceiptServesEveryCallForItsText() {
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), noting(), OUTSIDE);
+        Request request = ask(gateway, "chat", "Hello");
+
+        answer(gateway, request);
+        answer(gateway, request);
+
+        assertThat(events).containsExactly("input chat Hello", "model m", "model m");
     }
 
     /**
@@ -300,47 +441,60 @@ class RoutingGatewayTest {
      */
     @Test
     void aCallFromInsideATransactionIsRefusedBeforeAnything() {
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a")), Map.of("chat", route("m")), noting(), () -> true);
+        AtomicBoolean inside = new AtomicBoolean();
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a")), Map.of("chat", route("m")), noting(), inside::get);
+        Request request = ask(gateway, "chat", "Hello");
+        Request unrouted = new Request("translate", request.turns(), NEVER, DataClass.PUBLIC, request.question());
+        events.clear();
+        inside.set(true);
 
-        assertThatThrownBy(() -> answer(gateway, ask("chat", "Hello")))
+        assertThatThrownBy(() -> answer(gateway, request))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage("No model is called inside a database transaction (A-14), so end it first");
-        assertThatThrownBy(() -> answer(gateway, ask("translate", "Hello"))).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> answer(gateway, unrouted)).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> gateway.checkInput("chat", "Hello"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("No text is checked inside a database transaction (A-14), so end it first");
+        assertThatThrownBy(() -> gateway.checkInput("translate", "Hello")).isInstanceOf(IllegalStateException.class);
         assertThat(events).isEmpty();
         assertThat(calls).isEmpty();
     }
 
-    /** One gateway serves threads in and out of transactions, so it asks on every call. */
+    /** One gateway serves threads in and out of transactions, so it asks on every call and every check. */
     @Test
     void itAsksAboutTheTransactionOnEveryCall() {
         AtomicBoolean inside = new AtomicBoolean();
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), inside::get);
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), PASSING, inside::get);
+        Request request = ask(gateway, "chat", "Hello");
 
-        Result before = answer(gateway, ask("chat", "Hello"));
+        Result before = answer(gateway, request);
         inside.set(true);
-        assertThatThrownBy(() -> answer(gateway, ask("chat", "Hello"))).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> answer(gateway, request)).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> gateway.checkInput("chat", "Hello")).isInstanceOf(IllegalStateException.class);
         inside.set(false);
-        Result after = answer(gateway, ask("chat", "Hello"));
+        Result after = answer(gateway, ask(gateway, "chat", "Hello"));
 
         assertThat(before).isInstanceOf(Completed.class);
         assertThat(after).isInstanceOf(Completed.class);
         assertThat(events).containsExactly("model m", "model m");
     }
 
+    /** A-14 and A-15: a gateway needs to know about transactions, and it calls no model without the trust layer's checks. */
     @Test
-    void aGatewayCannotBeBuiltWithoutTheTransactionCheck() {
+    void aGatewayCannotBeBuiltWithoutTheTransactionCheckOrTheChecks() {
         Map<String, RoutingGateway.Model> models = Map.of("m", model("m", DONE));
         Map<String, Route> routes = Map.of("chat", route("m"));
 
-        assertThatThrownBy(() -> new RoutingGateway(models, routes, null)).isInstanceOf(NullPointerException.class);
-        assertThatThrownBy(() -> new RoutingGateway(models, routes, Checks.NONE, null)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new RoutingGateway(models, routes, PASSING, null)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new RoutingGateway(models, routes, null, OUTSIDE)).isInstanceOf(NullPointerException.class)
+                .hasMessage("A gateway calls no model without the trust layer's checks (A-15)");
     }
 
     @Test
     void aRouteToAModelTheGatewayWasNotGivenStopsIt() {
         Map<String, RoutingGateway.Model> models = Map.of("m", model("m", DONE));
 
-        assertThatThrownBy(() -> new RoutingGateway(models, Map.of("chat", route("m", "missing")), OUTSIDE))
+        assertThatThrownBy(() -> new RoutingGateway(models, Map.of("chat", route("m", "missing")), PASSING, OUTSIDE))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("The route of chat names the model missing, which the gateway was not given");
     }
@@ -366,9 +520,9 @@ class RoutingGatewayTest {
         Map<String, Prompt> prompts = Map.of("first", new Prompt("chat/first/v2", "First family."),
                 "second", new Prompt("chat/second/v1", "Second family."));
         Gateway gateway = new RoutingGateway(Map.of("first", model("first", DONE), "second", model("second", DONE)),
-                Map.of("chat", new Route(List.of("first", "second"), MINUTE, CheckMode.SENTENCE, prompts)), OUTSIDE);
+                Map.of("chat", new Route(List.of("first", "second"), MINUTE, CheckMode.SENTENCE, prompts)), PASSING, OUTSIDE);
 
-        answer(gateway, ask("chat", "Hi"));
+        answer(gateway, ask(gateway, "chat", "Hi"));
 
         assertThat(calls).singleElement().extracting(ModelPort.Request::instructions).isEqualTo("First family.");
     }
@@ -427,23 +581,27 @@ class RoutingGatewayTest {
         Map<String, Route> routes = new HashMap<>(Map.of("chat", route("m")));
         List<String> preference = new ArrayList<>(List.of("m"));
         Route route = new Route(preference, MINUTE, CheckMode.SENTENCE, prompts(preference));
-        Gateway gateway = new RoutingGateway(models, routes, OUTSIDE);
-        Gateway second = new RoutingGateway(models, Map.of("chat", route), OUTSIDE);
+        Gateway gateway = new RoutingGateway(models, routes, PASSING, OUTSIDE);
+        Gateway second = new RoutingGateway(models, Map.of("chat", route), PASSING, OUTSIDE);
 
         models.clear();
         routes.clear();
         preference.set(0, "missing");
 
-        assertThat(answer(gateway, ask("chat", "Hello"))).isInstanceOf(Completed.class);
-        assertThat(answer(second, ask("chat", "Hello"))).isInstanceOf(Completed.class);
+        assertThat(answer(gateway, ask(gateway, "chat", "Hello"))).isInstanceOf(Completed.class);
+        assertThat(answer(second, ask(second, "chat", "Hello"))).isInstanceOf(Completed.class);
     }
 
-    /** Checks that note what they see and upper-case each piece, so the caller's pieces show they passed the check. */
+    /**
+     * Checks that note what they see, pass every text, and upper-case each piece, so the caller's pieces show they passed
+     * the check.
+     */
     private Checks noting() {
         return new Checks() {
             @Override
-            public void input(Request request) {
-                events.add("input " + request.task());
+            public Input input(String task, String text) {
+                events.add("input " + task + " " + text);
+                return new Passed();
             }
 
             @Override

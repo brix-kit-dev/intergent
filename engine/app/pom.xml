@@ -39,6 +39,10 @@
             <artifactId>engine-adapter-model-fake</artifactId>
         </dependency>
         <dependency>
+            <groupId>aie</groupId>
+            <artifactId>engine-adapter-moderation-rules</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webmvc</artifactId>
         </dependency>

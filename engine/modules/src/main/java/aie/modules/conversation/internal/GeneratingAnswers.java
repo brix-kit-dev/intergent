@@ -110,8 +110,10 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
     /**
      * The slot comes first and goes back when nothing was stored. Once the answer is stored, its thread gives the slot
      * back when the answer ends. Starting the thread fails only after {@link #close} has given up waiting; then the
-     * answer stays in progress until a reader ends it. The storage measures the call's class against the gateway's
-     * ceiling for the task while it holds the conversation's turn, so a call no model takes stores nothing.
+     * answer stays in progress until a reader ends it. The gateway checks what the end user said before anything is
+     * stored, outside any transaction, and its receipt goes with the answer, so the text is checked once (M3-4-1). The
+     * storage measures the call's class against the gateway's ceiling for the task while it holds the conversation's
+     * turn, so a call no model takes stores nothing.
      */
     @Override
     public Start ask(Owner caller, String conversationId, String text, DataClass floor) {
@@ -119,7 +121,15 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
             return new Start.Busy();
         }
         Asked asked;
+        Gateway.Checked question;
         try {
+            switch (gateway.checkInput(TASK, text)) {
+                case Gateway.Checked checked -> question = checked;
+                case Gateway.Blocked blocked -> {
+                    slots.release();
+                    return new Start.InputBlocked(blocked.rule());
+                }
+            }
             DataClass ceiling = gateway.ceiling(TASK);
             switch (messages.ask(caller, conversationId, text, floor, ceiling)) {
                 case Asked stored -> asked = stored;
@@ -136,7 +146,7 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
             slots.release();
             throw e;
         }
-        Answer answer = new Answer(caller, conversationId, asked);
+        Answer answer = new Answer(caller, conversationId, asked, question);
         running.put(answer.id(), answer);
         Map<String, String> logContext = MDC.getCopyOfContextMap();
         threads.execute(() -> generateWith(logContext, answer));
@@ -162,8 +172,8 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
     /** On the answer's own thread. Whatever happens, the slot goes back and the waiters learn that the answer is over. */
     private void generate(Answer answer) {
         try {
-            Gateway.Result result = gateway.answer(
-                    new Gateway.Request(TASK, turns(answer), answer::stopRequested, answer.asked.dataClass()), answer::write);
+            Gateway.Result result = gateway.answer(new Gateway.Request(
+                    TASK, turns(answer), answer::stopRequested, answer.asked.dataClass(), answer.question), answer::write);
             if (!answer.endedElsewhere) {
                 answer.end(result);
             }
@@ -254,6 +264,8 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
         private final Owner caller;
         private final String conversationId;
         private final Asked asked;
+        /** The gateway's receipt for the question, which the answer's request carries. */
+        private final Gateway.Checked question;
         private final CompletableFuture<Void> ended = new CompletableFuture<>();
         /** Set while the instance stops, so that the model stops at its next look. */
         private volatile boolean stopped;
@@ -262,10 +274,11 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
         /** Set once someone asked to cancel the answer, here or on another instance, so that the model stops too. */
         private volatile boolean cancelRequested;
 
-        Answer(Owner caller, String conversationId, Asked asked) {
+        Answer(Owner caller, String conversationId, Asked asked, Gateway.Checked question) {
             this.caller = caller;
             this.conversationId = conversationId;
             this.asked = asked;
+            this.question = question;
         }
 
         String id() {

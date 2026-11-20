@@ -91,6 +91,11 @@
                 <artifactId>engine-adapter-model-fake</artifactId>
                 <version>${project.version}</version>
             </dependency>
+            <dependency>
+                <groupId>aie</groupId>
+                <artifactId>engine-adapter-moderation-rules</artifactId>
+                <version>${project.version}</version>
+            </dependency>
         </dependencies>
     </dependencyManagement>
 

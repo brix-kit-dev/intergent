@@ -106,7 +106,7 @@ class LeaseRenewalsTest {
 
     private static Gateway stub(ModelPort model) {
         return new RoutingGateway(Map.of("stub", new RoutingGateway.Model(model, DataClass.SENSITIVE)),
-                Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), CheckMode.SENTENCE, TestApi.prompts(List.of("stub")))), pool::insideTx);
+                Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), CheckMode.SENTENCE, TestApi.prompts(List.of("stub")))), Models.checks(), pool::insideTx);
     }
 
     /** Renewals every 200 ms, and room for a few answers. */

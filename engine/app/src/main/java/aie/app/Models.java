@@ -1,8 +1,11 @@
 package aie.app;
 
 import aie.adapters.modelfake.FakeModel;
+import aie.adapters.moderationrules.RuleModeration;
 import aie.core.gateway.api.Gateway;
 import aie.core.gateway.internal.RoutingGateway;
+import aie.core.trust.api.Checks;
+import aie.core.trust.internal.TrustChecks;
 import aie.modules.conversation.api.Answers;
 import aie.ports.ModelPort;
 import java.util.LinkedHashMap;
@@ -13,7 +16,8 @@ import java.util.function.Supplier;
 
 /**
  * The adapters this engine has, the tasks it asks the gateway for, and the gateway built from a region pack (blueprint
- * 8.3 and 8.4). Which models a region uses and how each task is routed is the region pack's, not this class's (M3-1).
+ * 8.3 and 8.4) with the trust layer's checks (blueprint 9.1). Which models a region uses and how each task is routed is
+ * the region pack's, not this class's (M3-1).
  */
 final class Models {
 
@@ -26,8 +30,16 @@ final class Models {
     }
 
     /**
+     * The trust layer's checks: moderation by the rules adapter, which looks at texts inside the engine (M3-4-1). A
+     * moderation service would take the adapter's place here.
+     */
+    static Checks checks() {
+        return new TrustChecks(new RuleModeration());
+    }
+
+    /**
      * The gateway of a region pack: each of its models called through a new adapter of the model's kind, with the highest
-     * class of data its contract lets it take, and its routes.
+     * class of data its contract lets it take, and its routes, behind the trust layer's checks.
      *
      * @param insideTx whether the calling thread is inside a database transaction, so that the gateway can refuse such a
      *     call (A-14): {@code insideTx} of the role's pool
@@ -43,6 +55,6 @@ final class Models {
             }
             registry.put(id, new RoutingGateway.Model(adapter.get(), spec.maxDataClass()));
         });
-        return new RoutingGateway(registry, pack.routes(), insideTx);
+        return new RoutingGateway(registry, pack.routes(), checks(), insideTx);
     }
 }

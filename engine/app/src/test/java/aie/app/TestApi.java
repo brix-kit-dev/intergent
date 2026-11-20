@@ -304,7 +304,9 @@ final class TestApi {
             /** The instance is full. */
             BUSY,
             /** No such conversation. */
-            MISSING
+            MISSING,
+            /** The input check blocks what was said, by the rule instruction_override (M3-4-1). */
+            BLOCKED
         }
 
         /** How a cancel of an answer in progress goes from now on. Each answer ends at most once. */
@@ -395,6 +397,9 @@ final class TestApi {
             }
             if (now == Outcome.MISSING) {
                 return new Start.NotFound();
+            }
+            if (now == Outcome.BLOCKED) {
+                return new Start.InputBlocked("instruction_override");
             }
             DataClass highest = ceiling;
             if (floor.compareTo(highest) > 0) {

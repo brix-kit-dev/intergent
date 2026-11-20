@@ -46,6 +46,8 @@ class GatewayInTransactionTest {
 
     private static PgPool pool;
     private static Gateway gateway;
+    /** The gateway's receipt for the question, checked outside any transaction (M3-4-1). */
+    private static Gateway.Checked hello;
 
     /** The pieces the caller got in this test. */
     private final List<String> pieces = new CopyOnWriteArrayList<>();
@@ -57,6 +59,7 @@ class GatewayInTransactionTest {
                 .getExitCode()).isZero();
         pool = PgRuntime.pool(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD, 1);
         gateway = Models.gateway(RegionPacks.read("jp"), pool::insideTx);
+        hello = (Gateway.Checked) gateway.checkInput(Answers.TASK, "Hello");
     }
 
     @AfterAll
@@ -65,7 +68,19 @@ class GatewayInTransactionTest {
     }
 
     private Result ask() {
-        return gateway.answer(new Request(Answers.TASK, List.of(new Turn(Role.USER, "Hello")), () -> false, DataClass.PUBLIC), pieces::add);
+        return gateway.answer(
+                new Request(Answers.TASK, List.of(new Turn(Role.USER, "Hello")), () -> false, DataClass.PUBLIC, hello), pieces::add);
+    }
+
+    /** M3-4-1: the input check may come to call a service, so it is refused inside a transaction too. */
+    @Test
+    void aCheckFromInsideATransactionIsRefused() {
+        assertThatThrownBy(() -> pool.inTenantTx(TENANT, tx -> gateway.checkInput(Answers.TASK, "Hello")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("No text is checked inside a database transaction (A-14), so end it first");
+        assertThatThrownBy(() -> pool.inSystemTx(tx -> gateway.checkInput(Answers.TASK, "Hello")))
+                .isInstanceOf(IllegalStateException.class);
+        assertThat(gateway.checkInput(Answers.TASK, "Hello")).isInstanceOf(Gateway.Checked.class);
     }
 
     @Test

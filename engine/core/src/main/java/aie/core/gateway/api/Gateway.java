@@ -5,18 +5,32 @@ import java.util.List;
 
 /**
  * The only way to a model (blueprint 8). A module names a task, never a model: the gateway finds the task's route,
- * picks the first of its models that takes the call's data class, and calls it with the route's time limit. Only the
- * gateway may use the model ports (A-2), so this interface has types of its own and shows none of theirs.
+ * picks the first of its models that takes the call's data class, and calls it with the route's time limit. What the end
+ * user said is checked first, before any of it is stored (M3-4-1), and a model gets a question only with the receipt of
+ * that check, so no call goes around it (A-15). Only the gateway may use the model ports (A-2), so this interface has
+ * types of its own and shows none of theirs.
  */
 public interface Gateway {
+
+    /**
+     * Checks what the end user said for a task, before any of it is stored or sent (blueprint 8.2, 9.1, M3-4-1). A text
+     * the check blocks neither joins the history nor raises the watermark, since no model sees it (blueprint 7.3). A text
+     * that passes comes back as the receipt a request for it needs ({@link Request#question}), so the same text is checked
+     * once, however often it goes to a model.
+     *
+     * @throws IllegalArgumentException for a task that no route answers, or a text that is missing
+     * @throws IllegalStateException for a call from inside a database transaction (A-14): a check may come to call a
+     *     service as well
+     */
+    InputCheck checkInput(String task, String text);
 
     /**
      * Answers a task and hands each piece of the answer to {@code output} as it arrives. Returns once the answer has
      * ended. A cancel, a failure of the model and the time running out all come back as a result, not as an exception.
      *
-     * @throws IllegalArgumentException for a task that no route answers, a request that is not well formed, or one whose
-     *     data class is above the task's {@link #ceiling}; all are mistakes in the calling code, and no model is called.
-     *     An exception from {@code output} also reaches the caller.
+     * @throws IllegalArgumentException for a task that no route answers, a request that is not well formed, one whose
+     *     data class is above the task's {@link #ceiling}, or one without this gateway's receipt for its question; all are
+     *     mistakes in the calling code, and no model is called. An exception from {@code output} also reaches the caller.
      * @throws IllegalStateException for a call from inside a database transaction, before any model is asked (A-14):
      *     an answer would hold the transaction's connection for as long as it takes
      */
@@ -38,8 +52,34 @@ public interface Gateway {
      * @param turns the conversation so far, oldest first, ending with the user's turn
      * @param cancellation asked often, at least between pieces, whether the caller wants the answer to stop
      * @param dataClass the class of the call: only a model that takes it is called (blueprint 7.3, M3-3)
+     * @param question the receipt of this gateway's input check of the last turn, for this task (M3-4-1)
      */
-    record Request(String task, List<Turn> turns, Cancellation cancellation, DataClass dataClass) {
+    record Request(String task, List<Turn> turns, Cancellation cancellation, DataClass dataClass, Checked question) {
+    }
+
+    /** What the input check made of a text (M3-4-1). */
+    sealed interface InputCheck permits Checked, Blocked {
+    }
+
+    /**
+     * The receipt of a text that passed the input check for a task. Only the gateway that checked the text makes one, and it
+     * takes no other, so a request cannot reach a model with a question that was not checked (A-15).
+     */
+    non-sealed interface Checked extends InputCheck {
+
+        /** The task the text was checked for. */
+        String task();
+
+        /** The text as it was checked. */
+        String text();
+    }
+
+    /**
+     * The check blocked the text: nothing of it may be stored or sent.
+     *
+     * @param rule the rule that stopped it, a stable name such as {@code instruction_override}; never the text itself
+     */
+    record Blocked(String rule) implements InputCheck {
     }
 
     /** One turn of the conversation. */
