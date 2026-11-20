@@ -10,6 +10,7 @@ import aie.core.gateway.api.Gateway.Result;
 import aie.core.gateway.api.Gateway.Role;
 import aie.core.gateway.api.Gateway.Turn;
 import aie.core.gateway.api.Gateway.Usage;
+import aie.core.gateway.api.Gateway;
 import aie.core.gateway.api.ModelSpec;
 import aie.core.gateway.internal.Route;
 import aie.core.trust.api.CheckMode;
@@ -42,6 +43,37 @@ class ModelsTest {
 
         assertThat(pieces).hasSize(8).startsWith("Piece 1 of 8. ").endsWith("Piece 8 of 8. ");
         assertThat(result).isEqualTo(new Completed(new Usage(5, 8 * "Piece 1 of 8. ".length())));
+    }
+
+    /**
+     * M3-3-2: the gateway knows the highest class each model of the pack takes, so a task's ceiling is its route's, and a
+     * call above it goes to no model. A sensitive call passes over low, which takes public data only, to the fake model,
+     * which would refuse a call meant for low. The jp pack's fake model takes sensitive data, since nothing leaves the
+     * process.
+     */
+    @Test
+    void theGatewayTakesEachModelsHighestClassFromThePack() {
+        ModelSpec low = new ModelSpec("low", "fake", "fake", "jp", 30, false, DataClass.PUBLIC, Set.of(ModelSpec.Capability.TEXT),
+                new ModelSpec.Price(BigDecimal.ZERO, BigDecimal.ZERO));
+        ModelSpec high = new ModelSpec(FakeModel.MODEL, "fake", "fake", "jp", 0, false, DataClass.SENSITIVE,
+                Set.of(ModelSpec.Capability.TEXT), new ModelSpec.Price(BigDecimal.ZERO, BigDecimal.ZERO));
+        Gateway lowOnly = Models.gateway(new RegionPack("jp", Map.of("low", low, FakeModel.MODEL, high), Map.of(Answers.TASK,
+                new Route(List.of("low"), Duration.ofMinutes(2), CheckMode.SENTENCE, TestApi.prompts(List.of("low"))))), () -> false);
+        Gateway both = Models.gateway(new RegionPack("jp", Map.of("low", low, FakeModel.MODEL, high), Map.of(Answers.TASK,
+                new Route(List.of("low", FakeModel.MODEL), Duration.ofMinutes(2), CheckMode.SENTENCE,
+                        TestApi.prompts(List.of("low", FakeModel.MODEL))))),
+                () -> false);
+        List<String> pieces = new ArrayList<>();
+
+        assertThat(lowOnly.ceiling(Answers.TASK)).isEqualTo(DataClass.PUBLIC);
+        assertThatThrownBy(() -> lowOnly.answer(new Request(Answers.TASK, List.of(new Turn(Role.USER, "Hello")), () -> false,
+                DataClass.INTERNAL), pieces::add)).isInstanceOf(IllegalArgumentException.class);
+        assertThat(pieces).isEmpty();
+        assertThat(both.ceiling(Answers.TASK)).isEqualTo(DataClass.SENSITIVE);
+        assertThat(both.answer(new Request(Answers.TASK, List.of(new Turn(Role.USER, "[fake pieces=1 delay=1ms] Hello")),
+                () -> false, DataClass.SENSITIVE), pieces::add)).isInstanceOf(Completed.class);
+        assertThat(pieces).containsExactly("Piece 1 of 1. ");
+        assertThat(Models.gateway(RegionPacks.read("jp"), () -> false).ceiling(Answers.TASK)).isEqualTo(DataClass.SENSITIVE);
     }
 
     /** RegionPacks refuses such a pack too; this is the gateway's own guard for a pack made any other way. */

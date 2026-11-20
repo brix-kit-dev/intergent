@@ -166,7 +166,8 @@ class ConversationController implements ConversationsApi, StreamsApi {
      * nothing is stored (point 40). A browser speaks only in its own end user's conversations, so another end user's is
      * missing, before anything is asked or sent again (M2-12-3). The locale is checked but not used yet. The call's data
      * class starts at the application's default, and data_class can only raise it (blueprint 7.3, M3-3-1); the answer
-     * raises it further to the conversation's watermark, and both messages keep the result.
+     * raises it further to the conversation's watermark, and both messages keep the result. A call that no model of its
+     * task takes is 422 no_eligible_model before any stream starts, and nothing is stored (M3-3-2).
      */
     @Override
     public ResponseEntity<Message> createMessage(String conversationId, CreateMessageRequest body,
@@ -194,6 +195,7 @@ class ConversationController implements ConversationsApi, StreamsApi {
                 case Answers.Start.Started started -> streamed(caller, conversation, started);
                 case Answers.Start.Busy busy -> throw full();
                 case Answers.Start.NotFound missing -> throw new ResponseStatusException(HttpStatus.NOT_FOUND);
+                case Answers.Start.NoEligibleModel refused -> throw new NoEligibleModel(refused);
             });
         }
         return switch (answers.ask(caller, conversation, text, floor)) {
@@ -201,7 +203,19 @@ class ConversationController implements ConversationsApi, StreamsApi {
                     .body(answered(caller, conversation, started));
             case Answers.Start.Busy busy -> throw full();
             case Answers.Start.NotFound missing -> throw new ResponseStatusException(HttpStatus.NOT_FOUND);
+            case Answers.Start.NoEligibleModel refused -> throw new NoEligibleModel(refused);
         };
+    }
+
+    /**
+     * A call that no model of its task takes (blueprint 7.3): the request fails, and its data goes to no model of a lower
+     * class. The detail names the call's class and the highest one the models take, which only the caller's own
+     * conversation and application decided.
+     */
+    @ExceptionHandler(NoEligibleModel.class)
+    ResponseEntity<Object> noEligibleModel(NoEligibleModel refused) {
+        return Problems.response(HttpStatus.UNPROCESSABLE_CONTENT.value(), "no_eligible_model", refused.getMessage(),
+                HttpHeaders.EMPTY);
     }
 
     /**
@@ -468,6 +482,17 @@ class ConversationController implements ConversationsApi, StreamsApi {
     }
 
     /** The instance generates as many answers as it may. Nothing was stored, so the same Idempotency-Key may come back. */
+    /** A refused call, before anything was stored or written, so that its handler can still answer with a problem. */
+    private static final class NoEligibleModel extends RuntimeException {
+
+        private static final long serialVersionUID = 1L;
+
+        NoEligibleModel(Answers.Start.NoEligibleModel refused) {
+            super("The call's data is " + refused.dataClass().wireName() + ", but the models that may answer it take data up to "
+                    + refused.ceiling().wireName() + ", so nothing was sent or stored", null, false, false);
+        }
+    }
+
     private static ErrorResponseException full() {
         ErrorResponseException full = new ErrorResponseException(HttpStatus.TOO_MANY_REQUESTS, ProblemDetail.forStatusAndDetail(
                 HttpStatus.TOO_MANY_REQUESTS, "This instance answers as many messages as it can, so try again after Retry-After"),

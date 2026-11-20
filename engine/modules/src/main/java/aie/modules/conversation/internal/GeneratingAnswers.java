@@ -5,6 +5,7 @@ import aie.core.tenancy.api.ApiKeyLookup.Owner;
 import aie.core.trust.api.DataClass;
 import aie.modules.conversation.api.Answers;
 import aie.modules.conversation.api.Messages;
+import aie.modules.conversation.api.Messages.Ask;
 import aie.modules.conversation.api.Messages.Asked;
 import aie.modules.conversation.api.Messages.CancelRequest;
 import aie.modules.conversation.api.Messages.ErrorCode;
@@ -16,7 +17,6 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -110,7 +110,8 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
     /**
      * The slot comes first and goes back when nothing was stored. Once the answer is stored, its thread gives the slot
      * back when the answer ends. Starting the thread fails only after {@link #close} has given up waiting; then the
-     * answer stays in progress until a reader ends it.
+     * answer stays in progress until a reader ends it. The storage measures the call's class against the gateway's
+     * ceiling for the task while it holds the conversation's turn, so a call no model takes stores nothing.
      */
     @Override
     public Start ask(Owner caller, String conversationId, String text, DataClass floor) {
@@ -119,12 +120,18 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
         }
         Asked asked;
         try {
-            Optional<Asked> stored = messages.ask(caller, conversationId, text, floor);
-            if (stored.isEmpty()) {
-                slots.release();
-                return new Start.NotFound();
+            DataClass ceiling = gateway.ceiling(TASK);
+            switch (messages.ask(caller, conversationId, text, floor, ceiling)) {
+                case Asked stored -> asked = stored;
+                case Ask.NotFound missing -> {
+                    slots.release();
+                    return new Start.NotFound();
+                }
+                case Ask.AboveCeiling above -> {
+                    slots.release();
+                    return new Start.NoEligibleModel(above.dataClass(), ceiling);
+                }
             }
-            asked = stored.get();
         } catch (RuntimeException e) {
             slots.release();
             throw e;

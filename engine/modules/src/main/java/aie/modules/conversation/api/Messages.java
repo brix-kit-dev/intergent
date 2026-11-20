@@ -52,16 +52,19 @@ public interface Messages {
      *
      * <p>The call's data class is the higher of {@code floor} and the conversation's watermark, the highest class the
      * conversation has sent to a model (blueprint 7.3): its history goes with the question. Both messages keep that class,
-     * and the watermark rises to it in the same transaction; it never goes down (M3-3-1).
+     * and the watermark rises to it in the same transaction; it never goes down (M3-3-1). A call above {@code ceiling}
+     * has no model to go to, so it stores nothing and leaves the watermark as it was: what no model was sent neither
+     * joins the history nor raises the watermark (M3-3-2).
      *
      * @param floor the least class of this call: the higher of the application's default and the class the caller
      *     declared
-     * @return the question and its answer, with the call's class, or empty when the conversation is not one of the
-     *     caller's application; then nothing is stored
+     * @param ceiling the highest class the models of the call's task take, {@code Gateway.ceiling}
+     * @return the question and its answer, with the call's class; or NotFound when the conversation is not one of the
+     *     caller's application, or AboveCeiling with the call's class; then nothing is stored
      * @throws IllegalArgumentException for text that is empty, over {@link #MAX_TEXT} characters, or holds a NUL, which
-     *     the database cannot store
+     *     the database cannot store, and for an ask without its floor or its ceiling
      */
-    Optional<Asked> ask(Owner caller, String conversationId, String text, DataClass floor);
+    Ask ask(Owner caller, String conversationId, String text, DataClass floor, DataClass ceiling);
 
     /**
      * Adds a message.delta event to an answer in progress. The database gives it the next number of the answer.
@@ -187,12 +190,28 @@ public interface Messages {
         }
     }
 
+    /** What became of an ask. */
+    sealed interface Ask permits Asked, Ask.NotFound, Ask.AboveCeiling {
+
+        /** No conversation has this ID in the caller's application. Nothing was stored. */
+        record NotFound() implements Ask {
+        }
+
+        /**
+         * No model of the task takes the call's class, so nothing was stored and the watermark stayed as it was.
+         *
+         * @param dataClass the class of the call, the higher of its floor and the conversation's watermark
+         */
+        record AboveCeiling(DataClass dataClass) implements Ask {
+        }
+    }
+
     /**
      * What the end user asked, and the answer started for it.
      *
      * @param dataClass the class of the call, which both messages keep and the model's choice has to allow (M3-3)
      */
-    record Asked(Message question, Message answer, DataClass dataClass) {
+    record Asked(Message question, Message answer, DataClass dataClass) implements Ask {
     }
 
     /** What became of an event written to an answer. */

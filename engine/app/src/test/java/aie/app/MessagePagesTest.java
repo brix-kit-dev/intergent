@@ -189,7 +189,7 @@ class MessagePagesTest {
     void anAnswerInProgressHasItsTextSoFar() {
         Owner caller = newApplication();
         String conversation = newConversation(caller);
-        Messages.Asked asked = messages.ask(caller, conversation, "Hello?", DataClass.PUBLIC).orElseThrow();
+        Messages.Asked asked = TestApi.asked(messages.ask(caller, conversation, "Hello?", DataClass.PUBLIC, DataClass.SENSITIVE));
         messages.addDelta(caller, conversation, asked.answer().messageId(), "Hel");
         messages.addDelta(caller, conversation, asked.answer().messageId(), "lo");
 

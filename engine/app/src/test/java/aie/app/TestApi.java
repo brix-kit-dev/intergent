@@ -281,6 +281,14 @@ final class TestApi {
      * Answers each ask the way a test tells it, and keeps every answer and its events for StandInMessages to find: in
      * progress first, then as it ended. Cancels an answer in progress the way a test tells it too. Remembers every call.
      */
+    /** The question and answer an ask stored, or a failed test when it stored nothing. */
+    static Messages.Asked asked(Messages.Ask ask) {
+        if (ask instanceof Messages.Asked asked) {
+            return asked;
+        }
+        throw new AssertionError("The ask stored nothing: " + ask);
+    }
+
     static final class StandInAnswers implements Answers {
 
         /** How the asks go from now on. */
@@ -315,6 +323,11 @@ final class TestApi {
         final List<String> calls = new CopyOnWriteArrayList<>();
         /** The least data class of each ask, in the order of the asks (M3-3). */
         final List<DataClass> floors = new CopyOnWriteArrayList<>();
+        /**
+         * The highest class the task's models take: an ask whose floor is above it is NoEligibleModel, after the instance
+         * and the conversation were found, as the real answers do (M3-3-2). The stand-in has no watermark.
+         */
+        volatile DataClass ceiling = DataClass.SENSITIVE;
         final Map<String, Messages.Message> answers = new ConcurrentHashMap<>();
         /** What was asked, which StandInMessages finds too, so that a test can name a user message. */
         final Map<String, Messages.Message> questions = new ConcurrentHashMap<>();
@@ -382,6 +395,10 @@ final class TestApi {
             }
             if (now == Outcome.MISSING) {
                 return new Start.NotFound();
+            }
+            DataClass highest = ceiling;
+            if (floor.compareTo(highest) > 0) {
+                return new Start.NoEligibleModel(floor, highest);
             }
             String number = Integer.toString(made.incrementAndGet());
             Messages.Message question = new Messages.Message("msg_q" + number, conversationId, Messages.Role.USER,
@@ -473,7 +490,7 @@ final class TestApi {
         }
 
         @Override
-        public Optional<Asked> ask(Owner caller, String conversationId, String text, DataClass floor) {
+        public Ask ask(Owner caller, String conversationId, String text, DataClass floor, DataClass ceiling) {
             throw notNeeded();
         }
 

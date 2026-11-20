@@ -230,30 +230,37 @@ public final class DatabaseMessages implements Messages {
     }
 
     /**
-     * Takes the conversation's turn first, so that no other ask puts a message between the question and its answer. A
-     * conversation out of reach takes no lock, and nothing is stored.
+     * Takes the conversation's turn first, so that no other ask puts a message between the question and its answer, and
+     * the watermark the call is measured by stays as read until the transaction ends. A conversation out of reach takes no
+     * lock, and nothing is stored; nor is anything for a call above the ceiling.
      */
     @Override
-    public Optional<Asked> ask(Owner caller, String conversationId, String text, DataClass floor) {
+    public Ask ask(Owner caller, String conversationId, String text, DataClass floor, DataClass ceiling) {
         userText(text);
         if (floor == null) {
             throw new IllegalArgumentException("An ask needs its least data class, the application's default at the least");
         }
-        return database.inTenantTx(caller.tenantId(), tx -> {
+        if (ceiling == null) {
+            throw new IllegalArgumentException("An ask needs the ceiling of its task, the highest class its models take");
+        }
+        return database.<Ask>inTenantTx(caller.tenantId(), tx -> {
             List<String> watermark = tx.query(TAKE_TURN, row -> row.string("data_class_watermark"),
                     caller.applicationId(), conversationId);
             if (watermark.isEmpty()) {
-                return Optional.<Asked>empty();
+                return new Ask.NotFound();
             }
             DataClass held = DataClass.fromWireName(watermark.getFirst()).orElseThrow();
             DataClass call = floor.compareTo(held) > 0 ? floor : held;
+            if (call.compareTo(ceiling) > 0) {
+                return new Ask.AboveCeiling(call);
+            }
             if (call != held) {
                 tx.update(RAISE_WATERMARK, call.wireName(), caller.applicationId(), conversationId);
             }
             Message question = tx.query(ADD_USER_MESSAGE, DatabaseMessages::message, Ids.next("msg"), text,
                     caller.applicationId(), conversationId).getFirst();
             Message answer = start(tx, caller, conversationId).getFirst();
-            return Optional.of(new Asked(question, answer, call));
+            return new Asked(question, answer, call);
         });
     }
 

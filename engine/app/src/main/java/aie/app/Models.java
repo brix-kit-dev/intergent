@@ -26,21 +26,22 @@ final class Models {
     }
 
     /**
-     * The gateway of a region pack: each of its models called through a new adapter of the model's kind, and its routes.
+     * The gateway of a region pack: each of its models called through a new adapter of the model's kind, with the highest
+     * class of data its contract lets it take, and its routes.
      *
      * @param insideTx whether the calling thread is inside a database transaction, so that the gateway can refuse such a
      *     call (A-14): {@code insideTx} of the role's pool
      * @throws IllegalArgumentException for a model whose adapter this engine does not have
      */
     static Gateway gateway(RegionPack pack, BooleanSupplier insideTx) {
-        Map<String, ModelPort> registry = new LinkedHashMap<>();
+        Map<String, RoutingGateway.Model> registry = new LinkedHashMap<>();
         pack.models().forEach((id, spec) -> {
             Supplier<ModelPort> adapter = ADAPTERS.get(spec.adapter());
             if (adapter == null) {
                 throw new IllegalArgumentException("The model " + id + " needs the adapter " + spec.adapter()
                         + ", which this engine does not have");
             }
-            registry.put(id, adapter.get());
+            registry.put(id, new RoutingGateway.Model(adapter.get(), spec.maxDataClass()));
         });
         return new RoutingGateway(registry, pack.routes(), insideTx);
     }

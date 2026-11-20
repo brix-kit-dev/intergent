@@ -954,7 +954,7 @@ class ApiRoleTest {
         Owner caller = new Owner("key_unused", tenant, application);
         aie.modules.conversation.api.Messages messages = context.getBean(aie.modules.conversation.api.Messages.class);
         aie.modules.conversation.api.EventSignals signals = context.getBean(aie.modules.conversation.api.EventSignals.class);
-        String answer = messages.ask(caller, id, "Hello?", DataClass.PUBLIC).orElseThrow().answer().messageId();
+        String answer = TestApi.asked(messages.ask(caller, id, "Hello?", DataClass.PUBLIC, DataClass.SENSITIVE)).answer().messageId();
 
         java.util.concurrent.CompletableFuture<Void> signal = signals.next(answer);
         messages.addDelta(caller, id, answer, "Hi");
@@ -1272,7 +1272,7 @@ class ApiRoleTest {
                 Conversation.class).getId();
         Messages messages = new DatabaseMessages(database);
         Owner writer = new Owner("key_unused", tenant, application);
-        String answer = messages.ask(writer, id, "Anyone there?", DataClass.PUBLIC).orElseThrow().answer().messageId();
+        String answer = TestApi.asked(messages.ask(writer, id, "Anyone there?", DataClass.PUBLIC, DataClass.SENSITIVE)).answer().messageId();
         assertThat(messages.addDelta(writer, id, answer, "Hal")).isEqualTo(new Messages.Written.Added(2));
         return new Unfinished(key, id, answer);
     }

@@ -63,7 +63,7 @@ class EventStreamDatabaseTest {
                 .isZero();
         pool = PgRuntime.pool(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD, 4);
         messages = new DatabaseMessages(pool);
-        answers = new GeneratingAnswers(messages, new RoutingGateway(Map.of(FakeModel.MODEL, new FakeModel()),
+        answers = new GeneratingAnswers(messages, new RoutingGateway(Map.of(FakeModel.MODEL, new RoutingGateway.Model(new FakeModel(), DataClass.SENSITIVE)),
                 Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), Duration.ofSeconds(30), CheckMode.SENTENCE, TestApi.prompts(List.of(FakeModel.MODEL)))), pool::insideTx));
         DatabaseProvisioning provisioning = new DatabaseProvisioning(pool);
         String tenant = provisioning.createTenant("jp1", null);
@@ -110,7 +110,7 @@ class EventStreamDatabaseTest {
     void theSignalsOfTheWritesWakeTheStream() {
         LocalEventSignals signals = new LocalEventSignals();
         Messages ringing = new DatabaseMessages(pool, signals);
-        try (GeneratingAnswers ringingAnswers = new GeneratingAnswers(ringing, new RoutingGateway(Map.of(FakeModel.MODEL, new FakeModel()),
+        try (GeneratingAnswers ringingAnswers = new GeneratingAnswers(ringing, new RoutingGateway(Map.of(FakeModel.MODEL, new RoutingGateway.Model(new FakeModel(), DataClass.SENSITIVE)),
                 Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), Duration.ofSeconds(30), CheckMode.SENTENCE, TestApi.prompts(List.of(FakeModel.MODEL)))), pool::insideTx))) {
             Started started = (Started) ringingAnswers.ask(caller, conversation, "[fake pieces=3 delay=200ms] Quick", DataClass.PUBLIC);
 
@@ -147,7 +147,7 @@ class EventStreamDatabaseTest {
     void aStreamEndsTheAnswerOfAWriterThatHasGone() throws SQLException {
         String alone = new DatabaseConversations(pool).start(caller, new DatabaseEndUsers(pool).resolve(caller, "user-1"), null)
                 .conversationId();
-        String answer = messages.ask(caller, alone, "Anyone there?", DataClass.PUBLIC).orElseThrow().answer().messageId();
+        String answer = TestApi.asked(messages.ask(caller, alone, "Anyone there?", DataClass.PUBLIC, DataClass.SENSITIVE)).answer().messageId();
         assertThat(messages.addDelta(caller, alone, answer, "Hal")).isEqualTo(new Messages.Written.Added(2));
         TestDatabase.asAdmin(DATABASE, "UPDATE engine.conversation_answer_leases SET expires_at = now() - interval '1 second'"
                 + " WHERE message_id = '" + answer + "'");

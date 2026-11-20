@@ -161,7 +161,7 @@ class AnswerLeasesTest {
         Owner caller = newApplication();
         String conversation = newConversation(caller);
         String started = messages.startAssistantMessage(caller, conversation).orElseThrow().messageId();
-        Messages.Asked asked = messages.ask(caller, conversation, "Hello?", DataClass.PUBLIC).orElseThrow();
+        Messages.Asked asked = TestApi.asked(messages.ask(caller, conversation, "Hello?", DataClass.PUBLIC, DataClass.SENSITIVE));
 
         assertThat(leases()).containsExactlyInAnyOrder(started, asked.answer().messageId());
         assertThat(secondsLeft(started)).isBetween(25.0, 30.0);

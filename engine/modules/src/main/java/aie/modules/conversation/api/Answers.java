@@ -22,8 +22,8 @@ public interface Answers {
 
     /**
      * Stores what the end user said, starts its answer and generates it in the background. Nothing is stored when the
-     * conversation is out of reach, when this instance already generates as many answers as it may, or when it is
-     * stopping.
+     * conversation is out of reach, when this instance already generates as many answers as it may, when it is stopping,
+     * or when no model of {@link #TASK} takes the call's data class (M3-3-2).
      *
      * @param floor the least data class of the call, the higher of the application's default and the class the caller
      *     declared; {@link Messages#ask} raises it to the conversation's watermark (M3-3)
@@ -59,6 +59,16 @@ public interface Answers {
 
         /** No conversation has this ID in the caller's application. Nothing was stored. */
         record NotFound() implements Start {
+        }
+
+        /**
+         * No model of the task takes the call's data class, so the call fails and goes to no model of a lower class
+         * (blueprint 7.3). Nothing was stored, and the conversation's watermark stayed as it was.
+         *
+         * @param dataClass the class of the call, the higher of its floor and the conversation's watermark
+         * @param ceiling the highest class the task's models take
+         */
+        record NoEligibleModel(DataClass dataClass, DataClass ceiling) implements Start {
         }
     }
 }

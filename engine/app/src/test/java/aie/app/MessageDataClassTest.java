@@ -4,12 +4,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import aie.core.trust.api.DataClass;
 import aie.http.StreamLimit;
+import aie.http.api.model.Problem;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpRequest.BodyPublishers;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.List;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -18,6 +20,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.springframework.context.ConfigurableApplicationContext;
+import tools.jackson.databind.json.JsonMapper;
 
 /**
  * The least data class of a call (blueprint 7.3, M3-3-1), on the real web stack with stand-ins: the application's
@@ -30,6 +33,7 @@ class MessageDataClassTest {
     private static final TestApi.StandInApplications APPLICATIONS = new TestApi.StandInApplications();
     private static final TestApi.StandInConversations CONVERSATIONS = new TestApi.StandInConversations();
     private static final TestApi.StandInAnswers ANSWERS = new TestApi.StandInAnswers();
+    private static final JsonMapper JSON = JsonMapper.builder().build();
     private static ConfigurableApplicationContext context;
     private static int port;
 
@@ -52,6 +56,7 @@ class MessageDataClassTest {
         APPLICATIONS.defaultClass = DataClass.PUBLIC;
         ANSWERS.calls.clear();
         ANSWERS.floors.clear();
+        ANSWERS.ceiling = DataClass.SENSITIVE;
     }
 
     /** POST .../messages with this credential and JSON, and any further headers, in pairs. */
@@ -124,6 +129,48 @@ class MessageDataClassTest {
         assertThat(response.statusCode()).isEqualTo(200);
         assertThat(ANSWERS.floors).containsExactly(DataClass.PERSONAL);
         assertThat(APPLICATIONS.calls).containsExactly("ten_test/app_test reads its default data class");
+    }
+
+    /**
+     * M3-3-2: a call that no model of its task takes is 422 no_eligible_model, a problem and no stream, whether its
+     * declared class or its application's default is above the ceiling. The detail names both classes.
+     */
+    @Test
+    void aCallNoModelTakesIs422NoEligibleModel() throws Exception {
+        ANSWERS.ceiling = DataClass.INTERNAL;
+        APPLICATIONS.defaultClass = DataClass.INTERNAL;
+
+        HttpResponse<String> declared = send(TestApi.AUTHORIZATION, "conv_1", "{\"text\":\"Hi\",\"data_class\":\"sensitive\"}");
+        HttpResponse<String> streamed = send(TestApi.AUTHORIZATION, "conv_1", "{\"text\":\"Hi\",\"data_class\":\"personal\"}",
+                "Accept", "text/event-stream");
+        APPLICATIONS.defaultClass = DataClass.PERSONAL;
+        HttpResponse<String> byDefault = send(TestApi.AUTHORIZATION, "conv_1", "{\"text\":\"Hi\"}");
+
+        for (HttpResponse<String> refused : List.of(declared, streamed, byDefault)) {
+            assertThat(refused.statusCode()).isEqualTo(422);
+            assertThat(refused.headers().firstValue("Content-Type")).contains("application/problem+json");
+            Problem problem = JSON.readValue(refused.body(), Problem.class);
+            assertThat(problem.getCode()).isEqualTo("no_eligible_model");
+            assertThat(problem.getStatus()).isEqualTo(422);
+        }
+        assertThat(JSON.readValue(declared.body(), Problem.class).getDetail()).isEqualTo("The call's data is sensitive, but the"
+                + " models that may answer it take data up to internal, so nothing was sent or stored");
+        assertThat(JSON.readValue(byDefault.body(), Problem.class).getDetail()).startsWith("The call's data is personal, but");
+        assertThat(ANSWERS.floors).containsExactly(DataClass.SENSITIVE, DataClass.PERSONAL, DataClass.PERSONAL);
+    }
+
+    /** At the ceiling a call is answered, streamed or not. */
+    @Test
+    void aCallAtTheCeilingIsAnswered() throws Exception {
+        ANSWERS.ceiling = DataClass.PERSONAL;
+        APPLICATIONS.defaultClass = DataClass.INTERNAL;
+
+        HttpResponse<String> answered = send(TestApi.AUTHORIZATION, "conv_1", "{\"text\":\"Hi\",\"data_class\":\"personal\"}");
+        HttpResponse<String> streamed = send(TestApi.AUTHORIZATION, "conv_1", "{\"text\":\"Hi\"}", "Accept", "text/event-stream");
+
+        assertThat(answered.statusCode()).isEqualTo(200);
+        assertThat(streamed.body()).startsWith("id: 1\nevent: message.started\n");
+        assertThat(ANSWERS.floors).containsExactly(DataClass.PERSONAL, DataClass.INTERNAL);
     }
 
     /** A class outside the contract is refused before the default is read or anything is asked. */

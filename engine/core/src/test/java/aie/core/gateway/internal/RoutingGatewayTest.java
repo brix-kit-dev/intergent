@@ -45,16 +45,21 @@ class RoutingGatewayTest {
     /** The calls the models got. */
     private final List<ModelPort.Request> calls = new CopyOnWriteArrayList<>();
 
-    /** A model that notes its call, sends the pieces and ends with the result. */
-    private ModelPort model(String name, ModelPort.Result result, String... pieces) {
-        return (request, output) -> {
+    /** A model that takes every class, notes its call, sends the pieces and ends with the result. */
+    private RoutingGateway.Model model(String name, ModelPort.Result result, String... pieces) {
+        return model(name, DataClass.SENSITIVE, result, pieces);
+    }
+
+    /** A model that takes data up to this class, notes its call, sends the pieces and ends with the result. */
+    private RoutingGateway.Model model(String name, DataClass max, ModelPort.Result result, String... pieces) {
+        return new RoutingGateway.Model((request, output) -> {
             events.add("model " + name);
             calls.add(request);
             for (String piece : pieces) {
                 output.text(piece);
             }
             return result;
-        };
+        }, max);
     }
 
     /** The same test prompt for each model, or none for a list a route refuses anyway. */
@@ -89,6 +94,77 @@ class RoutingGatewayTest {
         assertThat(events).containsExactly("model first", "caller a", "caller b");
         assertThat(calls).singleElement().extracting(ModelPort.Request::model).isEqualTo("first");
         assertThat(result).isEqualTo(new Completed(new Usage(5, 2)));
+    }
+
+    /**
+     * M3-3-2: a call goes to the first model of its route, in the route's order, that takes the call's class. A model below
+     * the class is passed over, and a lower model later in the route does not win over an earlier one that takes it.
+     */
+    @Test
+    void aCallGoesToTheFirstModelThatTakesItsClass() {
+        Gateway gateway = new RoutingGateway(Map.of(
+                        "internal", model("internal", DataClass.INTERNAL, DONE),
+                        "sensitive", model("sensitive", DataClass.SENSITIVE, DONE),
+                        "public", model("public", DataClass.PUBLIC, DONE)),
+                Map.of("chat", route("internal", "sensitive", "public")), OUTSIDE);
+
+        for (DataClass dataClass : DataClass.values()) {
+            answer(gateway, new Request("chat", List.of(new Turn(Role.USER, "Hello")), NEVER, dataClass));
+        }
+
+        assertThat(calls).extracting(ModelPort.Request::model).containsExactly("internal", "internal", "sensitive", "sensitive");
+    }
+
+    /** M3-3-2: a task's ceiling is the highest class a model of its route takes, wherever that model stands in it. */
+    @Test
+    void aTasksCeilingIsTheHighestClassOfItsRoute() {
+        Gateway gateway = new RoutingGateway(Map.of(
+                        "public", model("public", DataClass.PUBLIC, DONE),
+                        "internal", model("internal", DataClass.INTERNAL, DONE),
+                        "personal", model("personal", DataClass.PERSONAL, DONE),
+                        "sensitive", model("sensitive", DataClass.SENSITIVE, DONE)),
+                Map.of("chat", route("public"), "translate", route("internal", "public"), "search", route("public", "personal"),
+                        "care", route("public", "sensitive", "internal")), OUTSIDE);
+
+        assertThat(gateway.ceiling("chat")).isEqualTo(DataClass.PUBLIC);
+        assertThat(gateway.ceiling("translate")).isEqualTo(DataClass.INTERNAL);
+        assertThat(gateway.ceiling("search")).isEqualTo(DataClass.PERSONAL);
+        assertThat(gateway.ceiling("care")).isEqualTo(DataClass.SENSITIVE);
+        assertThatThrownBy(() -> gateway.ceiling("summarize")).isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("No route answers the task summarize");
+        assertThatThrownBy(() -> gateway.ceiling(null)).isInstanceOf(IllegalArgumentException.class);
+        assertThat(calls).isEmpty();
+    }
+
+    /**
+     * M3-3-2: a call above its task's ceiling goes to no model, not even to one of a lower class: the caller should have
+     * refused it, so it is a mistake, refused before the checks. One at the ceiling is answered.
+     */
+    @Test
+    void aCallAboveTheCeilingReachesNoModel() {
+        Gateway gateway = new RoutingGateway(Map.of("low", model("low", DataClass.INTERNAL, DONE, "a")),
+                Map.of("chat", route("low")), noting(), OUTSIDE);
+        Turn hello = new Turn(Role.USER, "Hello");
+
+        for (DataClass above : List.of(DataClass.PERSONAL, DataClass.SENSITIVE)) {
+            assertThatThrownBy(() -> answer(gateway, new Request("chat", List.of(hello), NEVER, above)))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessage("No model of the task chat takes " + above.wireName()
+                            + " data, only up to internal, so the caller refuses such a call before anything goes");
+        }
+        assertThat(events).isEmpty();
+        assertThat(answer(gateway, new Request("chat", List.of(hello), NEVER, DataClass.INTERNAL))).isInstanceOf(Completed.class);
+        assertThat(events).containsExactly("input chat", "model low", "output chat a", "caller A");
+    }
+
+    @Test
+    void aModelOfTheGatewayNeedsItsAdapterAndItsHighestClass() {
+        ModelPort port = (request, output) -> DONE;
+
+        assertThatThrownBy(() -> new RoutingGateway.Model(null, DataClass.PUBLIC)).isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("A model of the gateway needs its adapter and the highest data class it takes");
+        assertThatThrownBy(() -> new RoutingGateway.Model(port, null)).isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("A model of the gateway needs its adapter and the highest data class it takes");
     }
 
     @Test
@@ -253,7 +329,7 @@ class RoutingGatewayTest {
 
     @Test
     void aGatewayCannotBeBuiltWithoutTheTransactionCheck() {
-        Map<String, ModelPort> models = Map.of("m", model("m", DONE));
+        Map<String, RoutingGateway.Model> models = Map.of("m", model("m", DONE));
         Map<String, Route> routes = Map.of("chat", route("m"));
 
         assertThatThrownBy(() -> new RoutingGateway(models, routes, null)).isInstanceOf(NullPointerException.class);
@@ -262,7 +338,7 @@ class RoutingGatewayTest {
 
     @Test
     void aRouteToAModelTheGatewayWasNotGivenStopsIt() {
-        Map<String, ModelPort> models = Map.of("m", model("m", DONE));
+        Map<String, RoutingGateway.Model> models = Map.of("m", model("m", DONE));
 
         assertThatThrownBy(() -> new RoutingGateway(models, Map.of("chat", route("m", "missing")), OUTSIDE))
                 .isInstanceOf(IllegalArgumentException.class)
@@ -347,7 +423,7 @@ class RoutingGatewayTest {
 
     @Test
     void theTablesItWasGivenCannotChangeIt() {
-        Map<String, ModelPort> models = new HashMap<>(Map.of("m", model("m", DONE)));
+        Map<String, RoutingGateway.Model> models = new HashMap<>(Map.of("m", model("m", DONE)));
         Map<String, Route> routes = new HashMap<>(Map.of("chat", route("m")));
         List<String> preference = new ArrayList<>(List.of("m"));
         Route route = new Route(preference, MINUTE, CheckMode.SENTENCE, prompts(preference));

@@ -92,7 +92,7 @@ class DataClassesTest {
     }
 
     private static Asked ask(Owner caller, String conversation, DataClass floor) {
-        return messages.ask(caller, conversation, "Hello?", floor).orElseThrow();
+        return TestApi.asked(messages.ask(caller, conversation, "Hello?", floor, DataClass.SENSITIVE));
     }
 
     /** Each message as its role and class, oldest first, whatever row-level security lets the engine see. */
@@ -221,9 +221,80 @@ class DataClassesTest {
         Owner caller = newApplication(DataClass.PUBLIC);
         String conversation = newConversation(caller);
 
-        assertThatThrownBy(() -> messages.ask(caller, conversation, "Hello?", null)).isInstanceOf(IllegalArgumentException.class)
+        assertThatThrownBy(() -> messages.ask(caller, conversation, "Hello?", null, DataClass.SENSITIVE)).isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("An ask needs its least data class, the application's default at the least");
         assertThat(classes()).isEmpty();
+    }
+
+    @Test
+    void anAskNeedsItsCeiling() throws SQLException {
+        Owner caller = newApplication(DataClass.PUBLIC);
+        String conversation = newConversation(caller);
+
+        assertThatThrownBy(() -> messages.ask(caller, conversation, "Hello?", DataClass.PUBLIC, null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("An ask needs the ceiling of its task, the highest class its models take");
+        assertThat(classes()).isEmpty();
+    }
+
+    /**
+     * M3-3-2: a call above its task's ceiling has no model to go to, so it stores nothing and leaves the watermark as it
+     * was (blueprint 7.3: what no model was sent neither joins the history nor raises the watermark). One at the ceiling
+     * or below is stored.
+     */
+    @ParameterizedTest
+    @MethodSource("everyPair")
+    void aCallAboveTheCeilingStoresNothing(DataClass floor, DataClass ceiling) throws SQLException {
+        Owner caller = newApplication(DataClass.PUBLIC);
+        String conversation = newConversation(caller);
+        boolean above = floor.ordinal() > ceiling.ordinal();
+
+        Messages.Ask ask = messages.ask(caller, conversation, "Hello?", floor, ceiling);
+
+        if (above) {
+            assertThat(ask).isEqualTo(new Messages.Ask.AboveCeiling(floor));
+            assertThat(classes()).isEmpty();
+        } else {
+            assertThat(TestApi.asked(ask).dataClass()).isEqualTo(floor);
+            assertThat(classes()).containsExactly("user " + floor.wireName(), "assistant " + floor.wireName());
+        }
+        assertThat(watermark(conversation)).isEqualTo(above ? "public" : floor.wireName());
+    }
+
+    /** M3-3-2: the watermark counts against the ceiling, so after a sensitive call even a public one has no model. */
+    @Test
+    void theWatermarkCountsAgainstTheCeiling() throws SQLException {
+        Owner caller = newApplication(DataClass.PUBLIC);
+        String conversation = newConversation(caller);
+        ask(caller, conversation, DataClass.SENSITIVE);
+
+        Messages.Ask ask = messages.ask(caller, conversation, "Hello?", DataClass.PUBLIC, DataClass.PERSONAL);
+
+        assertThat(ask).isEqualTo(new Messages.Ask.AboveCeiling(DataClass.SENSITIVE));
+        assertThat(classes()).containsExactly("user sensitive", "assistant sensitive");
+        assertThat(watermark(conversation)).isEqualTo("sensitive");
+    }
+
+    /**
+     * M3-3-2: a conversation out of reach is not found, whatever the class of the call or of the conversation, so another
+     * application learns nothing of it, its class included.
+     */
+    @Test
+    void aConversationOutOfReachIsNotFoundAboveTheCeilingToo() throws SQLException {
+        Owner caller = newApplication(DataClass.PUBLIC);
+        String conversation = newConversation(caller);
+        ask(caller, conversation, DataClass.SENSITIVE);
+        Owner otherApplication = new Owner("key_unused", caller.tenantId(),
+                provisioning.createApplication(caller.tenantId(), "test", "public"));
+        Owner otherTenant = new Owner("key_unused", newApplication(DataClass.PUBLIC).tenantId(), caller.applicationId());
+
+        assertThat(messages.ask(otherApplication, conversation, "Hello?", DataClass.PUBLIC, DataClass.PUBLIC))
+                .isEqualTo(new Messages.Ask.NotFound());
+        assertThat(messages.ask(otherTenant, conversation, "Hello?", DataClass.SENSITIVE, DataClass.PUBLIC))
+                .isEqualTo(new Messages.Ask.NotFound());
+        assertThat(messages.ask(caller, "conv_00000000000000000000000000", "Hello?", DataClass.SENSITIVE, DataClass.PUBLIC))
+                .isEqualTo(new Messages.Ask.NotFound());
+        assertThat(classes()).containsExactly("user sensitive", "assistant sensitive");
     }
 
     /** An ask that stores nothing raises nothing: neither one out of reach, nor one that fails partway. */
@@ -235,8 +306,8 @@ class DataClassesTest {
                 provisioning.createApplication(caller.tenantId(), "test", "public"));
         Owner otherTenant = new Owner("key_unused", newApplication(DataClass.PUBLIC).tenantId(), caller.applicationId());
 
-        assertThat(messages.ask(otherApplication, conversation, "Hello?", DataClass.SENSITIVE)).isEmpty();
-        assertThat(messages.ask(otherTenant, conversation, "Hello?", DataClass.SENSITIVE)).isEmpty();
+        assertThat(messages.ask(otherApplication, conversation, "Hello?", DataClass.SENSITIVE, DataClass.SENSITIVE)).isEqualTo(new Messages.Ask.NotFound());
+        assertThat(messages.ask(otherTenant, conversation, "Hello?", DataClass.SENSITIVE, DataClass.SENSITIVE)).isEqualTo(new Messages.Ask.NotFound());
         TestDatabase.asAdmin(DATABASE, """
                 CREATE FUNCTION engine.test_refuse_start() RETURNS trigger LANGUAGE plpgsql AS $$
                 BEGIN
@@ -247,7 +318,7 @@ class DataClassesTest {
                     FOR EACH ROW WHEN (NEW.type = 'message.started') EXECUTE FUNCTION engine.test_refuse_start();
                 """);
         try {
-            assertThatThrownBy(() -> messages.ask(caller, conversation, "Hello?", DataClass.SENSITIVE))
+            assertThatThrownBy(() -> messages.ask(caller, conversation, "Hello?", DataClass.SENSITIVE, DataClass.SENSITIVE))
                     .isInstanceOf(DatabaseException.class).hasStackTraceContaining("The test refuses message.started");
         } finally {
             TestDatabase.asAdmin(DATABASE, """

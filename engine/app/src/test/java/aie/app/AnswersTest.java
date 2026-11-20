@@ -116,13 +116,18 @@ class AnswersTest {
 
     /** The real gateway with the fake model, on a route that lets an answer take this long at most. */
     private static Gateway fake(Duration routeTime) {
-        return new RoutingGateway(Map.of(FakeModel.MODEL, new FakeModel()),
+        return new RoutingGateway(Map.of(FakeModel.MODEL, new RoutingGateway.Model(new FakeModel(), DataClass.SENSITIVE)),
                 Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), routeTime, CheckMode.SENTENCE, TestApi.prompts(List.of(FakeModel.MODEL)))), pool::insideTx);
     }
 
-    /** The real gateway with a stub model. */
+    /** The real gateway with a stub model that takes every class. */
     private static Gateway stub(ModelPort model) {
-        return new RoutingGateway(Map.of("stub", model),
+        return stub(model, DataClass.SENSITIVE);
+    }
+
+    /** The real gateway with a stub model that takes data up to this class. */
+    private static Gateway stub(ModelPort model, DataClass max) {
+        return new RoutingGateway(Map.of("stub", new RoutingGateway.Model(model, max)),
                 Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), CheckMode.SENTENCE, TestApi.prompts(List.of("stub")))), pool::insideTx);
     }
 
@@ -216,7 +221,7 @@ class AnswersTest {
 
     @Test
     void theModelIsShownTheHistoryEndingWithTheQuestion() throws Exception {
-        Asked earlier = messages.ask(caller, conversation, "Hi", DataClass.PUBLIC).orElseThrow();
+        Asked earlier = TestApi.asked(messages.ask(caller, conversation, "Hi", DataClass.PUBLIC, DataClass.SENSITIVE));
         messages.addDelta(caller, conversation, earlier.answer().messageId(), "Hello!");
         messages.complete(caller, conversation, earlier.answer().messageId(), new Usage(1, 1));
         List<List<ModelPort.Turn>> shown = new CopyOnWriteArrayList<>();
@@ -242,9 +247,17 @@ class AnswersTest {
     void theGatewayIsToldTheClassOfEachCall() throws Exception {
         List<DataClass> told = new CopyOnWriteArrayList<>();
         Gateway real = fake(Duration.ofSeconds(10));
-        Gateway telling = (request, output) -> {
-            told.add(request.dataClass());
-            return real.answer(request, output);
+        Gateway telling = new Gateway() {
+            @Override
+            public Result answer(Request request, Output output) {
+                told.add(request.dataClass());
+                return real.answer(request, output);
+            }
+
+            @Override
+            public DataClass ceiling(String task) {
+                return real.ceiling(task);
+            }
         };
 
         try (GeneratingAnswers answers = new GeneratingAnswers(messages, telling)) {
@@ -561,6 +574,33 @@ class AnswersTest {
             for (Started started : running) {
                 awaitEnd(started);
             }
+        }
+    }
+
+    /**
+     * M3-3-2: a call that no model of the task takes is NoEligibleModel, with its class and the gateway's ceiling for the
+     * task. Nothing is stored, no model is called, and the slot goes back, so this instance's one slot answers the next.
+     */
+    @Test
+    void aCallNoModelTakesStoresNothingAndCallsNoModel() throws Exception {
+        List<String> called = new CopyOnWriteArrayList<>();
+        ModelPort model = (request, output) -> {
+            called.add(request.model());
+            output.text("Hi");
+            return new ModelPort.Completed(new ModelPort.Usage(1, 1));
+        };
+        try (GeneratingAnswers answers = new GeneratingAnswers(messages, stub(model, DataClass.INTERNAL), 1, Duration.ofSeconds(5))) {
+            assertThat(answers.ask(caller, conversation, "Hello?", DataClass.PERSONAL))
+                    .isEqualTo(new Start.NoEligibleModel(DataClass.PERSONAL, DataClass.INTERNAL));
+            assertThat(answers.ask(caller, conversation, "Hello?", DataClass.SENSITIVE))
+                    .isEqualTo(new Start.NoEligibleModel(DataClass.SENSITIVE, DataClass.INTERNAL));
+            assertThat(rows()).isEmpty();
+            assertThat(called).isEmpty();
+
+            Started started = started(answers.ask(caller, conversation, "Hello?", DataClass.INTERNAL));
+            awaitEnd(started);
+            assertThat(answerOf(started).status()).isEqualTo(Status.COMPLETED);
+            assertThat(called).containsExactly("stub");
         }
     }
 
