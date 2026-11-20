@@ -1,6 +1,7 @@
 package aie.modules.conversation.api;
 
 import aie.core.tenancy.api.ApiKeyLookup.Owner;
+import aie.core.trust.api.DataClass;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -38,7 +39,7 @@ public interface Messages {
 
     /**
      * Starts an answer: an assistant message, in progress and empty, with its message.started event as number 1 and its
-     * writer's lease for {@link #LEASE}, all in one transaction.
+     * writer's lease for {@link #LEASE}, all in one transaction. It takes the conversation's watermark as its class.
      *
      * @return the message, or empty when the conversation is not one of the caller's application
      */
@@ -49,12 +50,18 @@ public interface Messages {
      * stored, then the answer, in progress and empty, with its message.started event as number 1 and its writer's lease for
      * {@link #LEASE}. Asks in one conversation take turns, so that each question comes right before its own answer.
      *
-     * @return the question and its answer, or empty when the conversation is not one of the caller's application; then
-     *     nothing is stored
+     * <p>The call's data class is the higher of {@code floor} and the conversation's watermark, the highest class the
+     * conversation has sent to a model (blueprint 7.3): its history goes with the question. Both messages keep that class,
+     * and the watermark rises to it in the same transaction; it never goes down (M3-3-1).
+     *
+     * @param floor the least class of this call: the higher of the application's default and the class the caller
+     *     declared
+     * @return the question and its answer, with the call's class, or empty when the conversation is not one of the
+     *     caller's application; then nothing is stored
      * @throws IllegalArgumentException for text that is empty, over {@link #MAX_TEXT} characters, or holds a NUL, which
      *     the database cannot store
      */
-    Optional<Asked> ask(Owner caller, String conversationId, String text);
+    Optional<Asked> ask(Owner caller, String conversationId, String text, DataClass floor);
 
     /**
      * Adds a message.delta event to an answer in progress. The database gives it the next number of the answer.
@@ -180,8 +187,12 @@ public interface Messages {
         }
     }
 
-    /** What the end user asked, and the answer started for it. */
-    record Asked(Message question, Message answer) {
+    /**
+     * What the end user asked, and the answer started for it.
+     *
+     * @param dataClass the class of the call, which both messages keep and the model's choice has to allow (M3-3)
+     */
+    record Asked(Message question, Message answer, DataClass dataClass) {
     }
 
     /** What became of an event written to an answer. */

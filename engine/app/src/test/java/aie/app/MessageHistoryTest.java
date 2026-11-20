@@ -3,6 +3,7 @@ package aie.app;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import aie.app.TestApi.StandInAnswers.Outcome;
+import aie.core.trust.api.DataClass;
 import aie.http.api.model.Message;
 import aie.http.api.model.MessageList;
 import aie.http.api.model.Problem;
@@ -77,7 +78,7 @@ class MessageHistoryTest {
         ANSWERS.outcome = outcome;
         List<Messages.Asked> asked = new ArrayList<>();
         for (int i = 0; i < asks; i++) {
-            asked.add(((Answers.Start.Started) ANSWERS.ask(TestApi.OWNER, conversationId, "Hi")).asked());
+            asked.add(((Answers.Start.Started) ANSWERS.ask(TestApi.OWNER, conversationId, "Hi", DataClass.PUBLIC)).asked());
         }
         return asked;
     }

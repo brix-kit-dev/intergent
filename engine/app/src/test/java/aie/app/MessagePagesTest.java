@@ -10,6 +10,7 @@ import aie.core.tenancy.api.EndUsers;
 import aie.core.tenancy.api.Provisioning;
 import aie.core.tenancy.internal.DatabaseEndUsers;
 import aie.core.tenancy.internal.DatabaseProvisioning;
+import aie.core.trust.api.DataClass;
 import aie.modules.conversation.api.Conversations;
 import aie.modules.conversation.api.Messages;
 import aie.modules.conversation.api.Messages.Message;
@@ -188,7 +189,7 @@ class MessagePagesTest {
     void anAnswerInProgressHasItsTextSoFar() {
         Owner caller = newApplication();
         String conversation = newConversation(caller);
-        Messages.Asked asked = messages.ask(caller, conversation, "Hello?").orElseThrow();
+        Messages.Asked asked = messages.ask(caller, conversation, "Hello?", DataClass.PUBLIC).orElseThrow();
         messages.addDelta(caller, conversation, asked.answer().messageId(), "Hel");
         messages.addDelta(caller, conversation, asked.answer().messageId(), "lo");
 
@@ -211,8 +212,9 @@ class MessagePagesTest {
         Owner caller = newApplication();
         String conversation = newConversation(caller);
         String add = """
-                INSERT INTO conversation_messages (message_id, tenant_id, conversation_id, role, status, text, created_at, completed_at)
-                VALUES (?, ?, ?, 'user', 'completed', ?, now() - ?::interval, now())
+                INSERT INTO conversation_messages (message_id, tenant_id, conversation_id, role, status, text, created_at, completed_at,
+                    data_class)
+                VALUES (?, ?, ?, 'user', 'completed', ?, now() - ?::interval, now(), 'public')
                 """;
         database.inTenantTx(caller.tenantId(), tx -> tx.update(add, "msg_C", caller.tenantId(), conversation, "first", "0 hours"));
         database.inTenantTx(caller.tenantId(), tx -> tx.update(add, "msg_B", caller.tenantId(), conversation, "second", "1 hour"));
@@ -278,9 +280,10 @@ class MessagePagesTest {
         String conversation = newConversation(caller);
         String other = newConversation(caller);
         TestDatabase.asAdmin(DATABASE, """
-                INSERT INTO engine.conversation_messages (message_id, tenant_id, conversation_id, role, status, text, completed_at)
+                INSERT INTO engine.conversation_messages (message_id, tenant_id, conversation_id, role, status, text, completed_at,
+                    data_class)
                 SELECT 'msg_long' || g, '%1$s', CASE WHEN g %% 2 = 0 THEN '%2$s' ELSE '%3$s' END, 'user', 'completed',
-                    'Message ' || g, now()
+                    'Message ' || g, now(), 'public'
                 FROM generate_series(1, 10000) g;
                 ANALYZE engine.conversation_messages
                 """.formatted(caller.tenantId(), conversation, other));

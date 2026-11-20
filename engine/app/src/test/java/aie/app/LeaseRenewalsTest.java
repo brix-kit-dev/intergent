@@ -15,6 +15,7 @@ import aie.core.tenancy.api.Provisioning;
 import aie.core.tenancy.internal.DatabaseEndUsers;
 import aie.core.tenancy.internal.DatabaseProvisioning;
 import aie.core.trust.api.CheckMode;
+import aie.core.trust.api.DataClass;
 import aie.modules.conversation.api.Answers;
 import aie.modules.conversation.api.Answers.Start;
 import aie.modules.conversation.api.Answers.Start.Started;
@@ -158,7 +159,7 @@ class LeaseRenewalsTest {
     void theLeaseIsRenewedWhileTheAnswerIsWritten() throws Exception {
         CountDownLatch writing = new CountDownLatch(1);
         try (GeneratingAnswers answers = renewingOften(messages, silent(writing))) {
-            Started started = started(answers.ask(caller, conversation, "Long?"));
+            Started started = started(answers.ask(caller, conversation, "Long?", DataClass.PUBLIC));
             assertThat(writing.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
             long first = leaseEnd(idOf(started));
 
@@ -177,7 +178,7 @@ class LeaseRenewalsTest {
     void aSilentModelLearnsOfACancelAtTheNextRenewal() throws Exception {
         CountDownLatch writing = new CountDownLatch(1);
         try (GeneratingAnswers writer = renewingOften(messages, silent(writing))) {
-            Started started = started(writer.ask(caller, conversation, "Quiet?"));
+            Started started = started(writer.ask(caller, conversation, "Quiet?", DataClass.PUBLIC));
             assertThat(writing.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
 
             long asked = System.nanoTime();
@@ -201,7 +202,7 @@ class LeaseRenewalsTest {
     void aWriterLearnsAtItsRenewalThatTheAnswerEnded() throws Exception {
         CountDownLatch writing = new CountDownLatch(1);
         try (GeneratingAnswers writer = new GeneratingAnswers(messages, stub(silent(writing)), 1, Duration.ofSeconds(5), RENEWAL)) {
-            Started started = started(writer.ask(caller, conversation, "Gone?"));
+            Started started = started(writer.ask(caller, conversation, "Gone?", DataClass.PUBLIC));
             assertThat(writing.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
 
             assertThat(messages.fail(caller, conversation, idOf(started), ErrorCode.STREAM_INTERRUPTED)).isInstanceOf(Written.Added.class);
@@ -211,7 +212,7 @@ class LeaseRenewalsTest {
             assertThat(answer.status()).isEqualTo(Status.FAILED);
             assertThat(answer.code()).isEqualTo(ErrorCode.STREAM_INTERRUPTED);
             assertThat(messages.eventsAfter(caller, conversation, idOf(started), 0, 100)).extracting(Event::seq).containsExactly(1L, 2L, 3L);
-            assertThat(writer.ask(caller, conversation, "Next?")).isInstanceOf(Started.class);
+            assertThat(writer.ask(caller, conversation, "Next?", DataClass.PUBLIC)).isInstanceOf(Started.class);
         }
     }
 
@@ -236,7 +237,7 @@ class LeaseRenewalsTest {
         CountDownLatch writing = new CountDownLatch(1);
         AtomicInteger renewals = new AtomicInteger();
         try (GeneratingAnswers answers = renewingOften(renewalsFailFirst(2, renewals), silent(writing))) {
-            Started started = started(answers.ask(caller, conversation, "Flaky?"));
+            Started started = started(answers.ask(caller, conversation, "Flaky?", DataClass.PUBLIC));
             assertThat(writing.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
             long first = leaseEnd(idOf(started));
 
@@ -268,7 +269,7 @@ class LeaseRenewalsTest {
         };
         GeneratingAnswers answers = new GeneratingAnswers(renewalsFailFirst(0, renewals), stub(deaf), 4, Duration.ZERO, RENEWAL);
         try {
-            started(answers.ask(caller, conversation, "Stop?"));
+            started(answers.ask(caller, conversation, "Stop?", DataClass.PUBLIC));
             assertThat(writing.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
             Thread.sleep(500);
             assertThat(renewals.get()).isPositive();

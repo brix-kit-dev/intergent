@@ -13,6 +13,7 @@ import aie.core.gateway.api.Gateway.Request;
 import aie.core.gateway.api.Gateway.Result;
 import aie.core.gateway.api.Gateway.Role;
 import aie.core.gateway.api.Gateway.Turn;
+import aie.core.trust.api.DataClass;
 import aie.modules.conversation.api.Answers;
 import java.io.IOException;
 import java.time.Duration;
@@ -64,7 +65,7 @@ class GatewayInTransactionTest {
     }
 
     private Result ask() {
-        return gateway.answer(new Request(Answers.TASK, List.of(new Turn(Role.USER, "Hello")), () -> false), pieces::add);
+        return gateway.answer(new Request(Answers.TASK, List.of(new Turn(Role.USER, "Hello")), () -> false, DataClass.PUBLIC), pieces::add);
     }
 
     @Test

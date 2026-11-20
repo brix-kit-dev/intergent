@@ -12,6 +12,7 @@ import aie.core.tenancy.api.ApiKeyLookup.Owner;
 import aie.core.tenancy.internal.DatabaseEndUsers;
 import aie.core.tenancy.internal.DatabaseProvisioning;
 import aie.core.trust.api.CheckMode;
+import aie.core.trust.api.DataClass;
 import aie.http.EventStreamProbe;
 import aie.modules.conversation.api.Answers;
 import aie.modules.conversation.api.Answers.Start.Started;
@@ -78,7 +79,7 @@ class EventStreamDatabaseTest {
     }
 
     private static Started ask(String text) {
-        return (Started) answers.ask(caller, conversation, text);
+        return (Started) answers.ask(caller, conversation, text, DataClass.PUBLIC);
     }
 
     /** Each event's id and type, from the SSE text. */
@@ -111,7 +112,7 @@ class EventStreamDatabaseTest {
         Messages ringing = new DatabaseMessages(pool, signals);
         try (GeneratingAnswers ringingAnswers = new GeneratingAnswers(ringing, new RoutingGateway(Map.of(FakeModel.MODEL, new FakeModel()),
                 Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), Duration.ofSeconds(30), CheckMode.SENTENCE, TestApi.prompts(List.of(FakeModel.MODEL)))), pool::insideTx))) {
-            Started started = (Started) ringingAnswers.ask(caller, conversation, "[fake pieces=3 delay=200ms] Quick");
+            Started started = (Started) ringingAnswers.ask(caller, conversation, "[fake pieces=3 delay=200ms] Quick", DataClass.PUBLIC);
 
             long start = System.nanoTime();
             String sent = EventStreamProbe.send(ringing, signals, Duration.ofSeconds(10), caller, conversation,
@@ -146,7 +147,7 @@ class EventStreamDatabaseTest {
     void aStreamEndsTheAnswerOfAWriterThatHasGone() throws SQLException {
         String alone = new DatabaseConversations(pool).start(caller, new DatabaseEndUsers(pool).resolve(caller, "user-1"), null)
                 .conversationId();
-        String answer = messages.ask(caller, alone, "Anyone there?").orElseThrow().answer().messageId();
+        String answer = messages.ask(caller, alone, "Anyone there?", DataClass.PUBLIC).orElseThrow().answer().messageId();
         assertThat(messages.addDelta(caller, alone, answer, "Hal")).isEqualTo(new Messages.Written.Added(2));
         TestDatabase.asAdmin(DATABASE, "UPDATE engine.conversation_answer_leases SET expires_at = now() - interval '1 second'"
                 + " WHERE message_id = '" + answer + "'");

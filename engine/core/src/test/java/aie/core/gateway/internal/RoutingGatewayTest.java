@@ -13,6 +13,7 @@ import aie.core.gateway.api.Gateway.Role;
 import aie.core.gateway.api.Gateway.Turn;
 import aie.core.gateway.api.Gateway.Usage;
 import aie.core.trust.api.CheckMode;
+import aie.core.trust.api.DataClass;
 import aie.ports.ModelPort;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -70,7 +71,7 @@ class RoutingGatewayTest {
     }
 
     private static Request ask(String task, String said) {
-        return new Request(task, List.of(new Turn(Role.USER, said)), NEVER);
+        return new Request(task, List.of(new Turn(Role.USER, said)), NEVER, DataClass.PUBLIC);
     }
 
     private Result answer(Gateway gateway, Request request) {
@@ -121,7 +122,7 @@ class RoutingGatewayTest {
         AtomicBoolean cancel = new AtomicBoolean();
 
         answer(gateway, new Request("chat", List.of(
-                new Turn(Role.USER, "Hi"), new Turn(Role.ASSISTANT, "Hello"), new Turn(Role.USER, "Bye")), cancel::get));
+                new Turn(Role.USER, "Hi"), new Turn(Role.ASSISTANT, "Hello"), new Turn(Role.USER, "Bye")), cancel::get, DataClass.PUBLIC));
 
         ModelPort.Request call = calls.getFirst();
         assertThat(call.instructions()).isEqualTo("Answer the test.");
@@ -173,13 +174,14 @@ class RoutingGatewayTest {
         Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), noting, OUTSIDE);
         Turn hello = new Turn(Role.USER, "Hello");
         List<Request> wrong = List.of(
-                new Request("chat", List.of(), NEVER),
-                new Request("chat", null, NEVER),
-                new Request("chat", List.of(hello, new Turn(Role.ASSISTANT, "Hi")), NEVER),
-                new Request("chat", List.of(new Turn(Role.USER, null)), NEVER),
-                new Request("chat", List.of(new Turn(null, "Hello")), NEVER),
-                new Request("chat", Arrays.asList(null, hello), NEVER),
-                new Request("chat", List.of(hello), null));
+                new Request("chat", List.of(), NEVER, DataClass.PUBLIC),
+                new Request("chat", null, NEVER, DataClass.PUBLIC),
+                new Request("chat", List.of(hello, new Turn(Role.ASSISTANT, "Hi")), NEVER, DataClass.PUBLIC),
+                new Request("chat", List.of(new Turn(Role.USER, null)), NEVER, DataClass.PUBLIC),
+                new Request("chat", List.of(new Turn(null, "Hello")), NEVER, DataClass.PUBLIC),
+                new Request("chat", Arrays.asList(null, hello), NEVER, DataClass.PUBLIC),
+                new Request("chat", List.of(hello), null, DataClass.PUBLIC),
+                new Request("chat", List.of(hello), NEVER, null));
 
         for (Request request : wrong) {
             assertThatThrownBy(() -> answer(gateway, request)).as(request.toString()).isInstanceOf(IllegalArgumentException.class);

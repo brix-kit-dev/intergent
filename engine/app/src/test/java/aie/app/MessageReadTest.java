@@ -3,6 +3,7 @@ package aie.app;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import aie.app.TestApi.StandInAnswers.Outcome;
+import aie.core.trust.api.DataClass;
 import aie.http.api.model.Message;
 import aie.http.api.model.Problem;
 import aie.modules.conversation.api.Answers;
@@ -69,7 +70,7 @@ class MessageReadTest {
     /** An answer in conv_1, made the way the outcome says, and its question. */
     private static Messages.Asked ask(Outcome outcome) {
         ANSWERS.outcome = outcome;
-        return ((Answers.Start.Started) ANSWERS.ask(TestApi.OWNER, "conv_1", "Hi")).asked();
+        return ((Answers.Start.Started) ANSWERS.ask(TestApi.OWNER, "conv_1", "Hi", DataClass.PUBLIC)).asked();
     }
 
     /** An answer still being written in a conversation of this browser end user: its conversation, then its ID. */
@@ -77,7 +78,7 @@ class MessageReadTest {
         String conversation = CONVERSATIONS.start(TestApi.OWNER, endUserId, null).conversationId();
         ANSWERS.outcome = Outcome.NEVER_ENDS;
         return new String[] {conversation,
-                ((Answers.Start.Started) ANSWERS.ask(TestApi.OWNER, conversation, "Hi")).asked().answer().messageId()};
+                ((Answers.Start.Started) ANSWERS.ask(TestApi.OWNER, conversation, "Hi", DataClass.PUBLIC)).asked().answer().messageId()};
     }
 
     /** GET of the message in conv_1, with the test's server key and any further headers, in pairs. */

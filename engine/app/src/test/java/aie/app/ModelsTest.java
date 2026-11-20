@@ -38,7 +38,7 @@ class ModelsTest {
         List<String> pieces = new ArrayList<>();
 
         Result result = Models.gateway(RegionPacks.read("jp"), () -> false).answer(
-                new Request(Answers.TASK, List.of(new Turn(Role.USER, "Hello")), () -> false), pieces::add);
+                new Request(Answers.TASK, List.of(new Turn(Role.USER, "Hello")), () -> false, DataClass.PUBLIC), pieces::add);
 
         assertThat(pieces).hasSize(8).startsWith("Piece 1 of 8. ").endsWith("Piece 8 of 8. ");
         assertThat(result).isEqualTo(new Completed(new Usage(5, 8 * "Piece 1 of 8. ".length())));

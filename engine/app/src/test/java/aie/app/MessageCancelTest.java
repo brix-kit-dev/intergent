@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import aie.app.TestApi.StandInAnswers.Cancelling;
 import aie.app.TestApi.StandInAnswers.Outcome;
+import aie.core.trust.api.DataClass;
 import aie.http.api.model.Message;
 import aie.http.api.model.Problem;
 import aie.modules.conversation.api.Answers;
@@ -71,7 +72,7 @@ class MessageCancelTest {
     /** An answer in conv_1, made the way the outcome says. */
     private static Messages.Asked ask(Outcome outcome) {
         ANSWERS.outcome = outcome;
-        return ((Answers.Start.Started) ANSWERS.ask(TestApi.OWNER, "conv_1", "Hi")).asked();
+        return ((Answers.Start.Started) ANSWERS.ask(TestApi.OWNER, "conv_1", "Hi", DataClass.PUBLIC)).asked();
     }
 
     /** An answer in conv_1 that is still being written, with "Hel" so far. */
@@ -264,7 +265,7 @@ class MessageCancelTest {
         String conversation = CONVERSATIONS.start(TestApi.OWNER, endUserId, null).conversationId();
         ANSWERS.outcome = Outcome.NEVER_ENDS;
         return new String[] {conversation,
-                ((Answers.Start.Started) ANSWERS.ask(TestApi.OWNER, conversation, "Hi")).asked().answer().messageId()};
+                ((Answers.Start.Started) ANSWERS.ask(TestApi.OWNER, conversation, "Hi", DataClass.PUBLIC)).asked().answer().messageId()};
     }
 
     /** A browser stops its own end user's answer (M2-12-3), as a key does. */

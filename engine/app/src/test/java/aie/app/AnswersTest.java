@@ -16,6 +16,7 @@ import aie.core.tenancy.api.Provisioning;
 import aie.core.tenancy.internal.DatabaseEndUsers;
 import aie.core.tenancy.internal.DatabaseProvisioning;
 import aie.core.trust.api.CheckMode;
+import aie.core.trust.api.DataClass;
 import aie.modules.conversation.api.Answers;
 import aie.modules.conversation.api.Answers.Start;
 import aie.modules.conversation.api.Answers.Start.Started;
@@ -200,7 +201,7 @@ class AnswersTest {
     void anAnswerIsWrittenPieceByPieceAndCompleted() throws Exception {
         String question = "[fake pieces=3 delay=1ms] Hello";
         try (GeneratingAnswers answers = new GeneratingAnswers(messages, fake(Duration.ofSeconds(10)))) {
-            Started started = started(answers.ask(caller, conversation, question));
+            Started started = started(answers.ask(caller, conversation, question, DataClass.PUBLIC));
             assertThat(started.asked().question().text()).isEqualTo(question);
             awaitEnd(started);
 
@@ -215,7 +216,7 @@ class AnswersTest {
 
     @Test
     void theModelIsShownTheHistoryEndingWithTheQuestion() throws Exception {
-        Asked earlier = messages.ask(caller, conversation, "Hi").orElseThrow();
+        Asked earlier = messages.ask(caller, conversation, "Hi", DataClass.PUBLIC).orElseThrow();
         messages.addDelta(caller, conversation, earlier.answer().messageId(), "Hello!");
         messages.complete(caller, conversation, earlier.answer().messageId(), new Usage(1, 1));
         List<List<ModelPort.Turn>> shown = new CopyOnWriteArrayList<>();
@@ -226,11 +227,33 @@ class AnswersTest {
         };
 
         try (GeneratingAnswers answers = new GeneratingAnswers(messages, stub(model))) {
-            awaitEnd(started(answers.ask(caller, conversation, "How are you?")));
+            awaitEnd(started(answers.ask(caller, conversation, "How are you?", DataClass.PUBLIC)));
         }
 
         assertThat(shown).singleElement().isEqualTo(List.of(new ModelPort.Turn(ModelPort.Role.USER, "Hi"),
                 new ModelPort.Turn(ModelPort.Role.ASSISTANT, "Hello!"), new ModelPort.Turn(ModelPort.Role.USER, "How are you?")));
+    }
+
+    /**
+     * The gateway is told the class of each call (M3-3-1): its floor, or the conversation's watermark when that is higher,
+     * since the model is shown what the conversation sent before.
+     */
+    @Test
+    void theGatewayIsToldTheClassOfEachCall() throws Exception {
+        List<DataClass> told = new CopyOnWriteArrayList<>();
+        Gateway real = fake(Duration.ofSeconds(10));
+        Gateway telling = (request, output) -> {
+            told.add(request.dataClass());
+            return real.answer(request, output);
+        };
+
+        try (GeneratingAnswers answers = new GeneratingAnswers(messages, telling)) {
+            for (DataClass floor : List.of(DataClass.INTERNAL, DataClass.SENSITIVE, DataClass.PUBLIC)) {
+                awaitEnd(started(answers.ask(caller, conversation, "[fake pieces=1 delay=1ms] Hi", floor)));
+            }
+        }
+
+        assertThat(told).containsExactly(DataClass.INTERNAL, DataClass.SENSITIVE, DataClass.SENSITIVE);
     }
 
     @Test
@@ -242,7 +265,7 @@ class AnswersTest {
             return new ModelPort.Completed(new ModelPort.Usage(2, 2));
         };
         try (GeneratingAnswers answers = new GeneratingAnswers(messages, stub(model))) {
-            Started started = started(answers.ask(caller, conversation, "Letters?"));
+            Started started = started(answers.ask(caller, conversation, "Letters?", DataClass.PUBLIC));
             awaitEnd(started);
 
             assertThat(answerOf(started).text()).isEqualTo("ab");
@@ -254,7 +277,7 @@ class AnswersTest {
     @Test
     void aModelThatFailsPartwayEndsTheAnswerAsFailed() throws Exception {
         try (GeneratingAnswers answers = new GeneratingAnswers(messages, fake(Duration.ofSeconds(10)))) {
-            Started started = started(answers.ask(caller, conversation, "[fake pieces=5 fail-after=2 delay=1ms] Go"));
+            Started started = started(answers.ask(caller, conversation, "[fake pieces=5 fail-after=2 delay=1ms] Go", DataClass.PUBLIC));
             awaitEnd(started);
 
             Message answer = answerOf(started);
@@ -269,7 +292,7 @@ class AnswersTest {
     @Test
     void aModelThatFailsBeforeItsFirstPieceLeavesAFailedEmptyAnswer() throws Exception {
         try (GeneratingAnswers answers = new GeneratingAnswers(messages, fake(Duration.ofSeconds(10)))) {
-            Started started = started(answers.ask(caller, conversation, "[fake colour=red] Go"));
+            Started started = started(answers.ask(caller, conversation, "[fake colour=red] Go", DataClass.PUBLIC));
             awaitEnd(started);
 
             Message answer = answerOf(started);
@@ -283,7 +306,7 @@ class AnswersTest {
     @Test
     void aModelThatRunsOutOfTimeEndsTheAnswerAsFailed() throws Exception {
         try (GeneratingAnswers answers = new GeneratingAnswers(messages, fake(Duration.ofSeconds(1)))) {
-            Started started = started(answers.ask(caller, conversation, "[fake hang-after=1 delay=1ms] Wait"));
+            Started started = started(answers.ask(caller, conversation, "[fake hang-after=1 delay=1ms] Wait", DataClass.PUBLIC));
             awaitEnd(started);
 
             Message answer = answerOf(started);
@@ -306,7 +329,7 @@ class AnswersTest {
             return new ModelPort.Completed(new ModelPort.Usage(1, 5));
         };
         try (GeneratingAnswers answers = new GeneratingAnswers(failingOnDelta(2, deltas), stub(model))) {
-            Started started = started(answers.ask(caller, conversation, "Fragile?"));
+            Started started = started(answers.ask(caller, conversation, "Fragile?", DataClass.PUBLIC));
             awaitEnd(started);
 
             Message answer = answerOf(started);
@@ -381,7 +404,7 @@ class AnswersTest {
     void theGatewaysWarningCarriesTheIdsOfTheRequestThatAsked() throws Exception {
         Listening logs = listen();
         try (GeneratingAnswers answers = new GeneratingAnswers(messages, fake(Duration.ofSeconds(10)))) {
-            Started started = askedBy("req_asking", TRACE, () -> answers.ask(caller, conversation, "[fake pieces=5 fail-after=2 delay=1ms] Go"));
+            Started started = askedBy("req_asking", TRACE, () -> answers.ask(caller, conversation, "[fake pieces=5 fail-after=2 delay=1ms] Go", DataClass.PUBLIC));
             awaitEnd(started);
 
             assertThat(logs.saying("The model fake failed the task")).singleElement().satisfies(warning -> {
@@ -405,7 +428,7 @@ class AnswersTest {
         };
         Listening logs = listen();
         try (GeneratingAnswers answers = new GeneratingAnswers(failingOnDelta(2, new AtomicInteger()), stub(model))) {
-            Started started = askedBy("req_fragile", TRACE, () -> answers.ask(caller, conversation, "Fragile?"));
+            Started started = askedBy("req_fragile", TRACE, () -> answers.ask(caller, conversation, "Fragile?", DataClass.PUBLIC));
             awaitEnd(started);
 
             assertThat(logs.saying("Answer " + started.asked().answer().messageId() + " went wrong before its end"))
@@ -425,9 +448,9 @@ class AnswersTest {
         Listening logs = listen();
         try (GeneratingAnswers answers = new GeneratingAnswers(messages, fake(Duration.ofSeconds(10)))) {
             Started first = askedBy("req_first", TRACE,
-                    () -> answers.ask(caller, conversation, "[fake pieces=4 fail-after=3 delay=50ms] One"));
+                    () -> answers.ask(caller, conversation, "[fake pieces=4 fail-after=3 delay=50ms] One", DataClass.PUBLIC));
             Started second = askedBy("req_second", OTHER_TRACE,
-                    () -> answers.ask(caller, other, "[fake pieces=4 fail-after=3 delay=50ms] Two"));
+                    () -> answers.ask(caller, other, "[fake pieces=4 fail-after=3 delay=50ms] Two", DataClass.PUBLIC));
             awaitEnd(first);
             awaitEnd(second);
 
@@ -445,7 +468,7 @@ class AnswersTest {
         Listening logs = listen();
         try (GeneratingAnswers answers = new GeneratingAnswers(messages, fake(Duration.ofSeconds(10)))) {
             MDC.clear();
-            Started started = started(answers.ask(caller, conversation, "[fake pieces=5 fail-after=2 delay=1ms] Go"));
+            Started started = started(answers.ask(caller, conversation, "[fake pieces=5 fail-after=2 delay=1ms] Go", DataClass.PUBLIC));
             awaitEnd(started);
 
             assertThat(logs.saying("The model fake failed the task")).singleElement()
@@ -465,7 +488,7 @@ class AnswersTest {
             return new ModelPort.Completed(new ModelPort.Usage(1, 3));
         };
         try (GeneratingAnswers answers = new GeneratingAnswers(messages, stub(model))) {
-            Started started = started(answers.ask(caller, conversation, "NUL?"));
+            Started started = started(answers.ask(caller, conversation, "NUL?", DataClass.PUBLIC));
             awaitEnd(started);
 
             Message answer = answerOf(started);
@@ -491,7 +514,7 @@ class AnswersTest {
             return new ModelPort.Cancelled(new ModelPort.Usage(1, pieces));
         };
         try (GeneratingAnswers answers = new GeneratingAnswers(messages, stub(endless))) {
-            Started started = started(answers.ask(caller, conversation, "Endless?"));
+            Started started = started(answers.ask(caller, conversation, "Endless?", DataClass.PUBLIC));
             assertThat(firstPiece.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
 
             String answer = started.asked().answer().messageId();
@@ -508,16 +531,16 @@ class AnswersTest {
     void anInstanceGeneratesAtMostItsLimitAtOnce() throws Exception {
         CountDownLatch release = new CountDownLatch(1);
         try (GeneratingAnswers answers = new GeneratingAnswers(messages, stub(waitingFor(release)), 2, Duration.ofSeconds(5))) {
-            Started first = started(answers.ask(caller, conversation, "One"));
-            Started second = started(answers.ask(caller, conversation, "Two"));
+            Started first = started(answers.ask(caller, conversation, "One", DataClass.PUBLIC));
+            Started second = started(answers.ask(caller, conversation, "Two", DataClass.PUBLIC));
 
-            assertThat(answers.ask(caller, conversation, "Three")).isEqualTo(new Start.Busy());
+            assertThat(answers.ask(caller, conversation, "Three", DataClass.PUBLIC)).isEqualTo(new Start.Busy());
             assertThat(rows()).containsExactly("user completed", "assistant in_progress", "user completed", "assistant in_progress");
 
             release.countDown();
             awaitEnd(first);
             awaitEnd(second);
-            Started fourth = started(answers.ask(caller, conversation, "Four"));
+            Started fourth = started(answers.ask(caller, conversation, "Four", DataClass.PUBLIC));
             awaitEnd(fourth);
             assertThat(answerOf(fourth).status()).isEqualTo(Status.COMPLETED);
         }
@@ -529,10 +552,10 @@ class AnswersTest {
         try (GeneratingAnswers answers = new GeneratingAnswers(messages, stub(waitingFor(release)))) {
             List<Started> running = new ArrayList<>();
             for (int i = 1; i <= 64; i++) {
-                running.add(started(answers.ask(caller, conversation, "Ask " + i)));
+                running.add(started(answers.ask(caller, conversation, "Ask " + i, DataClass.PUBLIC)));
             }
 
-            assertThat(answers.ask(caller, conversation, "One too many")).isEqualTo(new Start.Busy());
+            assertThat(answers.ask(caller, conversation, "One too many", DataClass.PUBLIC)).isEqualTo(new Start.Busy());
 
             release.countDown();
             for (Started started : running) {
@@ -545,12 +568,12 @@ class AnswersTest {
     void anAskThatStoresNothingKeepsNoSlot() throws Exception {
         Owner otherTenant = new Owner("key_unused", provisioning.createTenant("jp1", null), caller.applicationId());
         try (GeneratingAnswers answers = new GeneratingAnswers(messages, fake(Duration.ofSeconds(10)), 1, Duration.ofSeconds(5))) {
-            assertThat(answers.ask(caller, "conv_00000000000000000000000000", "Hello?")).isEqualTo(new Start.NotFound());
-            assertThat(answers.ask(otherTenant, conversation, "Hello?")).isEqualTo(new Start.NotFound());
-            assertThatThrownBy(() -> answers.ask(caller, conversation, "")).isInstanceOf(IllegalArgumentException.class);
+            assertThat(answers.ask(caller, "conv_00000000000000000000000000", "Hello?", DataClass.PUBLIC)).isEqualTo(new Start.NotFound());
+            assertThat(answers.ask(otherTenant, conversation, "Hello?", DataClass.PUBLIC)).isEqualTo(new Start.NotFound());
+            assertThatThrownBy(() -> answers.ask(caller, conversation, "", DataClass.PUBLIC)).isInstanceOf(IllegalArgumentException.class);
             assertThat(rows()).isEmpty();
 
-            Started started = started(answers.ask(caller, conversation, "[fake pieces=1 delay=1ms] Hello?"));
+            Started started = started(answers.ask(caller, conversation, "[fake pieces=1 delay=1ms] Hello?", DataClass.PUBLIC));
             awaitEnd(started);
             assertThat(answerOf(started).status()).isEqualTo(Status.COMPLETED);
         }
@@ -559,7 +582,7 @@ class AnswersTest {
     @Test
     void closingLetsTheAnswersUnderWayFinish() throws Exception {
         GeneratingAnswers answers = new GeneratingAnswers(messages, fake(Duration.ofSeconds(10)), 4, Duration.ofSeconds(10));
-        Started started = started(answers.ask(caller, conversation, "[fake pieces=3 delay=200ms] Slowly"));
+        Started started = started(answers.ask(caller, conversation, "[fake pieces=3 delay=200ms] Slowly", DataClass.PUBLIC));
 
         answers.close();
 
@@ -574,13 +597,13 @@ class AnswersTest {
     void anAskWhileClosingIsRefused() throws Exception {
         CountDownLatch release = new CountDownLatch(1);
         GeneratingAnswers answers = new GeneratingAnswers(messages, stub(waitingFor(release)), 4, Duration.ofSeconds(10));
-        Started first = started(answers.ask(caller, conversation, "First"));
+        Started first = started(answers.ask(caller, conversation, "First", DataClass.PUBLIC));
         Thread closer = Thread.ofPlatform().start(answers::close);
         while (closer.getState() != Thread.State.TIMED_WAITING) {
             Thread.sleep(1);
         }
 
-        assertThat(answers.ask(caller, conversation, "Second")).isEqualTo(new Start.Busy());
+        assertThat(answers.ask(caller, conversation, "Second", DataClass.PUBLIC)).isEqualTo(new Start.Busy());
 
         release.countDown();
         closer.join(TimeUnit.SECONDS.toMillis(WAIT_SECONDS));
@@ -592,7 +615,7 @@ class AnswersTest {
     @Test
     void closingStopsTheAnswersThatOutlastTheDrain() throws Exception {
         GeneratingAnswers answers = new GeneratingAnswers(messages, fake(Duration.ofSeconds(60)), 4, Duration.ofMillis(300));
-        Started started = started(answers.ask(caller, conversation, "[fake hang-after=1 delay=1ms] Forever"));
+        Started started = started(answers.ask(caller, conversation, "[fake hang-after=1 delay=1ms] Forever", DataClass.PUBLIC));
         waitForEvents(started, 2);
 
         long start = System.nanoTime();
@@ -617,7 +640,7 @@ class AnswersTest {
             return new ModelPort.Cancelled(new ModelPort.Usage(1, 1));
         };
         GeneratingAnswers answers = new GeneratingAnswers(messages, stub(hanging));
-        Started started = started(answers.ask(caller, conversation, "Hang?"));
+        Started started = started(answers.ask(caller, conversation, "Hang?", DataClass.PUBLIC));
         waitForEvents(started, 2);
 
         long start = System.nanoTime();
@@ -641,7 +664,7 @@ class AnswersTest {
             return new ModelPort.Failed("stopped in the middle", 1, new ModelPort.Usage(1, 1));
         };
         GeneratingAnswers answers = new GeneratingAnswers(messages, stub(failsWhenStopped), 4, Duration.ofMillis(100));
-        Started started = started(answers.ask(caller, conversation, "Halfway?"));
+        Started started = started(answers.ask(caller, conversation, "Halfway?", DataClass.PUBLIC));
         assertThat(writing.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
 
         answers.close();
@@ -665,7 +688,7 @@ class AnswersTest {
             return new ModelPort.Completed(new ModelPort.Usage(1, 2));
         };
         GeneratingAnswers answers = new GeneratingAnswers(messages, stub(stubborn), 4, Duration.ofMillis(100));
-        Started started = started(answers.ask(caller, conversation, "Stubborn?"));
+        Started started = started(answers.ask(caller, conversation, "Stubborn?", DataClass.PUBLIC));
         assertThat(writing.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
 
         answers.close();
@@ -681,7 +704,7 @@ class AnswersTest {
         GeneratingAnswers answers = new GeneratingAnswers(messages, fake(Duration.ofSeconds(10)));
         answers.close();
 
-        assertThat(answers.ask(caller, conversation, "Anyone?")).isEqualTo(new Start.Busy());
+        assertThat(answers.ask(caller, conversation, "Anyone?", DataClass.PUBLIC)).isEqualTo(new Start.Busy());
         assertThat(rows()).isEmpty();
         answers.close();
     }

@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 import aie.app.TestApi.StandInAnswers.Outcome;
+import aie.core.trust.api.DataClass;
 import aie.http.api.StreamsApi;
 import aie.http.api.model.Problem;
 import aie.modules.conversation.api.Answers;
@@ -67,7 +68,7 @@ class MessageEventsTest {
     /** An answer in conv_1, made the way the outcome says. */
     private static Messages.Asked ask(Outcome outcome) {
         ANSWERS.outcome = outcome;
-        return ((Answers.Start.Started) ANSWERS.ask(TestApi.OWNER, "conv_1", "Hi")).asked();
+        return ((Answers.Start.Started) ANSWERS.ask(TestApi.OWNER, "conv_1", "Hi", DataClass.PUBLIC)).asked();
     }
 
     private static HttpRequest.Builder request(String conversationId, String messageId, String... headers) {
@@ -313,7 +314,7 @@ class MessageEventsTest {
     private static String answerOf(String endUserId) {
         String conversation = CONVERSATIONS.start(TestApi.OWNER, endUserId, null).conversationId();
         ANSWERS.outcome = Outcome.COMPLETED;
-        return conversation + " " + ((Answers.Start.Started) ANSWERS.ask(TestApi.OWNER, conversation, "Hi")).asked().answer().messageId();
+        return conversation + " " + ((Answers.Start.Started) ANSWERS.ask(TestApi.OWNER, conversation, "Hi", DataClass.PUBLIC)).asked().answer().messageId();
     }
 
     /** A browser resumes its own end user's answer (M2-12-3), as a key does. */

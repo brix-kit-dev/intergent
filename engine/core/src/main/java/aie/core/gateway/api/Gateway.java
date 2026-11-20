@@ -1,5 +1,6 @@
 package aie.core.gateway.api;
 
+import aie.core.trust.api.DataClass;
 import java.util.List;
 
 /**
@@ -26,8 +27,9 @@ public interface Gateway {
      * @param task what the module needs, such as {@code customer_chat}; the route table decides which model answers
      * @param turns the conversation so far, oldest first, ending with the user's turn
      * @param cancellation asked often, at least between pieces, whether the caller wants the answer to stop
+     * @param dataClass the class of the call, which the chosen model has to take (blueprint 7.3, M3-3)
      */
-    record Request(String task, List<Turn> turns, Cancellation cancellation) {
+    record Request(String task, List<Turn> turns, Cancellation cancellation, DataClass dataClass) {
     }
 
     /** One turn of the conversation. */

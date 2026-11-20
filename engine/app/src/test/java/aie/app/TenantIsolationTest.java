@@ -72,8 +72,8 @@ class TenantIsolationTest {
                     VALUES ('conv_{tenant}', '{tenant}', 'app_{tenant}', 'eu_{tenant}')
                     """),
             Sample.refusingChanges("conversation_messages", """
-                    INSERT INTO conversation_messages (message_id, tenant_id, conversation_id, role, status)
-                    VALUES ('msg_{tenant}', '{tenant}', 'conv_{tenant}', 'assistant', 'in_progress')
+                    INSERT INTO conversation_messages (message_id, tenant_id, conversation_id, role, status, data_class)
+                    VALUES ('msg_{tenant}', '{tenant}', 'conv_{tenant}', 'assistant', 'in_progress', 'public')
                     """, "A message changes only through its events"),
             Sample.appendOnly("conversation_events", """
                     INSERT INTO conversation_events (tenant_id, message_id, type) VALUES ('{tenant}', 'msg_{tenant}', 'message.started')

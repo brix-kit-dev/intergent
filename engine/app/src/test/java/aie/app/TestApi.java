@@ -5,6 +5,7 @@ import aie.core.tenancy.api.ApiKeyLookup;
 import aie.core.tenancy.api.ApiKeyLookup.Owner;
 import aie.core.tenancy.api.ApiKeyManagement;
 import aie.core.tenancy.api.ApiKeyManagement.CreatedKey;
+import aie.core.tenancy.api.Applications;
 import aie.core.tenancy.api.EndUsers;
 import aie.core.tenancy.api.IdempotencyKeys;
 import aie.core.tenancy.api.LowerTenants;
@@ -12,6 +13,7 @@ import aie.core.tenancy.api.LowerTenants.Acting;
 import aie.core.tenancy.api.SessionTokens;
 import aie.core.tenancy.api.SiteKeyLookup;
 import aie.core.tenancy.internal.SignedSessionTokens;
+import aie.core.trust.api.DataClass;
 import aie.http.AnswerWait;
 import aie.http.StreamLimit;
 import aie.modules.conversation.api.Answers;
@@ -150,6 +152,14 @@ final class TestApi {
     static ConfigurableApplicationContext start(ApiKeyLookup keys, ApiKeyManagement management, EndUsers endUsers,
             Conversations conversations, StandInAnswers answers, IdempotencyKeys idempotency, StreamLimit streams,
             AnswerWait wait, String... args) {
+        return start(keys, management, endUsers, conversations, answers, idempotency, streams, wait,
+                new StandInApplications(), args);
+    }
+
+    /** With the applications too, such as one whose default data class a test sets (M3-3). */
+    static ConfigurableApplicationContext start(ApiKeyLookup keys, ApiKeyManagement management, EndUsers endUsers,
+            Conversations conversations, StandInAnswers answers, IdempotencyKeys idempotency, StreamLimit streams,
+            AnswerWait wait, Applications applications, String... args) {
         return ApiRole.serve(context -> {
             context.registerBean(StreamLimit.class, () -> streams);
             context.registerBean(ApiKeyLookup.class, () -> keys);
@@ -157,6 +167,7 @@ final class TestApi {
             context.registerBean(IdempotencyKeys.class, () -> idempotency);
             context.registerBean(LowerTenants.class, () -> LOWER_TENANTS);
             context.registerBean(EndUsers.class, () -> endUsers);
+            context.registerBean(Applications.class, () -> applications);
             context.registerBean(SiteKeyLookup.class, () -> SITE_KEYS);
             context.registerBean(SessionTokens.class, () -> SESSION_TOKENS);
             context.registerBean(Conversations.class, () -> conversations);
@@ -197,6 +208,19 @@ final class TestApi {
         public boolean revoke(Owner caller, String keyId) {
             calls.add(caller.keyId() + " of " + caller.tenantId() + "/" + caller.applicationId() + " revokes " + keyId);
             return revocable.remove(keyId);
+        }
+    }
+
+    /** Gives every application the default data class a test sets, public unless it does, and remembers every call. */
+    static final class StandInApplications implements Applications {
+
+        final List<String> calls = new CopyOnWriteArrayList<>();
+        volatile DataClass defaultClass = DataClass.PUBLIC;
+
+        @Override
+        public DataClass defaultDataClass(Owner caller) {
+            calls.add(caller.tenantId() + "/" + caller.applicationId() + " reads its default data class");
+            return defaultClass;
         }
     }
 
@@ -289,6 +313,8 @@ final class TestApi {
         static final Instant ENDED_AT = Instant.parse("2026-11-14T00:00:01Z");
 
         final List<String> calls = new CopyOnWriteArrayList<>();
+        /** The least data class of each ask, in the order of the asks (M3-3). */
+        final List<DataClass> floors = new CopyOnWriteArrayList<>();
         final Map<String, Messages.Message> answers = new ConcurrentHashMap<>();
         /** What was asked, which StandInMessages finds too, so that a test can name a user message. */
         final Map<String, Messages.Message> questions = new ConcurrentHashMap<>();
@@ -347,8 +373,9 @@ final class TestApi {
         }
 
         @Override
-        public Start ask(Owner caller, String conversationId, String text) {
+        public Start ask(Owner caller, String conversationId, String text, DataClass floor) {
             calls.add(caller.tenantId() + "/" + caller.applicationId() + " asks in " + conversationId + ": " + text);
+            floors.add(floor);
             Outcome now = outcome;
             if (now == Outcome.BUSY) {
                 return new Start.Busy();
@@ -381,7 +408,7 @@ final class TestApi {
                     log.add(event(started, 2, Messages.EventType.MESSAGE_DELTA, "Hel", null, null));
                 }
             }
-            return new Start.Started(new Messages.Asked(question, started), ended);
+            return new Start.Started(new Messages.Asked(question, started, floor), ended);
         }
 
         /** The delta, then the ending, into the log; then the answer as it ended. */
@@ -446,7 +473,7 @@ final class TestApi {
         }
 
         @Override
-        public Optional<Asked> ask(Owner caller, String conversationId, String text) {
+        public Optional<Asked> ask(Owner caller, String conversationId, String text, DataClass floor) {
             throw notNeeded();
         }
 

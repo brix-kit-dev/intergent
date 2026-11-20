@@ -1,6 +1,7 @@
 package aie.modules.conversation.api;
 
 import aie.core.tenancy.api.ApiKeyLookup.Owner;
+import aie.core.trust.api.DataClass;
 import aie.modules.conversation.api.Messages.Asked;
 import aie.modules.conversation.api.Messages.CancelRequest;
 import java.util.concurrent.CompletionStage;
@@ -24,9 +25,11 @@ public interface Answers {
      * conversation is out of reach, when this instance already generates as many answers as it may, or when it is
      * stopping.
      *
+     * @param floor the least data class of the call, the higher of the application's default and the class the caller
+     *     declared; {@link Messages#ask} raises it to the conversation's watermark (M3-3)
      * @throws IllegalArgumentException for text that {@link Messages#ask} refuses
      */
-    Start ask(Owner caller, String conversationId, String text);
+    Start ask(Owner caller, String conversationId, String text, DataClass floor);
 
     /**
      * Asks for an answer to be cancelled (blueprint 6.4): the request is kept with the answer, as

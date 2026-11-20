@@ -10,6 +10,7 @@ import aie.core.tenancy.api.EndUsers;
 import aie.core.tenancy.api.Provisioning;
 import aie.core.tenancy.internal.DatabaseEndUsers;
 import aie.core.tenancy.internal.DatabaseProvisioning;
+import aie.core.trust.api.DataClass;
 import aie.modules.conversation.api.Conversations;
 import aie.modules.conversation.api.EventSignals;
 import aie.modules.conversation.api.Messages;
@@ -160,7 +161,7 @@ class AnswerLeasesTest {
         Owner caller = newApplication();
         String conversation = newConversation(caller);
         String started = messages.startAssistantMessage(caller, conversation).orElseThrow().messageId();
-        Messages.Asked asked = messages.ask(caller, conversation, "Hello?").orElseThrow();
+        Messages.Asked asked = messages.ask(caller, conversation, "Hello?", DataClass.PUBLIC).orElseThrow();
 
         assertThat(leases()).containsExactlyInAnyOrder(started, asked.answer().messageId());
         assertThat(secondsLeft(started)).isBetween(25.0, 30.0);

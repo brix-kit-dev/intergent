@@ -91,6 +91,9 @@ public final class RoutingGateway implements Gateway {
         if (request.cancellation() == null) {
             throw new IllegalArgumentException("A request needs a cancellation, even one that never asks to stop");
         }
+        if (request.dataClass() == null) {
+            throw new IllegalArgumentException("A request needs its data class, which the model has to take");
+        }
         Route route = request.task() == null ? null : routes.get(request.task());
         if (route == null) {
             throw new IllegalArgumentException("No route answers the task " + request.task());

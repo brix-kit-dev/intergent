@@ -102,8 +102,9 @@ class MessagesTest {
     private static int addRow(Owner caller, String conversationId, String messageId, String values) {
         return database.inTenantTx(caller.tenantId(), tx -> tx.update("""
                 INSERT INTO conversation_messages
-                    (message_id, tenant_id, conversation_id, role, status, text, input_tokens, output_tokens, code, completed_at)
-                VALUES ('%s', '%s', '%s', %s)
+                    (message_id, tenant_id, conversation_id, role, status, text, input_tokens, output_tokens, code, completed_at,
+                    data_class)
+                VALUES ('%s', '%s', '%s', %s, 'public')
                 """.formatted(messageId, caller.tenantId(), conversationId, values)));
     }
 
@@ -175,8 +176,9 @@ class MessagesTest {
         Owner caller = newApplication();
         String conversation = newConversation(caller);
         String add = """
-                INSERT INTO conversation_messages (message_id, tenant_id, conversation_id, role, status, text, created_at, completed_at)
-                VALUES (?, ?, ?, 'user', 'completed', ?, now() - ?::interval, now())
+                INSERT INTO conversation_messages (message_id, tenant_id, conversation_id, role, status, text, created_at, completed_at,
+                    data_class)
+                VALUES (?, ?, ?, 'user', 'completed', ?, now() - ?::interval, now(), 'public')
                 """;
         database.inTenantTx(caller.tenantId(), tx -> tx.update(add, "msg_C", caller.tenantId(), conversation, "first", "0 hours"));
         database.inTenantTx(caller.tenantId(), tx -> tx.update(add, "msg_B", caller.tenantId(), conversation, "second", "1 hour"));

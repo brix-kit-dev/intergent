@@ -426,7 +426,8 @@ class EventLogTest {
 
         String bare = "msg_bare";
         database.inTenantTx(caller.tenantId(), tx -> tx.update("""
-                INSERT INTO conversation_messages (message_id, tenant_id, conversation_id, role, status) VALUES (?, ?, ?, 'assistant', 'in_progress')
+                INSERT INTO conversation_messages (message_id, tenant_id, conversation_id, role, status, data_class)
+                VALUES (?, ?, ?, 'assistant', 'in_progress', 'public')
                 """, bare, caller.tenantId(), conversation));
         assertRefused(() -> addRow(caller, bare, "message.delta", "too soon"), "conversation_events_started_first");
         assertThat(addRow(caller, bare, "message.started", null)).isOne();
@@ -465,7 +466,8 @@ class EventLogTest {
         String conversation = newConversation(caller);
         String bare = "msg_bare";
         database.inTenantTx(caller.tenantId(), tx -> tx.update("""
-                INSERT INTO conversation_messages (message_id, tenant_id, conversation_id, role, status) VALUES (?, ?, ?, 'assistant', 'in_progress')
+                INSERT INTO conversation_messages (message_id, tenant_id, conversation_id, role, status, data_class)
+                VALUES (?, ?, ?, 'assistant', 'in_progress', 'public')
                 """, bare, caller.tenantId(), conversation));
 
         assertRefused(() -> addRow(caller, bare, "message.started", "hello"), "conversation_events_text");

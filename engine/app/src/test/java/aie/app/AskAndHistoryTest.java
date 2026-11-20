@@ -11,6 +11,7 @@ import aie.core.tenancy.api.EndUsers;
 import aie.core.tenancy.api.Provisioning;
 import aie.core.tenancy.internal.DatabaseEndUsers;
 import aie.core.tenancy.internal.DatabaseProvisioning;
+import aie.core.trust.api.DataClass;
 import aie.modules.conversation.api.Conversations;
 import aie.modules.conversation.api.Messages;
 import aie.modules.conversation.api.Messages.Asked;
@@ -105,7 +106,7 @@ class AskAndHistoryTest {
     }
 
     private static Asked ask(Owner caller, String conversation, String question) {
-        return messages.ask(caller, conversation, question).orElseThrow();
+        return messages.ask(caller, conversation, question, DataClass.PUBLIC).orElseThrow();
     }
 
     /** Asks, gives the answer these deltas, and ends it as told; IN_PROGRESS leaves it going. */
@@ -276,9 +277,9 @@ class AskAndHistoryTest {
                 provisioning.createApplication(caller.tenantId(), "test", "internal"));
         Owner otherTenant = new Owner("key_unused", newApplication().tenantId(), caller.applicationId());
 
-        assertThat(messages.ask(caller, "conv_00000000000000000000000000", "Hello?")).isEmpty();
-        assertThat(messages.ask(otherApplication, conversation, "Hello?")).isEmpty();
-        assertThat(messages.ask(otherTenant, conversation, "Hello?")).isEmpty();
+        assertThat(messages.ask(caller, "conv_00000000000000000000000000", "Hello?", DataClass.PUBLIC)).isEmpty();
+        assertThat(messages.ask(otherApplication, conversation, "Hello?", DataClass.PUBLIC)).isEmpty();
+        assertThat(messages.ask(otherTenant, conversation, "Hello?", DataClass.PUBLIC)).isEmpty();
         assertThat(rows()).isEmpty();
         assertThat(TestDatabase.firstColumn(DATABASE, "SELECT count(*)::text FROM engine.conversation_events")).containsExactly("0");
     }
@@ -290,7 +291,7 @@ class AskAndHistoryTest {
         Owner caller = newApplication();
         String conversation = newConversation(caller);
 
-        assertThatThrownBy(() -> messages.ask(caller, conversation, text)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> messages.ask(caller, conversation, text, DataClass.PUBLIC)).isInstanceOf(IllegalArgumentException.class);
         assertThat(rows()).isEmpty();
     }
 
@@ -301,7 +302,7 @@ class AskAndHistoryTest {
         String conversation = newConversation(caller);
 
         for (String text : List.of("a".repeat(32001), ASTRAL.repeat(32001))) {
-            assertThatThrownBy(() -> messages.ask(caller, conversation, text))
+            assertThatThrownBy(() -> messages.ask(caller, conversation, text, DataClass.PUBLIC))
                     .isInstanceOf(IllegalArgumentException.class).hasMessage("A user message must have 1 to 32000 characters");
         }
         assertThat(rows()).isEmpty();
@@ -324,7 +325,7 @@ class AskAndHistoryTest {
                     FOR EACH ROW WHEN (NEW.type = 'message.started') EXECUTE FUNCTION engine.test_refuse_start();
                 """);
         try {
-            assertThatThrownBy(() -> messages.ask(caller, conversation, "Hello?"))
+            assertThatThrownBy(() -> messages.ask(caller, conversation, "Hello?", DataClass.PUBLIC))
                     .isInstanceOf(DatabaseException.class).hasStackTraceContaining("The test refuses message.started");
             assertThat(rows()).isEmpty();
         } finally {

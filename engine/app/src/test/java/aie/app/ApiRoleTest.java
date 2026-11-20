@@ -17,6 +17,7 @@ import aie.core.tenancy.api.SessionTokens.IdentityLevel;
 import aie.core.tenancy.api.SessionTokens.Session;
 import aie.core.tenancy.internal.DatabaseProvisioning;
 import aie.core.tenancy.internal.SignedSessionTokens;
+import aie.core.trust.api.DataClass;
 import aie.http.api.model.Conversation;
 import aie.http.api.model.CreatedApiKey;
 import aie.http.api.model.Message;
@@ -241,7 +242,7 @@ class ApiRoleTest {
         List<String> pieces = new ArrayList<>();
 
         Gateway.Result result = context.getBean(Gateway.class).answer(new Gateway.Request(
-                Answers.TASK, List.of(new Gateway.Turn(Gateway.Role.USER, "Hello")), () -> false), pieces::add);
+                Answers.TASK, List.of(new Gateway.Turn(Gateway.Role.USER, "Hello")), () -> false, DataClass.PUBLIC), pieces::add);
 
         assertThat(result).isInstanceOf(Gateway.Completed.class);
         assertThat(pieces).hasSize(8).startsWith("Piece 1 of 8. ");
@@ -255,7 +256,7 @@ class ApiRoleTest {
         List<String> pieces = new ArrayList<>();
 
         assertThatThrownBy(() -> pool.inTenantTx("ten_a", tx -> gateway.answer(new Gateway.Request(
-                        Answers.TASK, List.of(new Gateway.Turn(Gateway.Role.USER, "Hello")), () -> false), pieces::add)))
+                        Answers.TASK, List.of(new Gateway.Turn(Gateway.Role.USER, "Hello")), () -> false, DataClass.PUBLIC), pieces::add)))
                 .isInstanceOf(IllegalStateException.class).hasMessageContaining("(A-14)");
         assertThat(pieces).isEmpty();
     }
@@ -904,6 +905,43 @@ class ApiRoleTest {
                 + id + "' ORDER BY ordinal")).containsExactly("user completed", "assistant completed");
     }
 
+    /**
+     * Blueprint 7.3 on the real database (M3-3-1): a call starts at its application's default class, which the caller can
+     * raise but not lower, and the conversation keeps the highest class it has sent, so a later call without one keeps it
+     * too, a stream's as well. Both messages of each call keep its class.
+     */
+    @Test
+    void aConversationKeepsTheHighestClassItSent() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String key = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "internal")).key();
+        String id = JSON.readValue(startConversation(key, "class-1", "{\"external_user_id\":\"host-user-1\"}").body(),
+                Conversation.class).getId();
+
+        HttpResponse<String> plain = sendMessage(key, "class-2", id, "{\"text\":\"[fake pieces=1 delay=1ms] Hi\"}");
+        HttpResponse<String> lowered = sendMessage(key, "class-3", id,
+                "{\"text\":\"[fake pieces=1 delay=1ms] Hi\",\"data_class\":\"public\"}");
+        String afterLowering = watermark(id);
+        HttpResponse<String> raised = sendMessage(key, "class-4", id,
+                "{\"text\":\"[fake pieces=1 delay=1ms] Mine\",\"data_class\":\"sensitive\"}");
+        HttpResponse<String> streamed = HttpClient.newHttpClient().send(streamedWithKey(port, key, "class-5", id,
+                "{\"text\":\"[fake pieces=1 delay=1ms] Later\"}"), HttpResponse.BodyHandlers.ofString());
+
+        assertThat(List.of(plain, lowered, raised, streamed)).allSatisfy(response -> assertThat(response.statusCode()).isEqualTo(200));
+        assertThat(lines(eventsOf(streamed.body()), "event: ")).last().isEqualTo("event: message.completed");
+        assertThat(afterLowering).isEqualTo("internal");
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT role || ' ' || data_class FROM engine.conversation_messages"
+                + " WHERE conversation_id = '" + id + "' ORDER BY ordinal")).containsExactly(
+                "user internal", "assistant internal", "user internal", "assistant internal",
+                "user sensitive", "assistant sensitive", "user sensitive", "assistant sensitive");
+        assertThat(watermark(id)).isEqualTo("sensitive");
+    }
+
+    private static String watermark(String conversationId) throws SQLException {
+        return TestDatabase.firstColumn(DATABASE, "SELECT data_class_watermark FROM engine.conversation_conversations"
+                + " WHERE conversation_id = '" + conversationId + "'").getFirst();
+    }
+
     /** The role's messages ring the role's signals, which its stream waits on (M2-7-4). */
     @Test
     void theRolesMessagesRingTheRolesSignals() throws Exception {
@@ -916,7 +954,7 @@ class ApiRoleTest {
         Owner caller = new Owner("key_unused", tenant, application);
         aie.modules.conversation.api.Messages messages = context.getBean(aie.modules.conversation.api.Messages.class);
         aie.modules.conversation.api.EventSignals signals = context.getBean(aie.modules.conversation.api.EventSignals.class);
-        String answer = messages.ask(caller, id, "Hello?").orElseThrow().answer().messageId();
+        String answer = messages.ask(caller, id, "Hello?", DataClass.PUBLIC).orElseThrow().answer().messageId();
 
         java.util.concurrent.CompletableFuture<Void> signal = signals.next(answer);
         messages.addDelta(caller, id, answer, "Hi");
@@ -1234,7 +1272,7 @@ class ApiRoleTest {
                 Conversation.class).getId();
         Messages messages = new DatabaseMessages(database);
         Owner writer = new Owner("key_unused", tenant, application);
-        String answer = messages.ask(writer, id, "Anyone there?").orElseThrow().answer().messageId();
+        String answer = messages.ask(writer, id, "Anyone there?", DataClass.PUBLIC).orElseThrow().answer().messageId();
         assertThat(messages.addDelta(writer, id, answer, "Hal")).isEqualTo(new Messages.Written.Added(2));
         return new Unfinished(key, id, answer);
     }

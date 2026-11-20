@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import aie.app.TestApi.StandInAnswers.Outcome;
 import aie.core.tenancy.api.IdempotencyKeys;
+import aie.core.trust.api.DataClass;
 import aie.modules.conversation.api.Answers;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -169,7 +170,7 @@ class StreamedRetriesTest {
     void aResendIntoAnotherEndUsersConversationIsMissing() throws Exception {
         String path = messagesOf("eu_browser1");
         String conversation = path.split("/")[3];
-        String answer = ((Answers.Start.Started) ANSWERS.ask(TestApi.OWNER, conversation, "Hi")).asked().answer().messageId();
+        String answer = ((Answers.Start.Started) ANSWERS.ask(TestApi.OWNER, conversation, "Hi", DataClass.PUBLIC)).asked().answer().messageId();
         ANSWERS.calls.clear();
         KEYS.next = new IdempotencyKeys.Claim.Streamed(answer);
 
@@ -200,7 +201,7 @@ class StreamedRetriesTest {
     /** A retry asks nothing: it sends the kept answer's events again, from the first. */
     @Test
     void aRetrySendsTheKeptAnswerAgain() throws Exception {
-        String kept = ((Answers.Start.Started) ANSWERS.ask(TestApi.OWNER, "conv_1", "Hi")).asked().answer().messageId();
+        String kept = ((Answers.Start.Started) ANSWERS.ask(TestApi.OWNER, "conv_1", "Hi", DataClass.PUBLIC)).asked().answer().messageId();
         ANSWERS.calls.clear();
         KEYS.next = new IdempotencyKeys.Claim.Streamed(kept);
 
@@ -215,7 +216,7 @@ class StreamedRetriesTest {
     @Test
     void aRetryFollowsAnAnswerStillWritten() throws Exception {
         ANSWERS.outcome = Outcome.COMPLETES_SOON;
-        String kept = ((Answers.Start.Started) ANSWERS.ask(TestApi.OWNER, "conv_1", "Hi")).asked().answer().messageId();
+        String kept = ((Answers.Start.Started) ANSWERS.ask(TestApi.OWNER, "conv_1", "Hi", DataClass.PUBLIC)).asked().answer().messageId();
         KEYS.next = new IdempotencyKeys.Claim.Streamed(kept);
 
         assertThat(events(streamed())).isEqualTo(completed(kept));

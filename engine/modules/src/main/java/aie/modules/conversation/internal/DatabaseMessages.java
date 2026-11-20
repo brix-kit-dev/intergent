@@ -2,6 +2,7 @@ package aie.modules.conversation.internal;
 
 import aie.core.Ids;
 import aie.core.tenancy.api.ApiKeyLookup.Owner;
+import aie.core.trust.api.DataClass;
 import aie.modules.conversation.api.EventSignals;
 import aie.modules.conversation.api.Messages;
 import aie.ports.DatabaseException;
@@ -31,15 +32,15 @@ public final class DatabaseMessages implements Messages {
             completed_at
             """;
     private static final String ADD_USER_MESSAGE = """
-            INSERT INTO conversation_messages (message_id, tenant_id, conversation_id, role, status, text, completed_at)
-            SELECT ?, tenant_id, conversation_id, 'user', 'completed', ?, now()
+            INSERT INTO conversation_messages (message_id, tenant_id, conversation_id, role, status, text, completed_at, data_class)
+            SELECT ?, tenant_id, conversation_id, 'user', 'completed', ?, now(), data_class_watermark
             FROM conversation_conversations
             WHERE application_id = ? AND conversation_id = ?
             RETURNING %s
             """.formatted(RETURNED);
     private static final String START_ASSISTANT_MESSAGE = """
-            INSERT INTO conversation_messages (message_id, tenant_id, conversation_id, role, status)
-            SELECT ?, tenant_id, conversation_id, 'assistant', 'in_progress'
+            INSERT INTO conversation_messages (message_id, tenant_id, conversation_id, role, status, data_class)
+            SELECT ?, tenant_id, conversation_id, 'assistant', 'in_progress', data_class_watermark
             FROM conversation_conversations
             WHERE application_id = ? AND conversation_id = ?
             RETURNING %s
@@ -49,9 +50,14 @@ public final class DatabaseMessages implements Messages {
      * at once, and it leaves the row free for the key-share lock that each new message's foreign key takes.
      */
     private static final String TAKE_TURN = """
-            SELECT conversation_id FROM conversation_conversations
+            SELECT data_class_watermark FROM conversation_conversations
             WHERE application_id = ? AND conversation_id = ?
             FOR NO KEY UPDATE
+            """;
+    /** The watermark rises to the call's class before its messages are stored, which take it as their class. */
+    private static final String RAISE_WATERMARK = """
+            UPDATE conversation_conversations SET data_class_watermark = ?
+            WHERE application_id = ? AND conversation_id = ?
             """;
     private static final String ADD_STARTED = """
             INSERT INTO conversation_events (tenant_id, message_id, type) VALUES (?, ?, 'message.started')
@@ -228,16 +234,26 @@ public final class DatabaseMessages implements Messages {
      * conversation out of reach takes no lock, and nothing is stored.
      */
     @Override
-    public Optional<Asked> ask(Owner caller, String conversationId, String text) {
+    public Optional<Asked> ask(Owner caller, String conversationId, String text, DataClass floor) {
         userText(text);
+        if (floor == null) {
+            throw new IllegalArgumentException("An ask needs its least data class, the application's default at the least");
+        }
         return database.inTenantTx(caller.tenantId(), tx -> {
-            if (tx.query(TAKE_TURN, row -> row.string("conversation_id"), caller.applicationId(), conversationId).isEmpty()) {
+            List<String> watermark = tx.query(TAKE_TURN, row -> row.string("data_class_watermark"),
+                    caller.applicationId(), conversationId);
+            if (watermark.isEmpty()) {
                 return Optional.<Asked>empty();
+            }
+            DataClass held = DataClass.fromWireName(watermark.getFirst()).orElseThrow();
+            DataClass call = floor.compareTo(held) > 0 ? floor : held;
+            if (call != held) {
+                tx.update(RAISE_WATERMARK, call.wireName(), caller.applicationId(), conversationId);
             }
             Message question = tx.query(ADD_USER_MESSAGE, DatabaseMessages::message, Ids.next("msg"), text,
                     caller.applicationId(), conversationId).getFirst();
             Message answer = start(tx, caller, conversationId).getFirst();
-            return Optional.of(new Asked(question, answer));
+            return Optional.of(new Asked(question, answer, call));
         });
     }
 

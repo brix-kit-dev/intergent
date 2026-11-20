@@ -2,6 +2,7 @@ package aie.modules.conversation.internal;
 
 import aie.core.gateway.api.Gateway;
 import aie.core.tenancy.api.ApiKeyLookup.Owner;
+import aie.core.trust.api.DataClass;
 import aie.modules.conversation.api.Answers;
 import aie.modules.conversation.api.Messages;
 import aie.modules.conversation.api.Messages.Asked;
@@ -112,13 +113,13 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
      * answer stays in progress until a reader ends it.
      */
     @Override
-    public Start ask(Owner caller, String conversationId, String text) {
+    public Start ask(Owner caller, String conversationId, String text, DataClass floor) {
         if (closing.get() || !slots.tryAcquire()) {
             return new Start.Busy();
         }
         Asked asked;
         try {
-            Optional<Asked> stored = messages.ask(caller, conversationId, text);
+            Optional<Asked> stored = messages.ask(caller, conversationId, text, floor);
             if (stored.isEmpty()) {
                 slots.release();
                 return new Start.NotFound();
@@ -155,7 +156,7 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
     private void generate(Answer answer) {
         try {
             Gateway.Result result = gateway.answer(
-                    new Gateway.Request(TASK, turns(answer), answer::stopRequested), answer::write);
+                    new Gateway.Request(TASK, turns(answer), answer::stopRequested, answer.asked.dataClass()), answer::write);
             if (!answer.endedElsewhere) {
                 answer.end(result);
             }

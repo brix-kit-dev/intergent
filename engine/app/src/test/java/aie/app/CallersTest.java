@@ -2,6 +2,7 @@ package aie.app;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import aie.core.trust.api.DataClass;
 import aie.http.api.model.Problem;
 import aie.modules.conversation.api.Answers;
 import java.io.IOException;
@@ -251,7 +252,7 @@ class CallersTest {
     @MethodSource("conversationOperations")
     void anotherEndUsersConversationIsMissingToEveryBrowserOperation(Operation operation) throws Exception {
         String conversation = CONVERSATIONS.start(TestApi.OWNER, "eu_owner", null).conversationId();
-        String answer = ((Answers.Start.Started) ANSWERS.ask(TestApi.OWNER, conversation, "Hi")).asked().answer().messageId();
+        String answer = ((Answers.Start.Started) ANSWERS.ask(TestApi.OWNER, conversation, "Hi", DataClass.PUBLIC)).asked().answer().messageId();
         ANSWERS.calls.clear();
         String stranger = "Bearer " + TestApi.sessionToken("eu_stranger");
 

@@ -1,8 +1,10 @@
 package aie.http;
 
 import aie.core.tenancy.api.ApiKeyLookup.Owner;
+import aie.core.tenancy.api.Applications;
 import aie.core.tenancy.api.EndUsers;
 import aie.core.tenancy.api.SessionTokens;
+import aie.core.trust.api.DataClass;
 import aie.http.api.ConversationsApi;
 import aie.http.api.StreamsApi;
 import aie.http.api.model.Conversation;
@@ -83,6 +85,7 @@ class ConversationController implements ConversationsApi, StreamsApi {
     static final Duration CANCEL_WAIT = Duration.ofSeconds(5);
 
     private final EndUsers endUsers;
+    private final Applications applications;
     private final Conversations conversations;
     private final Answers answers;
     private final Messages messages;
@@ -95,10 +98,11 @@ class ConversationController implements ConversationsApi, StreamsApi {
      * The wait is the contract's 120 seconds unless a test registers a shorter one. The stream wakes on the signals the
      * role's messages ring. The streams open at once are as many as the role's limit, or 256 when none is registered.
      */
-    ConversationController(EndUsers endUsers, Conversations conversations, Answers answers, Messages messages,
-            EventSignals signals, ObjectProvider<AnswerWait> wait, ObjectProvider<StreamLimit> streamLimit,
+    ConversationController(EndUsers endUsers, Applications applications, Conversations conversations, Answers answers,
+            Messages messages, EventSignals signals, ObjectProvider<AnswerWait> wait, ObjectProvider<StreamLimit> streamLimit,
             HttpServletRequest request) {
         this.endUsers = endUsers;
+        this.applications = applications;
         this.conversations = conversations;
         this.answers = answers;
         this.messages = messages;
@@ -160,9 +164,9 @@ class ConversationController implements ConversationsApi, StreamsApi {
      * same answer's events again, from the first, without asking anything (M2-10-2). A stream takes one of the instance's
      * stream slots before anything is asked or sent again, and gives it back when it ends; with none free it is 429, and
      * nothing is stored (point 40). A browser speaks only in its own end user's conversations, so another end user's is
-     * missing, before anything is asked or sent again (M2-12-3). The locale is checked but not used yet: it is the
-     * language to answer in, which the prompts of M3 need. data_class is checked by its enum and waits for the trust layer
-     * of M3.
+     * missing, before anything is asked or sent again (M2-12-3). The locale is checked but not used yet. The call's data
+     * class starts at the application's default, and data_class can only raise it (blueprint 7.3, M3-3-1); the answer
+     * raises it further to the conversation's watermark, and both messages keep the result.
      */
     @Override
     public ResponseEntity<Message> createMessage(String conversationId, CreateMessageRequest body,
@@ -184,19 +188,33 @@ class ConversationController implements ConversationsApi, StreamsApi {
                 return null;
             });
         }
+        DataClass floor = floor(caller, body.getDataClass());
         if (streamed) {
-            return streams.stream(() -> switch (answers.ask(caller, conversation, text)) {
+            return streams.stream(() -> switch (answers.ask(caller, conversation, text, floor)) {
                 case Answers.Start.Started started -> streamed(caller, conversation, started);
                 case Answers.Start.Busy busy -> throw full();
                 case Answers.Start.NotFound missing -> throw new ResponseStatusException(HttpStatus.NOT_FOUND);
             });
         }
-        return switch (answers.ask(caller, conversation, text)) {
+        return switch (answers.ask(caller, conversation, text, floor)) {
             case Answers.Start.Started started -> ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON)
                     .body(answered(caller, conversation, started));
             case Answers.Start.Busy busy -> throw full();
             case Answers.Start.NotFound missing -> throw new ResponseStatusException(HttpStatus.NOT_FOUND);
         };
+    }
+
+    /**
+     * The least data class of a call (blueprint 7.3): the application's default, or the class the caller declared when
+     * that is higher, since a declared class can only raise it, as the contract says.
+     */
+    private DataClass floor(Owner caller, CreateMessageRequest.@Nullable DataClassEnum declared) {
+        DataClass least = applications.defaultDataClass(caller);
+        if (declared == null) {
+            return least;
+        }
+        DataClass named = DataClass.fromWireName(declared.getValue()).orElseThrow();
+        return named.compareTo(least) > 0 ? named : least;
     }
 
     /**
