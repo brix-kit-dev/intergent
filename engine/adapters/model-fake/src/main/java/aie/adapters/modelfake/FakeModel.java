@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * The model {@code fake} of blueprint 8.3. It answers in this process, so no data leaves it, and it answers the same way
@@ -19,7 +20,10 @@ import java.util.regex.Pattern;
  *   <li>{@code fail-after}: fail after that many pieces;
  *   <li>{@code hang-after}: stop after that many pieces until the answer is cancelled or out of time;
  *   <li>{@code echo=instructions}: answer with the instructions the gateway sent, as one piece, so that a test can see
- *       which prompt reached the model (M3-2).
+ *       which prompt reached the model (M3-2);
+ *   <li>{@code echo=turns}: answer with the turns the gateway sent, one per line as {@code user: ...} or
+ *       {@code assistant: ...}, as one piece, so that a test can see what the model was shown of the conversation, its
+ *       personal data masked (M3-4-2).
  * </ul>
  * It counts the turns as its input, not the instructions.
  * A bracket it cannot read fails the answer and says why.
@@ -59,9 +63,12 @@ public final class FakeModel implements ModelPort {
         } catch (IllegalArgumentException e) {
             return new Failed(e.getMessage(), 0, new Usage(input, 0));
         }
-        if (settings.echo()) {
-            output.text(request.instructions());
-            return new Completed(new Usage(input, characters(request.instructions())));
+        if (settings.echo() != Echo.NOTHING) {
+            String echoed = settings.echo() == Echo.INSTRUCTIONS ? request.instructions() : request.turns().stream()
+                    .map(turn -> turn.role().name().toLowerCase(Locale.ROOT) + ": " + turn.text())
+                    .collect(Collectors.joining("\n"));
+            output.text(echoed);
+            return new Completed(new Usage(input, characters(echoed)));
         }
         long deadline = System.nanoTime() + request.timeout().toNanos();
         long written = 0;
@@ -118,6 +125,9 @@ public final class FakeModel implements ModelPort {
 
     private enum Waited { DONE, CANCELLED, OUT_OF_TIME, INTERRUPTED }
 
+    /** What an answer echoes instead of its pieces. */
+    private enum Echo { NOTHING, INSTRUCTIONS, TURNS }
+
     /** Waits a while in short steps, so that a cancel or the deadline ends the wait soon after it comes. */
     private static Waited await(Duration wait, long deadline, Cancellation cancellation) {
         long start = System.nanoTime();
@@ -143,12 +153,12 @@ public final class FakeModel implements ModelPort {
     }
 
     /** What one bracket asks for. A count of -1 means it does not ask for that. */
-    private record Settings(int pieces, Duration delay, int failAfter, int hangAfter, boolean echo) {
+    private record Settings(int pieces, Duration delay, int failAfter, int hangAfter, Echo echo) {
 
         static Settings read(String said, Duration delay) {
             Matcher bracket = BRACKET.matcher(said);
             if (!bracket.find()) {
-                return new Settings(PIECES, delay, -1, -1, false);
+                return new Settings(PIECES, delay, -1, -1, Echo.NOTHING);
             }
             String inside = bracket.group(1) == null ? "" : bracket.group(1).trim();
             if (bracket.find()) {
@@ -157,7 +167,7 @@ public final class FakeModel implements ModelPort {
             int pieces = PIECES;
             int failAfter = -1;
             int hangAfter = -1;
-            boolean echo = false;
+            Echo echo = Echo.NOTHING;
             Duration wait = delay;
             for (String part : inside.split("\\s+")) {
                 if (part.isEmpty()) {
@@ -181,11 +191,12 @@ public final class FakeModel implements ModelPort {
             return new Settings(pieces, wait, failAfter, hangAfter, echo);
         }
 
-        private static boolean echo(String value) {
-            if (!value.equals("instructions")) {
-                throw new IllegalArgumentException("The fake model echoes instructions, not " + value);
-            }
-            return true;
+        private static Echo echo(String value) {
+            return switch (value) {
+                case "instructions" -> Echo.INSTRUCTIONS;
+                case "turns" -> Echo.TURNS;
+                default -> throw new IllegalArgumentException("The fake model echoes instructions or turns, not " + value);
+            };
         }
 
         private static int count(String value, int least, int most, String name) {

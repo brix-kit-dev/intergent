@@ -980,6 +980,28 @@ class ApiRoleTest {
                 + id + "' ORDER BY ordinal")).containsExactly("user completed", "assistant completed");
     }
 
+    /**
+     * M3-4-2 on the real database and the role's own gateway: a question with a telephone number and an email address is
+     * answered, the model is shown them masked, the database keeps them as said, and the conversation is personal.
+     */
+    @Test
+    void personalDataIsShownMaskedAndKeptAsSaid() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String key = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "public")).key();
+        String id = JSON.readValue(startConversation(key, "mask-1", "{\"external_user_id\":\"host-user-1\"}").body(),
+                Conversation.class).getId();
+        String said = "[fake echo=turns] 电话 138-0013-8000，邮箱 hanako@example.jp";
+
+        HttpResponse<String> sent = sendMessage(key, "mask-2", id, "{\"text\":\"" + said + "\"}");
+
+        assertThat(sent.statusCode()).isEqualTo(200);
+        assertThat(JSON.readValue(sent.body(), Message.class).getText()).isEqualTo("user: [fake echo=turns] 电话 [phone]，邮箱 [email]");
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT role || ' ' || data_class || ' ' || text FROM engine.conversation_messages"
+                + " WHERE conversation_id = '" + id + "' AND role = 'user'")).containsExactly("user personal " + said);
+        assertThat(watermark(id)).isEqualTo("personal");
+    }
+
     private static String watermark(String conversationId) throws SQLException {
         return TestDatabase.firstColumn(DATABASE, "SELECT data_class_watermark FROM engine.conversation_conversations"
                 + " WHERE conversation_id = '" + conversationId + "'").getFirst();

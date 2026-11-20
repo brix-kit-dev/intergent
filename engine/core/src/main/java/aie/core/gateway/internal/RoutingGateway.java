@@ -17,10 +17,12 @@ import org.slf4j.LoggerFactory;
  * {@link Gateway} by route table (blueprint 8.2 to 8.4). It is built once from the models, the routes and the trust
  * layer's checks, and refuses a route to a model it was not given, so that such a mistake stops the role at startup
  * instead of failing requests later. What the end user said goes through the input check before anything of it is
- * stored, and a model gets it only with the receipt this gateway gave for it (M3-4-1, A-15). Every call carries its
- * route's time limit (A-9). A call from inside a database transaction is refused before anything else (A-14). The model
- * gets its family's prompt as instructions (M3-2). A call goes to the first model of its route that takes the call's
- * data class, and never to one below it (blueprint 7.3, M3-3-2). Fallback, retries and budgets are not here yet.
+ * stored, and a model gets it only with the receipt this gateway gave for it (M3-4-1, A-15). Every turn a model is shown
+ * is masked by the trust layer first, each time it is sent, and a call's class is at least the one its check found
+ * (M3-4-2). Every call carries its route's time limit (A-9). A call from inside a database transaction is refused before
+ * anything else (A-14). The model gets its family's prompt as instructions (M3-2). A call goes to the first model of its
+ * route that takes the call's data class, and never to one below it (blueprint 7.3, M3-3-2). Fallback, retries and
+ * budgets are not here yet.
  */
 public final class RoutingGateway implements Gateway {
 
@@ -77,7 +79,7 @@ public final class RoutingGateway implements Gateway {
             throw new IllegalArgumentException("The input check needs the text the end user said");
         }
         return switch (checks.input(task, text)) {
-            case Checks.Passed passed -> new Receipt(this, task, text);
+            case Checks.Passed passed -> new Receipt(this, task, text, passed.dataClass());
             case Checks.Blocked blocked -> {
                 LOG.info("The input check blocked a text for the task {} by the rule {}", task, blocked.rule());
                 yield new Blocked(blocked.rule());
@@ -87,8 +89,9 @@ public final class RoutingGateway implements Gateway {
 
     /**
      * Refuses a call from inside a transaction first. The question was checked when its receipt was made, so it is not
-     * checked again (blueprint 9.1). The model's reason for a failure goes to the log alone, with the task, the model and
-     * the pieces sent.
+     * checked again (blueprint 9.1); every turn is masked, though, the question as well, since the history is sent again
+     * with each answer (M3-4-2). The model's reason for a failure goes to the log alone, with the task, the model and the
+     * pieces sent.
      */
     @Override
     public Result answer(Request request, Output output) {
@@ -99,7 +102,7 @@ public final class RoutingGateway implements Gateway {
         String model = firstTaking(route, request.dataClass());
         Prompt prompt = route.prompts().get(model);
         ModelPort.Request call = new ModelPort.Request(model, prompt.text(),
-                request.turns().stream().map(RoutingGateway::turn).toList(), route.timeout(), request.cancellation()::requested);
+                request.turns().stream().map(this::masked).toList(), route.timeout(), request.cancellation()::requested);
         ModelPort.Result result = models.get(model).port().generate(call, piece -> output.text(checks.output(request.task(), piece)));
         return switch (result) {
             case ModelPort.Completed done -> new Completed(usage(done.usage()));
@@ -123,7 +126,7 @@ public final class RoutingGateway implements Gateway {
 
     /**
      * The route of a well-formed request, whose class is not above the task's ceiling, and whose question has this
-     * gateway's receipt for the same task and the same text.
+     * gateway's receipt for the same task and the same text, with a class no higher than the request's.
      */
     private Route routeOf(Request request) {
         List<Turn> turns = request.turns();
@@ -152,6 +155,10 @@ public final class RoutingGateway implements Gateway {
             throw new IllegalArgumentException("A question reaches a model only with this gateway's receipt of its input check,"
                     + " for the same task and the same text (A-15)");
         }
+        if (request.dataClass().compareTo(receipt.dataClass) < 0) {
+            throw new IllegalArgumentException("The question holds " + receipt.dataClass.wireName() + " data, so a call of "
+                    + request.dataClass().wireName() + " is too low for it; the caller raises the call first (M3-4-2)");
+        }
         return route;
     }
 
@@ -161,12 +168,13 @@ public final class RoutingGateway implements Gateway {
                 .findFirst().orElseThrow();
     }
 
-    private static ModelPort.Turn turn(Turn turn) {
+    /** A turn as the model is shown it, with its personal data masked (M3-4-2). */
+    private ModelPort.Turn masked(Turn turn) {
         ModelPort.Role role = switch (turn.role()) {
             case USER -> ModelPort.Role.USER;
             case ASSISTANT -> ModelPort.Role.ASSISTANT;
         };
-        return new ModelPort.Turn(role, turn.text());
+        return new ModelPort.Turn(role, checks.masked(turn.text()));
     }
 
     private static Usage usage(ModelPort.Usage usage) {
@@ -182,11 +190,13 @@ public final class RoutingGateway implements Gateway {
         private final RoutingGateway issuer;
         private final String task;
         private final String text;
+        private final DataClass dataClass;
 
-        Receipt(RoutingGateway issuer, String task, String text) {
+        Receipt(RoutingGateway issuer, String task, String text, DataClass dataClass) {
             this.issuer = issuer;
             this.task = task;
             this.text = text;
+            this.dataClass = dataClass;
         }
 
         @Override
@@ -197,6 +207,11 @@ public final class RoutingGateway implements Gateway {
         @Override
         public String text() {
             return text;
+        }
+
+        @Override
+        public DataClass dataClass() {
+            return dataClass;
         }
     }
 

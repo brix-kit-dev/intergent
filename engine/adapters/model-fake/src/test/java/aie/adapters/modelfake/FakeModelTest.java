@@ -208,13 +208,27 @@ class FakeModelTest {
         assertThat(result).isEqualTo(new Completed(new Usage("[fake echo=instructions] Hello".length(), INSTRUCTIONS.length())));
     }
 
+    /** M3-4-2: echo=turns answers with the turns the gateway sent, one per line, so a test can see what the model got. */
+    @Test
+    void itEchoesTheTurnsWhenAsked() {
+        List<Turn> turns = List.of(new Turn(Role.USER, "My phone is [phone]"), new Turn(Role.ASSISTANT, "Noted."),
+                new Turn(Role.USER, "[fake echo=turns] And my mail is [email]"));
+        String echoed = "user: My phone is [phone]\nassistant: Noted.\nuser: [fake echo=turns] And my mail is [email]";
+
+        Result result = generate(new Request(FakeModel.MODEL, INSTRUCTIONS, turns, LONG, NEVER));
+
+        assertThat(pieces).containsExactly(echoed);
+        assertThat(result).isEqualTo(new Completed(new Usage(
+                turns.stream().mapToLong(turn -> turn.text().length()).sum(), echoed.length())));
+    }
+
     @Test
     void itEchoesNothingElse() {
-        Result result = generate("[fake echo=turns]");
+        Result result = generate("[fake echo=prompt]");
 
         assertThat(pieces).isEmpty();
         assertThat(result).isInstanceOf(Failed.class);
-        assertThat(((Failed) result).reason()).isEqualTo("The fake model echoes instructions, not turns");
+        assertThat(((Failed) result).reason()).isEqualTo("The fake model echoes instructions or turns, not prompt");
     }
 
     @Test

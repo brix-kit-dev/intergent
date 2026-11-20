@@ -42,11 +42,16 @@ class RoutingGatewayTest {
     private static final Prompt PROMPT = new Prompt("chat/test/v1", "Answer the test.");
     private static final Duration MINUTE = Duration.ofMinutes(1);
     private static final ModelPort.Result DONE = new ModelPort.Completed(new ModelPort.Usage(5, 2));
-    /** Checks that pass every text and every piece as it is. */
+    /** Checks that pass every text and every piece as it is, and find no personal data. */
     private static final Checks PASSING = new Checks() {
         @Override
         public Input input(String task, String text) {
-            return new Passed();
+            return new Passed(DataClass.PUBLIC);
+        }
+
+        @Override
+        public String masked(String text) {
+            return text;
         }
 
         @Override
@@ -341,6 +346,11 @@ class RoutingGatewayTest {
             }
 
             @Override
+            public String masked(String text) {
+                return text;
+            }
+
+            @Override
             public String output(String task, String piece) {
                 return piece;
             }
@@ -362,6 +372,11 @@ class RoutingGatewayTest {
             @Override
             public Input input(String task, String text) {
                 throw new IllegalStateException("not this one");
+            }
+
+            @Override
+            public String masked(String text) {
+                return text;
             }
 
             @Override
@@ -405,6 +420,11 @@ class RoutingGatewayTest {
             public String text() {
                 return "Bye";
             }
+
+            @Override
+            public DataClass dataClass() {
+                return DataClass.PUBLIC;
+            }
         };
         List<Checked> wrong = Arrays.asList(null, made, checked(other, "chat", "Bye"), checked(gateway, "translate", "Bye"),
                 checked(gateway, "chat", "Hi"), checked(gateway, "chat", "bye"));
@@ -433,6 +453,58 @@ class RoutingGatewayTest {
         answer(gateway, request);
 
         assertThat(events).containsExactly("input chat Hello", "model m", "model m");
+    }
+
+    /**
+     * M3-4-2: every turn a model is shown is masked by the trust layer, the history as well as the question, each time it
+     * is sent. The request keeps its turns as they were.
+     */
+    @Test
+    void theModelIsShownEveryTurnMasked() {
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), masking(DataClass.PUBLIC),
+                OUTSIDE);
+        List<Turn> turns = List.of(new Turn(Role.USER, "Call 0901"), new Turn(Role.ASSISTANT, "On 0901?"),
+                new Turn(Role.USER, "Yes, 0901"));
+
+        answer(gateway, new Request("chat", turns, NEVER, DataClass.PUBLIC, checked(gateway, "chat", "Yes, 0901")));
+        answer(gateway, new Request("chat", turns, NEVER, DataClass.PUBLIC, checked(gateway, "chat", "Yes, 0901")));
+
+        assertThat(calls).hasSize(2).allSatisfy(call -> assertThat(call.turns()).containsExactly(
+                new ModelPort.Turn(ModelPort.Role.USER, "Call [n]"), new ModelPort.Turn(ModelPort.Role.ASSISTANT, "On [n]?"),
+                new ModelPort.Turn(ModelPort.Role.USER, "Yes, [n]")));
+        assertThat(turns.getLast().text()).isEqualTo("Yes, 0901");
+    }
+
+    /**
+     * M3-4-2: the receipt carries the class its check found, and a call below it reaches no model: the caller raises its
+     * call first. One at that class or above is answered, masked.
+     */
+    @Test
+    void aCallBelowTheClassItsCheckFoundReachesNoModel() {
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), masking(DataClass.PERSONAL),
+                OUTSIDE);
+        Checked checked = checked(gateway, "chat", "My number is 0901");
+        List<Turn> turns = List.of(new Turn(Role.USER, "My number is 0901"));
+
+        assertThat(checked.dataClass()).isEqualTo(DataClass.PERSONAL);
+        for (DataClass below : List.of(DataClass.PUBLIC, DataClass.INTERNAL)) {
+            assertThatThrownBy(() -> answer(gateway, new Request("chat", turns, NEVER, below, checked)))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessage("The question holds personal data, so a call of " + below.wireName()
+                            + " is too low for it; the caller raises the call first (M3-4-2)");
+        }
+        assertThat(calls).isEmpty();
+        assertThat(answer(gateway, new Request("chat", turns, NEVER, DataClass.PERSONAL, checked))).isInstanceOf(Completed.class);
+        assertThat(answer(gateway, new Request("chat", turns, NEVER, DataClass.SENSITIVE, checked))).isInstanceOf(Completed.class);
+        assertThat(calls).extracting(call -> call.turns().getLast().text()).containsExactly("My number is [n]", "My number is [n]");
+    }
+
+    /** A receipt carries the class its check found: public for a text without personal data. */
+    @Test
+    void aReceiptCarriesTheClassItsCheckFound() {
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), PASSING, OUTSIDE);
+
+        assertThat(checked(gateway, "chat", "Hello").dataClass()).isEqualTo(DataClass.PUBLIC);
     }
 
     /**
@@ -592,16 +664,41 @@ class RoutingGatewayTest {
         assertThat(answer(second, ask(second, "chat", "Hello"))).isInstanceOf(Completed.class);
     }
 
+    /** Checks that pass every text, find this class in it, and mask every run of digits as [n]. */
+    private static Checks masking(DataClass found) {
+        return new Checks() {
+            @Override
+            public Input input(String task, String text) {
+                return new Passed(found);
+            }
+
+            @Override
+            public String masked(String text) {
+                return text.replaceAll("[0-9]+", "[n]");
+            }
+
+            @Override
+            public String output(String task, String piece) {
+                return piece;
+            }
+        };
+    }
+
     /**
-     * Checks that note what they see, pass every text, and upper-case each piece, so the caller's pieces show they passed
-     * the check.
+     * Checks that note what they see, pass every text, find no personal data, and upper-case each piece, so the caller's
+     * pieces show they passed the check.
      */
     private Checks noting() {
         return new Checks() {
             @Override
             public Input input(String task, String text) {
                 events.add("input " + task + " " + text);
-                return new Passed();
+                return new Passed(DataClass.PUBLIC);
+            }
+
+            @Override
+            public String masked(String text) {
+                return text;
             }
 
             @Override

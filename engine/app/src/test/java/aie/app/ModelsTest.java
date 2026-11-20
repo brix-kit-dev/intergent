@@ -98,6 +98,21 @@ class ModelsTest {
         assertThat(gateway.checkInput(Answers.TASK, "我的订单什么时候到？")).isInstanceOf(Checked.class);
     }
 
+    /**
+     * M3-4-2: the checks of a pack's gateway mask personal data with the rules adapter, and a question that holds some is
+     * personal at least, while one that holds none stays public.
+     */
+    @Test
+    void theChecksOfAPackMaskPersonalData() {
+        Gateway gateway = Models.gateway(RegionPacks.read("jp"), () -> false);
+
+        assertThat(Models.checks().masked("Call 090-1234-5678 or mail taro@example.com"))
+                .isEqualTo("Call [phone] or mail [email]");
+        assertThat(((Checked) gateway.checkInput(Answers.TASK, "My card is 4111 1111 1111 1111")).dataClass())
+                .isEqualTo(DataClass.PERSONAL);
+        assertThat(((Checked) gateway.checkInput(Answers.TASK, "Where is my parcel?")).dataClass()).isEqualTo(DataClass.PUBLIC);
+    }
+
     /** RegionPacks refuses such a pack too; this is the gateway's own guard for a pack made any other way. */
     @Test
     void aModelWhoseAdapterTheEngineDoesNotHaveIsRefused() {

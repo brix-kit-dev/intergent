@@ -742,6 +742,73 @@ class AnswersTest {
         }
     }
 
+    /**
+     * M3-4-2: a question with personal data is stored as it was said, and the call is personal at least, so both messages
+     * and the watermark are personal. The model is shown the question with the data masked.
+     */
+    @Test
+    void personalDataIsStoredAsSaidAndShownMasked() throws Exception {
+        String said = "[fake echo=turns] Call me on 090-1234-5678 or mail taro@example.com";
+        try (GeneratingAnswers answers = new GeneratingAnswers(messages, fake(Duration.ofSeconds(10)))) {
+            Started started = started(answers.ask(caller, conversation, said, DataClass.PUBLIC));
+            awaitEnd(started);
+
+            assertThat(started.asked().dataClass()).isEqualTo(DataClass.PERSONAL);
+            assertThat(started.asked().question().text()).isEqualTo(said);
+            assertThat(answerOf(started).text()).isEqualTo("user: [fake echo=turns] Call me on [phone] or mail [email]");
+        }
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT role || ' ' || data_class || ' ' || text"
+                + " FROM engine.conversation_messages ORDER BY ordinal")).containsExactly(
+                "user personal " + said, "assistant personal user: [fake echo=turns] Call me on [phone] or mail [email]");
+        assertThat(watermark()).isEqualTo("personal");
+    }
+
+    /**
+     * M3-4-2: the history is masked each time it goes to the model, not only when it was asked, while the database keeps
+     * every message as it was. The caller's higher floor stays as it was.
+     */
+    @Test
+    void theHistoryIsMaskedEachTimeItIsSent() throws Exception {
+        try (GeneratingAnswers answers = new GeneratingAnswers(messages, fake(Duration.ofSeconds(10)))) {
+            awaitEnd(started(answers.ask(caller, conversation, "[fake pieces=1 delay=1ms] My card is 4111 1111 1111 1111",
+                    DataClass.PUBLIC)));
+            Started second = started(answers.ask(caller, conversation, "[fake echo=turns] Is it on file?", DataClass.SENSITIVE));
+            awaitEnd(second);
+
+            assertThat(answerOf(second).text()).isEqualTo("user: [fake pieces=1 delay=1ms] My card is [card]\n"
+                    + "assistant: Piece 1 of 1. \nuser: [fake echo=turns] Is it on file?");
+            assertThat(second.asked().dataClass()).isEqualTo(DataClass.SENSITIVE);
+        }
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT text FROM engine.conversation_messages ORDER BY ordinal LIMIT 1"))
+                .containsExactly("[fake pieces=1 delay=1ms] My card is 4111 1111 1111 1111");
+    }
+
+    /**
+     * M3-4-2: personal data raises a call above a task whose models take internal data at most, so it is NoEligibleModel:
+     * nothing is stored, the watermark stays, and no model is called. Masking does not lower the class.
+     */
+    @Test
+    void personalDataAboveTheCeilingStoresNothing() throws Exception {
+        List<String> called = new CopyOnWriteArrayList<>();
+        ModelPort model = (request, output) -> {
+            called.add(request.model());
+            output.text("Hi");
+            return new ModelPort.Completed(new ModelPort.Usage(1, 1));
+        };
+        try (GeneratingAnswers answers = new GeneratingAnswers(messages, stub(model, DataClass.INTERNAL), 1, Duration.ofSeconds(5))) {
+            assertThat(answers.ask(caller, conversation, "My phone is 03-1234-5678", DataClass.PUBLIC))
+                    .isEqualTo(new Start.NoEligibleModel(DataClass.PERSONAL, DataClass.INTERNAL));
+            assertThat(rows()).isEmpty();
+            assertThat(watermark()).isEqualTo("public");
+            assertThat(called).isEmpty();
+
+            Started started = started(answers.ask(caller, conversation, "No number this time", DataClass.PUBLIC));
+            awaitEnd(started);
+            assertThat(started.asked().dataClass()).isEqualTo(DataClass.PUBLIC);
+            assertThat(called).containsExactly("stub");
+        }
+    }
+
     @Test
     void anAskThatStoresNothingKeepsNoSlot() throws Exception {
         Owner otherTenant = new Owner("key_unused", provisioning.createTenant("jp1", null), caller.applicationId());

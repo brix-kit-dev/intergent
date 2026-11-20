@@ -2,6 +2,7 @@ package aie.app;
 
 import aie.adapters.modelfake.FakeModel;
 import aie.adapters.moderationrules.RuleModeration;
+import aie.adapters.redactionrules.RuleRedaction;
 import aie.core.gateway.api.Gateway;
 import aie.core.gateway.internal.RoutingGateway;
 import aie.core.trust.api.Checks;
@@ -30,11 +31,11 @@ final class Models {
     }
 
     /**
-     * The trust layer's checks: moderation by the rules adapter, which looks at texts inside the engine (M3-4-1). A
-     * moderation service would take the adapter's place here.
+     * The trust layer's checks: moderation (M3-4-1) and masking (M3-4-2) by the rules adapters, which look at texts
+     * inside the engine. A moderation or masking service would take an adapter's place here.
      */
     static Checks checks() {
-        return new TrustChecks(new RuleModeration());
+        return new TrustChecks(new RuleModeration(), new RuleRedaction());
     }
 
     /**

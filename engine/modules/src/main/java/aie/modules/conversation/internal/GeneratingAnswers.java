@@ -112,8 +112,9 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
      * back when the answer ends. Starting the thread fails only after {@link #close} has given up waiting; then the
      * answer stays in progress until a reader ends it. The gateway checks what the end user said before anything is
      * stored, outside any transaction, and its receipt goes with the answer, so the text is checked once (M3-4-1). The
-     * storage measures the call's class against the gateway's ceiling for the task while it holds the conversation's
-     * turn, so a call no model takes stores nothing.
+     * class the check found raises the floor, such as personal for a telephone number (M3-4-2). The storage measures the
+     * call's class against the gateway's ceiling for the task while it holds the conversation's turn, so a call no model
+     * takes stores nothing.
      */
     @Override
     public Start ask(Owner caller, String conversationId, String text, DataClass floor) {
@@ -131,7 +132,8 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
                 }
             }
             DataClass ceiling = gateway.ceiling(TASK);
-            switch (messages.ask(caller, conversationId, text, floor, ceiling)) {
+            DataClass least = question.dataClass().compareTo(floor) > 0 ? question.dataClass() : floor;
+            switch (messages.ask(caller, conversationId, text, least, ceiling)) {
                 case Asked stored -> asked = stored;
                 case Ask.NotFound missing -> {
                     slots.release();

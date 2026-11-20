@@ -7,8 +7,9 @@ import java.util.List;
  * The only way to a model (blueprint 8). A module names a task, never a model: the gateway finds the task's route,
  * picks the first of its models that takes the call's data class, and calls it with the route's time limit. What the end
  * user said is checked first, before any of it is stored (M3-4-1), and a model gets a question only with the receipt of
- * that check, so no call goes around it (A-15). Only the gateway may use the model ports (A-2), so this interface has
- * types of its own and shows none of theirs.
+ * that check, so no call goes around it (A-15). Every text a model is shown is masked first, and a call's class is at
+ * least the one its check found (M3-4-2). Only the gateway may use the model ports (A-2), so this interface has types of
+ * its own and shows none of theirs.
  */
 public interface Gateway {
 
@@ -29,8 +30,9 @@ public interface Gateway {
      * ended. A cancel, a failure of the model and the time running out all come back as a result, not as an exception.
      *
      * @throws IllegalArgumentException for a task that no route answers, a request that is not well formed, one whose
-     *     data class is above the task's {@link #ceiling}, or one without this gateway's receipt for its question; all are
-     *     mistakes in the calling code, and no model is called. An exception from {@code output} also reaches the caller.
+     *     data class is above the task's {@link #ceiling}, one without this gateway's receipt for its question, or one
+     *     whose class is below the class its receipt found; all are mistakes in the calling code, and no model is called.
+     *     An exception from {@code output} also reaches the caller.
      * @throws IllegalStateException for a call from inside a database transaction, before any model is asked (A-14):
      *     an answer would hold the transaction's connection for as long as it takes
      */
@@ -51,7 +53,8 @@ public interface Gateway {
      * @param task what the module needs, such as {@code customer_chat}; the route table decides which model answers
      * @param turns the conversation so far, oldest first, ending with the user's turn
      * @param cancellation asked often, at least between pieces, whether the caller wants the answer to stop
-     * @param dataClass the class of the call: only a model that takes it is called (blueprint 7.3, M3-3)
+     * @param dataClass the class of the call: only a model that takes it is called (blueprint 7.3, M3-3); at least the
+     *     class the question's check found (M3-4-2)
      * @param question the receipt of this gateway's input check of the last turn, for this task (M3-4-1)
      */
     record Request(String task, List<Turn> turns, Cancellation cancellation, DataClass dataClass, Checked question) {
@@ -72,6 +75,12 @@ public interface Gateway {
 
         /** The text as it was checked. */
         String text();
+
+        /**
+         * The least data class of a call with this text, as the check found it: personal when it holds personal data
+         * (M3-4-2). The caller raises its call to it before anything is stored, and masking does not lower it.
+         */
+        DataClass dataClass();
     }
 
     /**

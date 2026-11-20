@@ -28,7 +28,8 @@ public interface Answers {
      * answer.
      *
      * @param floor the least data class of the call, the higher of the application's default and the class the caller
-     *     declared; {@link Messages#ask} raises it to the conversation's watermark (M3-3)
+     *     declared; the input check raises it to the class it finds, such as personal for a telephone number (M3-4-2),
+     *     and {@link Messages#ask} to the conversation's watermark (M3-3)
      * @throws IllegalArgumentException for text that {@link Messages#ask} refuses
      */
     Start ask(Owner caller, String conversationId, String text, DataClass floor);
