@@ -5,6 +5,7 @@ import aie.core.tenancy.api.Applications;
 import aie.core.tenancy.api.EndUsers;
 import aie.core.tenancy.api.SessionTokens;
 import aie.core.trust.api.DataClass;
+import aie.core.trust.api.TaskGate;
 import aie.http.api.ConversationsApi;
 import aie.http.api.StreamsApi;
 import aie.http.api.model.Conversation;
@@ -93,6 +94,7 @@ class ConversationController implements ConversationsApi, StreamsApi {
     private final HttpServletRequest request;
     private final EventStream stream;
     private final StreamSlots streams;
+    private final TaskGate gate;
 
     /**
      * The wait is the contract's 120 seconds unless a test registers a shorter one. The stream wakes on the signals the
@@ -100,7 +102,7 @@ class ConversationController implements ConversationsApi, StreamsApi {
      */
     ConversationController(EndUsers endUsers, Applications applications, Conversations conversations, Answers answers,
             Messages messages, EventSignals signals, ObjectProvider<AnswerWait> wait, ObjectProvider<StreamLimit> streamLimit,
-            HttpServletRequest request) {
+            TaskGate gate, HttpServletRequest request) {
         this.endUsers = endUsers;
         this.applications = applications;
         this.conversations = conversations;
@@ -109,6 +111,7 @@ class ConversationController implements ConversationsApi, StreamsApi {
         this.wait = wait.getIfAvailable(() -> AnswerWait.CONTRACT).limit();
         this.stream = new EventStream(messages, signals);
         this.streams = new StreamSlots(streamLimit.getIfAvailable(() -> StreamLimit.DEFAULT));
+        this.gate = gate;
         this.request = request;
     }
 
@@ -168,7 +171,9 @@ class ConversationController implements ConversationsApi, StreamsApi {
      * class starts at the application's default, and data_class can only raise it (blueprint 7.3, M3-3-1); the answer
      * raises it further to the conversation's watermark, and both messages keep the result. A call that no model of its
      * task takes is 422 no_eligible_model before any stream starts, and nothing is stored (M3-3-2). So is a text that the
-     * input check blocks, as 422 input_blocked (M3-4-1).
+     * input check blocks, as 422 input_blocked (M3-4-1). The gate stands after identity and before the data class (blueprint
+     * 9.1): where this deployment does not offer the task, the request is 403 forbidden, asks nothing and sends nothing
+     * again, not even an earlier answer under its Idempotency-Key (M3-4-4).
      */
     @Override
     public ResponseEntity<Message> createMessage(String conversationId, CreateMessageRequest body,
@@ -184,6 +189,9 @@ class ConversationController implements ConversationsApi, StreamsApi {
         SessionRequests.locale(body.getLocale());
         Owner caller = caller();
         requireReachable(caller, conversation);
+        if (!gate.opens(Answers.TASK)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "This deployment does not offer the task " + Answers.TASK);
+        }
         if (request.getAttribute(IdempotencyFilter.RESEND) instanceof String answer) {
             return streams.stream(() -> {
                 send(caller, conversation, answer, 0, eventStream(currentResponse()));

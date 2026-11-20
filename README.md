@@ -406,11 +406,12 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 - **启动时就检查：** 两张表来自区域包，api 角色在打开数据库连接池之前就读出来并检查，见下面的“区域包”。连接池打开后再构造网关，因为网关要问连接池当前线程在不在事务里。
 - **检查的位置：** 输入检查在存问题之前，也就在选模型之前（`checkInput`）；模型写的每一段都先经过这次回答的输出检查，按路由的检查方式攒着、查过、遮盖后才交给调用方（M3-4-3）。两种检查都是信任层的，见下面的“信任层”。
 
-**区域包（M3-1）：** 两张表写在仓库根目录的 `regions/<区域>/` 里，`DEPLOY_REGION` 选用哪个（蓝图 12.2）。现在只有 `regions/jp`：
+**区域包（M3-1）：** 两张表和一份策略写在仓库根目录的 `regions/<区域>/` 里，`DEPLOY_REGION` 选用哪个（蓝图 12.2）。现在只有 `regions/jp`：
 
 - **文件：**
   - `models.yaml` 是注册表。每个模型写明 `id`（部署/模型）、`adapter`、`family`（取哪套提示词，M3-2 用）、`processing_region`（在哪里处理数据）、`retention`（厂商保留多久：`none` 或天数如 `30d`）、`training`（厂商能不能拿来训练）、`max_data_class`（最高收哪一级数据）、`capabilities`、`price`（每百万词元多少美元，进和出，M3-6 计量用）。
-  - `routes.yaml` 是路由表。每个任务写明 `models`（第一个是首选，后面的是备用，M3-12 才用）、`timeout_seconds`（`A-9`）、`checks`（`sentence` 按句、`full` 全文、`input` 只查输入；检查本身 M3-4 做）和 `prompts`（见下面的“提示词”）。
+  - `routes.yaml` 是路由表。每个任务写明 `models`（第一个是首选，后面的是备用，M3-12 才用）、`timeout_seconds`（`A-9`）、`checks`（`sentence` 按句、`full` 全文、`input` 只查输入，见“信任层”的输出检查）和 `prompts`（见下面的“提示词”）。
+  - `policy.yaml` 是这个区域的策略（M3-4-4）：`tasks` 列出它开放的任务，`ai_disclosure` 写回答要不要标明是 AI 写的（`required` 或 `not_required`）。见“信任层”的地区门禁。
 - **打进 jar：** 构建时把 `regions/` 整个复制进 `engine.jar`，`DEPLOY_REGION` 只能从里面选一个，不能改里面的内容。租户和运维以后设的任何东西都改不了模型的范围（`R-2`）。区域名只能是小写字母、数字和 `-`，所以指不到包外面的文件。
 - **检查（`R-4`）：** 下面任何一条不满足，`api` 拒绝启动，并写明文件和是哪个模型、哪个任务。`RegionPacksTest` 在 CI 里用同样的检查读仓库里的每个区域包。
   - 每个字段都要写，也不能多写，写错名字的字段不会被悄悄忽略；同一个键写两次也拒绝。
@@ -418,8 +419,10 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
   - 每个模型的适配器引擎都有（现在只有 `fake`），模型号不重复。
   - 路由只能引用 `models.yaml` 里的模型；每个任务都要写检查方式，没写就不是一条完整的路由（`A-15`）；超时要大于零。
   - 路由里每个模型的系列都有提示词，不多也不少；提示词的版本号是这个任务、这个系列的，jar 里有它的文字（M3-2）。
-  - 引擎要用的每个任务都有路由，现在是 `customer_chat`。
-- **以后：** 真实模型随适配器加进 `models.yaml`（M3-9 到 11）；地区门禁的策略在 M3-4 加进区域包。
+  - 策略开放的任务都是引擎有的任务（现在只有 `customer_chat`），不重复；路由的任务正好是开放的任务，不多也不少：开放了却没有路由，答不了；有路由却没开放，永远不会被用到（M3-4-4）。M3-1 原来的“引擎要用的每个任务都有路由”换成了这一条，否则门禁永远拦不了什么。
+  - `ai_disclosure` 只能是 `required` 或 `not_required`。
+  - 区域包可以什么都不开放：`tasks: []`，也就没有路由。这样的单元照常启动，只是发消息都被门禁拒绝。
+- **以后：** 真实模型随适配器加进 `models.yaml`（M3-9 到 11）。
 
 **提示词（M3-2）：** 提示词放在仓库根目录的 `prompts/` 里，按任务和模型系列分版本（蓝图 8.7）：
 
@@ -452,6 +455,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 - **只查一次：** 通过的话拿到网关的回执，回执跟着这条回答，生成时放进网关的请求里。网关不再查一遍（蓝图 9.1：同一请求里相同的内容只检查一次），但没有回执、回执不是这个网关给的、任务不同、或者文字和对话的最后一句不一样，网关都不调模型，直接抛 `IllegalArgumentException`。回执的类是网关私有的，别的代码造不出来，所以绕不过检查（`A-15`）。同一句话的回执可以用于多次调用。
 - **日志：** 拦下时网关记一行 INFO，写明任务和规则名，不写原文，因为原文可能带个人信息。审计到 M3-5 才有。
 - **以前的消息：** M3-4-1 之前存下的消息没有过这道检查，作为历史发给模型时也不会补查。现在还没有部署，没有这样的数据。
+
 **遮盖个人信息（M3-4-2）：** 电话、邮箱、卡号在发给模型之前换成占位符 `[phone]`、`[email]`、`[card]`。存下来的是用户的原话，只在发给模型的路上遮盖（M3-4 第 2 项）。
 
 | 种类 | 认什么 | 例子 |
@@ -468,6 +472,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 - **网关也守着：** 请求的等级低于回执里的等级，网关不调模型，直接抛 `IllegalArgumentException`，调用方忘了抬也绕不过去。
 - **每次发都遮：** 网关每次调用都把对话的每一轮重新遮一遍，历史也一样，不只是这一问。模型的回答里的个人信息，由下面的输出检查在发出和存下之前遮住。
 - **以前的消息：** M3-4-2 之前存下的消息，等级没有因为个人信息抬高过，但发给模型时一样会被遮盖。
+
 **输出检查（M3-4-3，蓝图 9.2）：** 模型写的文字按路由的 `checks` 攒着，查过、遮盖后才交给调用方，也只有这些会写进日志和存下来：
 
 | 检查方式 | 怎么攒 | 什么时候发 |
@@ -483,6 +488,16 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 - **模型失败或被取消时：** 还攒着没查的那部分不发，结果照模型的来（失败或取消）。
 - **每次回答单独查：** 每次回答都用它自己的模型的提示词（`checks.output(任务, 检查方式, 提示词)`），同一个提示词的 40 字片段只算一次。
 - **jp 现在：** `customer_chat` 按句检查。模拟模型的每段 `Piece 1 of 8. ` 本身就是一句，所以照样一段一段地发出；`[fake echo=instructions]` 会被拦下。
+
+**地区门禁（M3-4-4，蓝图 9.1）：** 请求要用的任务，这个部署的区域包策略开放了才放行。门禁在身份之后、数据等级之前：
+
+- **在哪里：** 信任层的 `aie.core.trust.api.TaskGate`（`opens(任务)`），启动入口按区域包的 `policy.yaml` 建好它，代码里不判断地区（C-8、`A-5`）。
+- **拦什么：** 现在要用任务的只有发消息（`customer_chat`）。不开放时回 403 `forbidden`（M3-4 第 4 项），`detail` 是 `This deployment does not offer the task customer_chat`。`A-5` 不许代码里出现 region 这个词，所以写的是“这个部署”。
+- **什么都不做：** 门禁拦下的请求不读应用的默认等级，不检查输入，不存任何东西，流式请求在流开始前就回答；带同一个 `Idempotency-Key` 重发的、以前流过的回答也不再发出。
+- **先后：** 没带密钥的照旧是 401；浏览器令牌碰别人的会话照旧是 404；请求本身写错了照旧是 400。这些都在门禁之前。
+- **jp 现在：** 开放 `customer_chat`，所以 jp 上不会出现这个 403。要等引擎有了更多任务、或者某个区域包不开放它，门禁才会拦。
+- **`ai_disclosure`：** 只写在策略里，启动时检查写法，引擎还不按它做任何事；等有接口要用它时再做。jp 写的是 `required`，等平台方案（P-1）的合规结论出来再定。
+
 - **以后：** 审计（M3-5）。
 
 ## 会话
@@ -587,6 +602,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
   - 会话不在调用方的应用里：404，和读会话一样。
   - 输入检查拦下了这句话（M3-4-1）：422 `input_blocked`，什么都不存，水位也不动。`detail` 写明拦下它的规则名，不带原文，比如 `The input check blocked the text by its rule instruction_override, so nothing was sent or stored`。用户看到什么由产品层按 `code` 决定。检查在找会话之前，所以用服务端密钥往不存在的会话里发这样的话，也是 422；结论只取决于调用方自己写的话，透露不了会话的任何事。浏览器的令牌先查会话归不归它，别人的会话照旧是 404。带同一个 `Idempotency-Key` 重试，拿到同样的 422（失败也原样重放），换个说法要换新键。
   - 没有模型收得了这次调用的等级（M3-3-2）：422 `no_eligible_model`，什么都不存。`detail` 写明这次调用的等级和模型最高收到哪一级，比如 `The call's data is sensitive, but the models that may answer it take data up to internal, so nothing was sent or stored`。这两个等级只取决于调用方自己的应用和会话。现在 jp 区域包只有 `fake`，它收得了 `sensitive`，所以 jp 上不会出现这个 422。
+  - 这个部署不开放 `customer_chat`（M3-4-4，见“信任层”的地区门禁）：403 `forbidden`，在数据等级之前，什么都不存。
   - 实例满了（同时 64 个回答）：429 `rate_limited`，带 `Retry-After: 5`，什么都不存。因为 429 不占用 `Idempotency-Key`，等过 `Retry-After` 可以用同一个键再发。
   - **流式：** `Accept` 里写明 `text/event-stream`（权重大于 0）就发流，即使同时也写了 JSON；只写 `*/*`、`application/json` 或不带 `Accept` 的拿 JSON。只写 `text/*` 这类既不是 JSON、也没写明流的，回答 406 `invalid_request`，在存任何东西之前。
     - 流从第 1 个事件 `message.started` 一直发到结束事件，用下面的事件流，回答的 `Content-Type` 是 `text/event-stream`，带 `Cache-Control: no-cache` 和 `X-Accel-Buffering: no`，免得代理把流攒着不发。
@@ -840,7 +856,7 @@ const answer = await fetch("https://引擎地址/v1/anonymous-sessions", {
 | 情况 | HTTP | `code` |
 | --- | --- | --- |
 | 没带密钥，或密钥无效 | 401 | `unauthorized` |
-| 没有权限，比如代一个不是下级的租户操作，或者用会话令牌调不收令牌的接口 | 403 | `forbidden` |
+| 没有权限，比如代一个不是下级的租户操作，或者用会话令牌调不收令牌的接口；这个部署不开放请求要用的任务（M3-4-4） | 403 | `forbidden` |
 | 路径不存在 | 404 | `not_found` |
 | 请求格式不对：参数、JSON、方法、媒体类型、请求体太大 | 400、405、406、413、415 | `invalid_request` |
 | 同一个 `Idempotency-Key` 的请求还在处理 | 409 | `idempotency_key_in_use` |

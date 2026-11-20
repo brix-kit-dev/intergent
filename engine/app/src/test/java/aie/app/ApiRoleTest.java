@@ -1050,6 +1050,15 @@ class ApiRoleTest {
                 + id + "' AND role = 'assistant' AND status = 'completed'")).containsExactly("You can call us on [phone] or write to [email]. ");
     }
 
+    /** M3-4-4: the api's gate opens the tasks the jp pack's policy offers, customer_chat, and no other. */
+    @Test
+    void theApiOpensTheTasksItsPacksPolicyOffers() {
+        aie.core.trust.api.TaskGate gate = context.getBean(aie.core.trust.api.TaskGate.class);
+
+        assertThat(gate.opens(Answers.TASK)).isTrue();
+        assertThat(gate.opens("vision_forensics")).isFalse();
+    }
+
     private static String watermark(String conversationId) throws SQLException {
         return TestDatabase.firstColumn(DATABASE, "SELECT data_class_watermark FROM engine.conversation_conversations"
                 + " WHERE conversation_id = '" + conversationId + "'").getFirst();

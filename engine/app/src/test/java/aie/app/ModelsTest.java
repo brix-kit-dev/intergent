@@ -30,6 +30,9 @@ import org.junit.jupiter.api.Test;
 
 class ModelsTest {
 
+    /** A policy that offers the conversation module's task, as a pack that routes it must (M3-4-4). */
+    private static final RegionPack.Policy CHAT = new RegionPack.Policy(Set.of(Answers.TASK), RegionPack.AiDisclosure.REQUIRED);
+
     /** The conversation module names its task, so every region pack has to route that very name. */
     @Test
     void theEngineAsksForTheTaskTheConversationModuleNames() {
@@ -63,10 +66,10 @@ class ModelsTest {
         ModelSpec high = new ModelSpec(FakeModel.MODEL, "fake", "fake", "jp", 0, false, DataClass.SENSITIVE,
                 Set.of(ModelSpec.Capability.TEXT), new ModelSpec.Price(BigDecimal.ZERO, BigDecimal.ZERO));
         Gateway lowOnly = Models.gateway(new RegionPack("jp", Map.of("low", low, FakeModel.MODEL, high), Map.of(Answers.TASK,
-                new Route(List.of("low"), Duration.ofMinutes(2), CheckMode.SENTENCE, TestApi.prompts(List.of("low"))))), () -> false);
+                new Route(List.of("low"), Duration.ofMinutes(2), CheckMode.SENTENCE, TestApi.prompts(List.of("low")))), CHAT), () -> false);
         Gateway both = Models.gateway(new RegionPack("jp", Map.of("low", low, FakeModel.MODEL, high), Map.of(Answers.TASK,
                 new Route(List.of("low", FakeModel.MODEL), Duration.ofMinutes(2), CheckMode.SENTENCE,
-                        TestApi.prompts(List.of("low", FakeModel.MODEL))))),
+                        TestApi.prompts(List.of("low", FakeModel.MODEL)))), CHAT),
                 () -> false);
         List<String> pieces = new ArrayList<>();
 
@@ -137,7 +140,8 @@ class ModelsTest {
         ModelSpec claude = new ModelSpec("bedrock-jp/claude-sonnet-5-5", "anthropic", "claude", "jp", 0, false,
                 DataClass.PERSONAL, Set.of(ModelSpec.Capability.TEXT), new ModelSpec.Price(BigDecimal.ONE, BigDecimal.TEN));
         RegionPack pack = new RegionPack("jp", Map.of(claude.id(), claude),
-                Map.of(Answers.TASK, new Route(List.of(claude.id()), Duration.ofMinutes(2), CheckMode.SENTENCE, TestApi.prompts(List.of(claude.id())))));
+                Map.of(Answers.TASK, new Route(List.of(claude.id()), Duration.ofMinutes(2), CheckMode.SENTENCE, TestApi.prompts(List.of(claude.id())))),
+                CHAT);
 
         assertThatThrownBy(() -> Models.gateway(pack, () -> false))
                 .isInstanceOf(IllegalArgumentException.class)

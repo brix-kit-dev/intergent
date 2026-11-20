@@ -1,0 +1,11 @@
+# What the jp region offers, and what it asks of the answers (blueprint 9.1 and 12.2). Code knows no region (C-8): a
+# request for a task this file does not offer is refused, after identity and before the data class. The engine checks
+# this file before it starts (R-4).
+#
+# tasks          the tasks the region offers; routes.yaml routes exactly these, and each is a task the engine has
+# ai_disclosure  whether an answer must say that an AI wrote it: required or not_required. Kept here, and checked for its
+#                form; the engine acts on it once an operation needs it. Revisit with the platform plan's compliance
+#                findings (P-1).
+policy:
+  tasks: [customer_chat]
+  ai_disclosure: required

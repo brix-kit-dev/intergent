@@ -18,6 +18,7 @@ import aie.core.tenancy.internal.DatabaseEndUsers;
 import aie.core.tenancy.internal.DatabaseIdempotencyKeys;
 import aie.core.tenancy.internal.DatabaseLowerTenants;
 import aie.core.tenancy.internal.DatabaseSiteKeyLookup;
+import aie.core.trust.api.TaskGate;
 import aie.http.StreamLimit;
 import aie.modules.conversation.api.Conversations;
 import aie.modules.conversation.api.EventSignals;
@@ -60,7 +61,8 @@ class ApiRole {
      * the database.
      * The pool runs the self-check of blueprint 7.6 before its first connection, so a role that may not serve traffic
      * never opens a port. The gateway comes next, because it asks the pool whether a call comes from inside a
-     * transaction (A-14); a route to a model that does not exist still refuses startup. The context closes the pool as
+     * transaction (A-14); a route to a model that does not exist still refuses startup. The gate opens the tasks the pack's
+     * policy offers, and no other (M3-4-4). The context closes the pool as
      * it closes, because the pool is AutoCloseable, and so is the generator of answers. Beans close in the reverse order
      * they were registered in, so the generator would end its answers while the pool is still open; it ends them even
      * earlier, while Tomcat drains its requests, through {@link AnswersShutdown} (point 39). A context that fails before
@@ -89,6 +91,7 @@ class ApiRole {
                 context.registerBean(SessionTokens.class, () -> sessionTokens);
                 context.registerBean(StreamLimit.class, () -> streamLimit);
                 context.registerBean(Gateway.class, () -> gateway);
+                context.registerBean(TaskGate.class, () -> pack.policy().tasks()::contains);
                 context.registerBean(Conversations.class, () -> new DatabaseConversations(database));
                 EventSignals signals = new LocalEventSignals();
                 Messages messages = new DatabaseMessages(database, signals);

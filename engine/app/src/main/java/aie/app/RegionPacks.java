@@ -12,9 +12,11 @@ import java.io.InputStream;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -27,16 +29,18 @@ import org.yaml.snakeyaml.constructor.SafeConstructor;
 import org.yaml.snakeyaml.error.YAMLException;
 
 /**
- * Reads a region pack from the engine's jar (blueprint 12.2): {@code regions/<region>/models.yaml} and
- * {@code routes.yaml}, which the build copies from the repository's {@code regions/} directory. A pack loads only when
- * it passes every check (R-4), so a mistake stops the api role before it opens a port rather than failing requests
- * later, and CI checks every pack of the repository the same way:
+ * Reads a region pack from the engine's jar (blueprint 12.2): {@code regions/<region>/models.yaml},
+ * {@code routes.yaml} and {@code policy.yaml}, which the build copies from the repository's {@code regions/} directory. A
+ * pack loads only when it passes every check (R-4), so a mistake stops the api role before it opens a port rather than
+ * failing requests later, and CI checks every pack of the repository the same way:
  * <ul>
- *   <li>every field a model or a route needs is there, and no other: a misspelt field would otherwise be dropped;
+ *   <li>every field a model, a route or the policy needs is there, and no other: a misspelt field would otherwise be
+ *       dropped;
  *   <li>every model's contract allows the highest data class it takes (blueprint 7.3), and the engine has its adapter;
  *   <li>every route names models of the pack, a time limit and its checks (A-15);
  *   <li>every route names one prompt version for each family of its models, and the jar has its text (M3-2);
- *   <li>every task the engine asks for has a route.
+ *   <li>the policy offers only tasks the engine has, and the routes are those of the tasks it offers, no more and no
+ *       fewer (M3-4-4); ai_disclosure is required or not_required.
  * </ul>
  * Each refusal names the file, and the model or the task, so that the operator knows what to fix.
  */
@@ -49,6 +53,7 @@ final class RegionPacks {
     static final String SETTING = "deploy.region";
     static final String MODELS = "models.yaml";
     static final String ROUTES = "routes.yaml";
+    static final String POLICY = "policy.yaml";
 
     /** A region's name, so that it names a directory of the pack and nothing else, such as ../ would. */
     private static final Pattern REGION = Pattern.compile("[a-z][a-z0-9-]{0,31}");
@@ -62,6 +67,7 @@ final class RegionPacks {
     private static final List<String> ROUTE_FIELDS = List.of("models", "timeout_seconds", "checks", "prompts");
     /** A prompt's fields. Only the version so far; a canary goes next to it when one comes (blueprint 8.7). */
     private static final List<String> PROMPT_FIELDS = List.of("version");
+    private static final List<String> POLICY_FIELDS = List.of("tasks", "ai_disclosure");
 
     private RegionPacks() {
     }
@@ -77,7 +83,7 @@ final class RegionPacks {
             throw new IllegalArgumentException(
                     "DEPLOY_REGION must be lower-case letters, digits and -, such as jp, not " + region);
         }
-        return parse(region, resource(region, MODELS), resource(region, ROUTES));
+        return parse(region, resource(region, MODELS), resource(region, ROUTES), resource(region, POLICY));
     }
 
     private static String resource(String region, String file) {
@@ -102,20 +108,59 @@ final class RegionPacks {
     }
 
     /**
-     * Parses the two files of a pack and checks them.
+     * Parses the three files of a pack and checks them. The routes are those of the tasks the policy offers: a route of a
+     * task it does not offer would never be asked for, and a task it offers without a route could not be answered. A pack
+     * may offer nothing; its requests are then all refused by the gate.
      *
      * @throws IllegalArgumentException naming the file and what is wrong
      */
-    static RegionPack parse(String region, String modelsYaml, String routesYaml) {
+    static RegionPack parse(String region, String modelsYaml, String routesYaml, String policyYaml) {
         Map<String, ModelSpec> models = models(region, top(region, MODELS, modelsYaml, "models"));
         Map<String, Route> routes = routes(region, top(region, ROUTES, routesYaml, "routes"), models);
-        for (String task : Models.TASKS) {
-            if (!routes.containsKey(task)) {
+        RegionPack.Policy policy = policy(region, top(region, POLICY, policyYaml, "policy"));
+        for (String task : routes.keySet()) {
+            if (!policy.tasks().contains(task)) {
                 throw new IllegalArgumentException(
-                        file(region, ROUTES) + " has no route for " + task + ", which the engine asks for");
+                        file(region, ROUTES) + " has a route for " + task + ", which " + POLICY + " does not offer");
             }
         }
-        return new RegionPack(region, models, routes);
+        for (String task : policy.tasks()) {
+            if (!routes.containsKey(task)) {
+                throw new IllegalArgumentException(file(region, ROUTES) + " has no route for " + task + ", which " + POLICY + " offers");
+            }
+        }
+        return new RegionPack(region, models, routes, policy);
+    }
+
+    /**
+     * The region's policy (M3-4-4): the tasks it offers, each one the engine has, and whether an answer must say that an AI
+     * wrote it. An empty list of tasks offers nothing.
+     */
+    private static RegionPack.Policy policy(String region, Object node) {
+        String where = file(region, POLICY);
+        Map<String, Object> policy = map(node, where + ": policy");
+        fields(policy, POLICY_FIELDS, POLICY_FIELDS, where + ": policy");
+        if (!(policy.get("tasks") instanceof List<?> listed)) {
+            throw new IllegalArgumentException(where + ": tasks must be a list of the tasks the region offers, not " + policy.get("tasks"));
+        }
+        Set<String> tasks = new LinkedHashSet<>();
+        for (Object item : listed) {
+            String task = text(item, where + ": each task");
+            if (!TASK.matcher(task).matches()) {
+                throw new IllegalArgumentException(where + ": a task is lower-case letters, digits and _, not " + task);
+            }
+            if (!Models.TASKS.contains(task)) {
+                throw new IllegalArgumentException(where + " offers " + task + ", which the engine does not have");
+            }
+            if (!tasks.add(task)) {
+                throw new IllegalArgumentException(where + " offers " + task + " twice");
+            }
+        }
+        Object disclosure = policy.get("ai_disclosure");
+        RegionPack.AiDisclosure aiDisclosure = Arrays.stream(RegionPack.AiDisclosure.values())
+                .filter(value -> value.wireName().equals(disclosure)).findFirst().orElseThrow(() -> new IllegalArgumentException(
+                        where + ": ai_disclosure must be required or not_required, not " + disclosure));
+        return new RegionPack.Policy(tasks, aiDisclosure);
     }
 
     /** The one top-level field of a file. Duplicate keys are refused, since YAML would keep the last one silently. */
@@ -191,9 +236,6 @@ final class RegionPacks {
                     () -> new IllegalArgumentException(what + ": checks must be sentence, full or input, not " + route.get("checks")));
             routes.put(task, new Route(names, Duration.ofSeconds(number), checks, prompts(task, what, route.get("prompts"), names, models)));
         });
-        if (routes.isEmpty()) {
-            throw new IllegalArgumentException(where + " has no route");
-        }
         return routes;
     }
 

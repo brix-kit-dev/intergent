@@ -14,6 +14,7 @@ import aie.core.tenancy.api.SessionTokens;
 import aie.core.tenancy.api.SiteKeyLookup;
 import aie.core.tenancy.internal.SignedSessionTokens;
 import aie.core.trust.api.DataClass;
+import aie.core.trust.api.TaskGate;
 import aie.http.AnswerWait;
 import aie.http.StreamLimit;
 import aie.modules.conversation.api.Answers;
@@ -156,11 +157,20 @@ final class TestApi {
                 new StandInApplications(), args);
     }
 
-    /** With the applications too, such as one whose default data class a test sets (M3-3). */
+    /** With the applications too, such as one whose default data class a test sets (M3-3). Every task is open. */
     static ConfigurableApplicationContext start(ApiKeyLookup keys, ApiKeyManagement management, EndUsers endUsers,
             Conversations conversations, StandInAnswers answers, IdempotencyKeys idempotency, StreamLimit streams,
             AnswerWait wait, Applications applications, String... args) {
+        return start(keys, management, endUsers, conversations, answers, idempotency, streams, wait, applications,
+                task -> true, args);
+    }
+
+    /** With the gate too, such as one that a test closes (M3-4-4). */
+    static ConfigurableApplicationContext start(ApiKeyLookup keys, ApiKeyManagement management, EndUsers endUsers,
+            Conversations conversations, StandInAnswers answers, IdempotencyKeys idempotency, StreamLimit streams,
+            AnswerWait wait, Applications applications, TaskGate gate, String... args) {
         return ApiRole.serve(context -> {
+            context.registerBean(TaskGate.class, () -> gate);
             context.registerBean(StreamLimit.class, () -> streams);
             context.registerBean(ApiKeyLookup.class, () -> keys);
             context.registerBean(ApiKeyManagement.class, () -> management);
