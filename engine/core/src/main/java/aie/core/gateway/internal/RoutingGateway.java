@@ -9,6 +9,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,10 +20,11 @@ import org.slf4j.LoggerFactory;
  * instead of failing requests later. What the end user said goes through the input check before anything of it is
  * stored, and a model gets it only with the receipt this gateway gave for it (M3-4-1, A-15). Every turn a model is shown
  * is masked by the trust layer first, each time it is sent, and a call's class is at least the one its check found
- * (M3-4-2). Every call carries its route's time limit (A-9). A call from inside a database transaction is refused before
- * anything else (A-14). The model gets its family's prompt as instructions (M3-2). A call goes to the first model of its
- * route that takes the call's data class, and never to one below it (blueprint 7.3, M3-3-2). Fallback, retries and
- * budgets are not here yet.
+ * (M3-4-2). What the model writes reaches the caller only through the route's output check, which holds it by the
+ * sentence or whole and can stop the answer (M3-4-3). Every call carries its route's time limit (A-9). A call from inside
+ * a database transaction is refused before anything else (A-14). The model gets its family's prompt as instructions
+ * (M3-2). A call goes to the first model of its route that takes the call's data class, and never to one below it
+ * (blueprint 7.3, M3-3-2). Fallback, retries and budgets are not here yet.
  */
 public final class RoutingGateway implements Gateway {
 
@@ -90,8 +92,12 @@ public final class RoutingGateway implements Gateway {
     /**
      * Refuses a call from inside a transaction first. The question was checked when its receipt was made, so it is not
      * checked again (blueprint 9.1); every turn is masked, though, the question as well, since the history is sent again
-     * with each answer (M3-4-2). The model's reason for a failure goes to the log alone, with the task, the model and the
-     * pieces sent.
+     * with each answer (M3-4-2). Every piece goes through the answer's output check, with the route's check mode and the
+     * model's prompt (M3-4-3). Once the check stops the answer, the model is told to stop as it would be by a cancel, the
+     * pieces it still sends are dropped, and the answer ends as blocked, whatever the model says. What is still held when
+     * the model completes is checked then; what a model that failed or was cancelled leaves held never goes out. The
+     * model's reason for a failure goes to the log alone, with the task, the model and the pieces sent; a stopped answer
+     * is logged by its rule.
      */
     @Override
     public Result answer(Request request, Output output) {
@@ -101,9 +107,23 @@ public final class RoutingGateway implements Gateway {
         Route route = routeOf(request);
         String model = firstTaking(route, request.dataClass());
         Prompt prompt = route.prompts().get(model);
-        ModelPort.Request call = new ModelPort.Request(model, prompt.text(),
-                request.turns().stream().map(this::masked).toList(), route.timeout(), request.cancellation()::requested);
-        ModelPort.Result result = models.get(model).port().generate(call, piece -> output.text(checks.output(request.task(), piece)));
+        Checks.Output check = checks.output(request.task(), route.checks(), prompt.text());
+        AtomicReference<String> stopped = new AtomicReference<>();
+        ModelPort.Request call = new ModelPort.Request(model, prompt.text(), request.turns().stream().map(this::masked).toList(),
+                route.timeout(), () -> stopped.get() != null || request.cancellation().requested());
+        ModelPort.Result result = models.get(model).port().generate(call, piece -> {
+            if (stopped.get() == null) {
+                release(check.piece(piece), output, stopped);
+            }
+        });
+        if (stopped.get() == null && result instanceof ModelPort.Completed) {
+            release(check.end(), output, stopped);
+        }
+        if (stopped.get() != null) {
+            LOG.info("The output check stopped the answer of the model {} to the task {} by the rule {}",
+                    model, request.task(), stopped.get());
+            return new OutputBlocked(stopped.get(), usage(result.usage()));
+        }
         return switch (result) {
             case ModelPort.Completed done -> new Completed(usage(done.usage()));
             case ModelPort.Cancelled cancelled -> new Cancelled(usage(cancelled.usage()));
@@ -166,6 +186,16 @@ public final class RoutingGateway implements Gateway {
     private String firstTaking(Route route, DataClass dataClass) {
         return route.models().stream().filter(model -> models.get(model).maxDataClass().compareTo(dataClass) >= 0)
                 .findFirst().orElseThrow();
+    }
+
+    /** Hands the output what the check released, if anything, or notes the rule that stopped the answer. */
+    private static void release(Checks.Verdict verdict, Output output, AtomicReference<String> stopped) {
+        switch (verdict) {
+            case Checks.Release released when !released.text().isEmpty() -> output.text(released.text());
+            case Checks.Release nothing -> {
+            }
+            case Checks.Stop stop -> stopped.set(stop.rule());
+        }
     }
 
     /** A turn as the model is shown it, with its personal data masked (M3-4-2). */

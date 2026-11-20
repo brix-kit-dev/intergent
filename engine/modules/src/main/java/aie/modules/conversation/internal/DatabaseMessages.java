@@ -312,6 +312,12 @@ public final class DatabaseMessages implements Messages {
         return write(caller, conversationId, messageId, EventType.MESSAGE_CANCELLED, null, required(usage), null);
     }
 
+    /** The database writes the ending, then deletes the answer's deltas, in the statement that adds the event (V9). */
+    @Override
+    public Written block(Owner caller, String conversationId, String messageId, Usage usage) {
+        return write(caller, conversationId, messageId, EventType.MESSAGE_BLOCKED, null, required(usage), ErrorCode.OUTPUT_BLOCKED);
+    }
+
     @Override
     public Written fail(Owner caller, String conversationId, String messageId, ErrorCode code) {
         if (code == null) {
@@ -322,7 +328,7 @@ public final class DatabaseMessages implements Messages {
 
     private static Usage required(Usage usage) {
         if (usage == null) {
-            throw new IllegalArgumentException("An answer that completes or is cancelled needs its usage");
+            throw new IllegalArgumentException("An answer that completes, is blocked or is cancelled needs its usage");
         }
         return usage;
     }

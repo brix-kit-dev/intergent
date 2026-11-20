@@ -26,8 +26,10 @@ public interface Gateway {
     InputCheck checkInput(String task, String text);
 
     /**
-     * Answers a task and hands each piece of the answer to {@code output} as it arrives. Returns once the answer has
-     * ended. A cancel, a failure of the model and the time running out all come back as a result, not as an exception.
+     * Answers a task and hands each piece of the answer to {@code output} once the route's output check has let it out
+     * (M3-4-3): by the sentence, whole, or as it arrives, masked unless the route checks its input alone. Returns once the
+     * answer has ended. A cancel, a failure of the model, the time running out and an answer the output check stopped all
+     * come back as a result, not as an exception.
      *
      * @throws IllegalArgumentException for a task that no route answers, a request that is not well formed, one whose
      *     data class is above the task's {@link #ceiling}, one without this gateway's receipt for its question, or one
@@ -121,7 +123,7 @@ public interface Gateway {
     }
 
     /** How the answer ended. Each result carries the usage up to that point. */
-    sealed interface Result permits Completed, Cancelled, Failed {
+    sealed interface Result permits Completed, Cancelled, Failed, OutputBlocked {
 
         Usage usage();
     }
@@ -141,5 +143,14 @@ public interface Gateway {
      * @param pieces how many pieces reached the output first; with none, nothing of the answer was shown
      */
     record Failed(int pieces, Usage usage) implements Result {
+    }
+
+    /**
+     * The output check stopped the answer (M3-4-3): the model was told to stop, and what the output got of the answer is
+     * void, so the caller takes it back (blueprint 6.4). Why is in the gateway's log too, by the rule's name alone.
+     *
+     * @param rule the rule that stopped it, a stable name such as {@code prompt_leak}; never the text
+     */
+    record OutputBlocked(String rule, Usage usage) implements Result {
     }
 }

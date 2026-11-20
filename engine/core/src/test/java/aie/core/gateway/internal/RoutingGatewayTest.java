@@ -42,6 +42,18 @@ class RoutingGatewayTest {
     private static final Prompt PROMPT = new Prompt("chat/test/v1", "Answer the test.");
     private static final Duration MINUTE = Duration.ofMinutes(1);
     private static final ModelPort.Result DONE = new ModelPort.Completed(new ModelPort.Usage(5, 2));
+    /** An output check that lets every piece out as it came. */
+    private static final Checks.Output AS_IT_IS = new Checks.Output() {
+        @Override
+        public Checks.Verdict piece(String piece) {
+            return new Checks.Release(piece);
+        }
+
+        @Override
+        public Checks.Verdict end() {
+            return new Checks.Release("");
+        }
+    };
     /** Checks that pass every text and every piece as it is, and find no personal data. */
     private static final Checks PASSING = new Checks() {
         @Override
@@ -55,8 +67,8 @@ class RoutingGatewayTest {
         }
 
         @Override
-        public String output(String task, String piece) {
-            return piece;
+        public Output output(String task, CheckMode mode, String instructions) {
+            return AS_IT_IS;
         }
     };
 
@@ -351,8 +363,8 @@ class RoutingGatewayTest {
             }
 
             @Override
-            public String output(String task, String piece) {
-                return piece;
+            public Output output(String task, CheckMode mode, String instructions) {
+                return AS_IT_IS;
             }
         };
         Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a")), Map.of("chat", route("m")), blocking, OUTSIDE);
@@ -380,8 +392,8 @@ class RoutingGatewayTest {
             }
 
             @Override
-            public String output(String task, String piece) {
-                return piece;
+            public Output output(String task, CheckMode mode, String instructions) {
+                return AS_IT_IS;
             }
         };
         Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a")), Map.of("chat", route("m")), failing, OUTSIDE);
@@ -505,6 +517,114 @@ class RoutingGatewayTest {
         Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), PASSING, OUTSIDE);
 
         assertThat(checked(gateway, "chat", "Hello").dataClass()).isEqualTo(DataClass.PUBLIC);
+    }
+
+    /** M3-4-3: each answer's output check gets the task, the route's check mode and the prompt of the model that answers. */
+    @Test
+    void theOutputCheckGetsTheRoutesModeAndTheModelsPrompt() {
+        List<String> opened = new CopyOnWriteArrayList<>();
+        Checks recording = outputs((task, mode, instructions) -> {
+            opened.add(task + " " + mode + " " + instructions);
+            return AS_IT_IS;
+        });
+        Map<String, Prompt> prompts = Map.of("first", new Prompt("chat/first/v2", "First family."),
+                "second", new Prompt("chat/second/v1", "Second family."));
+        Gateway gateway = new RoutingGateway(Map.of("first", model("first", DONE), "second", model("second", DONE)),
+                Map.of("chat", new Route(List.of("first", "second"), MINUTE, CheckMode.FULL, prompts),
+                        "embed", new Route(List.of("second"), MINUTE, CheckMode.INPUT, Map.of("second", prompts.get("second")))),
+                recording, OUTSIDE);
+
+        answer(gateway, ask(gateway, "chat", "Hello"));
+        answer(gateway, ask(gateway, "embed", "Hello"));
+
+        assertThat(opened).containsExactly("chat FULL First family.", "embed INPUT Second family.");
+    }
+
+    /**
+     * M3-4-3: the caller gets what the check lets out, when it lets it out, and nothing for an empty release; what is
+     * still held goes out once the model has completed.
+     */
+    @Test
+    void whatTheCheckHoldsGoesOutWhenTheModelCompletes() {
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a", "b", "c")), Map.of("chat", route("m")),
+                outputs((task, mode, instructions) -> holding(new StringBuilder())), OUTSIDE);
+
+        Result result = answer(gateway, ask(gateway, "chat", "Hello"));
+
+        assertThat(events).containsExactly("model m", "caller abc");
+        assertThat(result).isEqualTo(new Completed(new Usage(5, 2)));
+    }
+
+    /**
+     * M3-4-3: a stop ends the answer as blocked: the model is told to stop as by a cancel, the caller keeps only what went
+     * out before, and the log names the rule and never the text.
+     */
+    @Test
+    @ExtendWith(OutputCaptureExtension.class)
+    void aStopTellsTheModelToStopAndEndsTheAnswerBlocked(CapturedOutput log) {
+        List<String> checked = new CopyOnWriteArrayList<>();
+        Gateway gateway = new RoutingGateway(Map.of("m", new RoutingGateway.Model(listening("a", "secret b", "c"), DataClass.SENSITIVE)),
+                Map.of("chat", route("m")), outputs((task, mode, instructions) -> stoppingAt("secret", checked)), OUTSIDE);
+
+        Result result = answer(gateway, ask(gateway, "chat", "Hello"));
+
+        assertThat(result).isEqualTo(new Gateway.OutputBlocked("test_rule", new Usage(5, 2)));
+        assertThat(events).containsExactly("caller a", "model stopped");
+        assertThat(checked).containsExactly("a", "secret b");
+        assertThat(log).contains("The output check stopped the answer of the model m to the task chat by the rule test_rule")
+                .doesNotContain("secret b");
+    }
+
+    /**
+     * M3-4-3: a model that goes on after the stop is not heard: its pieces reach neither the check nor the caller, and a
+     * completion after the stop still ends the answer blocked, with the model's usage, and nothing held goes out.
+     */
+    @Test
+    void aModelThatGoesOnAfterTheStopIsNotHeard() {
+        List<String> checked = new CopyOnWriteArrayList<>();
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a", "secret b", "c", "d")), Map.of("chat", route("m")),
+                outputs((task, mode, instructions) -> stoppingAt("secret", checked)), OUTSIDE);
+
+        Result result = answer(gateway, ask(gateway, "chat", "Hello"));
+
+        assertThat(result).isEqualTo(new Gateway.OutputBlocked("test_rule", new Usage(5, 2)));
+        assertThat(checked).containsExactly("a", "secret b");
+        assertThat(events).containsExactly("model m", "caller a");
+    }
+
+    /** M3-4-3: what the check holds when the model fails or is cancelled never goes out, and the result is the model's. */
+    @Test
+    void whatIsHeldWhenTheModelFailsOrIsCancelledNeverGoesOut() {
+        Gateway gateway = new RoutingGateway(Map.of(
+                        "breaks", model("breaks", new ModelPort.Failed("the model's own words", 2, new ModelPort.Usage(4, 6)), "a", "b"),
+                        "stops", model("stops", new ModelPort.Cancelled(new ModelPort.Usage(4, 1)), "a")),
+                Map.of("break", route("breaks"), "stop", route("stops")),
+                outputs((task, mode, instructions) -> holding(new StringBuilder())), OUTSIDE);
+
+        assertThat(answer(gateway, ask(gateway, "break", "Hello"))).isEqualTo(new Failed(2, new Usage(4, 6)));
+        assertThat(answer(gateway, ask(gateway, "stop", "Hello"))).isEqualTo(new Cancelled(new Usage(4, 1)));
+        assertThat(events).containsExactly("model breaks", "model stops");
+    }
+
+    /** M3-4-3: a check that stops the answer at its end, once the model completed, ends it blocked with the usage. */
+    @Test
+    void aStopAtTheEndEndsTheAnswerBlocked() {
+        Checks.Output stopsAtTheEnd = new Checks.Output() {
+            @Override
+            public Checks.Verdict piece(String piece) {
+                return new Checks.Release("");
+            }
+
+            @Override
+            public Checks.Verdict end() {
+                return new Checks.Stop("test_rule");
+            }
+        };
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a")), Map.of("chat", route("m")),
+                outputs((task, mode, instructions) -> stopsAtTheEnd), OUTSIDE);
+
+        assertThat(answer(gateway, ask(gateway, "chat", "Hello"))).isEqualTo(new Gateway.OutputBlocked("test_rule", new Usage(5, 2)));
+        assertThat(events).containsExactly("model m");
     }
 
     /**
@@ -664,6 +784,79 @@ class RoutingGatewayTest {
         assertThat(answer(second, ask(second, "chat", "Hello"))).isInstanceOf(Completed.class);
     }
 
+    /** How a test opens the output check of each answer. */
+    @FunctionalInterface
+    private interface Outputs {
+
+        Checks.Output open(String task, CheckMode mode, String instructions);
+    }
+
+    /** Checks that pass every text, find no personal data, mask nothing, and open each answer's output check so. */
+    private static Checks outputs(Outputs outputs) {
+        return new Checks() {
+            @Override
+            public Input input(String task, String text) {
+                return new Passed(DataClass.PUBLIC);
+            }
+
+            @Override
+            public String masked(String text) {
+                return text;
+            }
+
+            @Override
+            public Output output(String task, CheckMode mode, String instructions) {
+                return outputs.open(task, mode, instructions);
+            }
+        };
+    }
+
+    /** An output check that holds everything and lets it all out at the end. */
+    private static Checks.Output holding(StringBuilder held) {
+        return new Checks.Output() {
+            @Override
+            public Checks.Verdict piece(String piece) {
+                held.append(piece);
+                return new Checks.Release("");
+            }
+
+            @Override
+            public Checks.Verdict end() {
+                return new Checks.Release(held.toString());
+            }
+        };
+    }
+
+    /** An output check that notes each piece, lets it out, and stops the answer at the first piece with this word. */
+    private static Checks.Output stoppingAt(String word, List<String> checked) {
+        return new Checks.Output() {
+            @Override
+            public Checks.Verdict piece(String piece) {
+                checked.add(piece);
+                return piece.contains(word) ? new Checks.Stop("test_rule") : new Checks.Release(piece);
+            }
+
+            @Override
+            public Checks.Verdict end() {
+                return new Checks.Release("");
+            }
+        };
+    }
+
+    /** A model that sends its pieces, but stops as soon as it is told to, as a real one does. */
+    private ModelPort listening(String... pieces) {
+        return (request, output) -> {
+            for (String piece : pieces) {
+                if (request.cancellation().requested()) {
+                    events.add("model stopped");
+                    return new ModelPort.Cancelled(new ModelPort.Usage(5, 2));
+                }
+                output.text(piece);
+            }
+            return DONE;
+        };
+    }
+
     /** Checks that pass every text, find this class in it, and mask every run of digits as [n]. */
     private static Checks masking(DataClass found) {
         return new Checks() {
@@ -678,8 +871,8 @@ class RoutingGatewayTest {
             }
 
             @Override
-            public String output(String task, String piece) {
-                return piece;
+            public Output output(String task, CheckMode mode, String instructions) {
+                return AS_IT_IS;
             }
         };
     }
@@ -702,9 +895,19 @@ class RoutingGatewayTest {
             }
 
             @Override
-            public String output(String task, String piece) {
-                events.add("output " + task + " " + piece);
-                return piece.toUpperCase(Locale.ROOT);
+            public Output output(String task, CheckMode mode, String instructions) {
+                return new Output() {
+                    @Override
+                    public Verdict piece(String piece) {
+                        events.add("output " + task + " " + piece);
+                        return new Release(piece.toUpperCase(Locale.ROOT));
+                    }
+
+                    @Override
+                    public Verdict end() {
+                        return new Release("");
+                    }
+                };
             }
         };
     }

@@ -40,6 +40,8 @@ import org.slf4j.MDC;
  * <p>How an answer ends:
  * <ul>
  *   <li>The model completed: message.completed with its usage.
+ *   <li>The output check stopped the answer: message.blocked with output_blocked and the model's usage, and what was
+ *       sent of the answer is void (M3-4-3).
  *   <li>The model failed or ran out of time: error with model_failed.
  *   <li>The writer itself went wrong, for instance a write did not go through, or the instance stopped it while
  *       stopping: the model is stopped, then error with stream_interrupted is written. When even that cannot be
@@ -321,14 +323,15 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
 
         /**
          * The ending the model's result calls for. A model that completed keeps its answer whole, even while the instance
-         * stops. Any other result of a stopped answer is the instance's doing, not the model's. An answer someone asked to
-         * cancel ends as cancelled, whatever the model did, with the usage it reports; so does one whose request only
-         * shows when its ending is refused.
+         * stops, and a blocked answer is void whatever stopped. Any other result of a stopped answer is the instance's
+         * doing, not the model's. An answer someone asked to cancel ends as cancelled, whatever the model did, with the
+         * usage it reports; so does one whose request only shows when its ending is refused.
          */
         void end(Gateway.Result result) {
             Usage usage = usage(result.usage());
             Written ending = cancelRequested ? new Written.CancelRequested() : switch (result) {
                 case Gateway.Completed done -> messages.complete(caller, conversationId, id(), usage);
+                case Gateway.OutputBlocked blocked -> messages.block(caller, conversationId, id(), usage);
                 case Gateway.Failed failed when !stopped -> messages.fail(caller, conversationId, id(), ErrorCode.MODEL_FAILED);
                 default -> messages.fail(caller, conversationId, id(), ErrorCode.STREAM_INTERRUPTED);
             };

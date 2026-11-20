@@ -109,10 +109,10 @@ class CancellingAnswersTest {
                 Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), Duration.ofSeconds(60), CheckMode.SENTENCE, TestApi.prompts(List.of(FakeModel.MODEL)))), Models.checks(), pool::insideTx);
     }
 
-    /** The real gateway with a stub model. */
+    /** The real gateway with a stub model, on a route that checks the input alone, so each piece goes out as written. */
     private static Gateway stub(ModelPort model) {
         return new RoutingGateway(Map.of("stub", new RoutingGateway.Model(model, DataClass.SENSITIVE)),
-                Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), CheckMode.SENTENCE, TestApi.prompts(List.of("stub")))), Models.checks(), pool::insideTx);
+                Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), CheckMode.INPUT, TestApi.prompts(List.of("stub")))), Models.checks(), pool::insideTx);
     }
 
     private static Started started(Start start) {

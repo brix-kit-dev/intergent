@@ -251,7 +251,8 @@ class CancelRequestsTest {
 
     /**
      * An answer that ended before the request stays as it ended, and the request is not kept. A cancelled one had its own
-     * request before it ended, since message.cancelled needs one (point 41); a later request adds nothing to it.
+     * request before it ended, since message.cancelled needs one (point 41); a later request adds nothing to it. A blocked
+     * one lost its delta to the block (M3-4-3).
      */
     @ParameterizedTest
     @EnumSource(value = Status.class, names = "IN_PROGRESS", mode = EnumSource.Mode.EXCLUDE)
@@ -265,6 +266,7 @@ class CancelRequestsTest {
                 messages.requestCancel(caller, conversation, answer);
                 messages.cancel(caller, conversation, answer, USAGE);
             }
+            case BLOCKED -> messages.block(caller, conversation, answer, USAGE);
             default -> messages.fail(caller, conversation, answer, ErrorCode.MODEL_FAILED);
         }
         Message ended = found(caller, conversation, answer);
@@ -277,7 +279,7 @@ class CancelRequestsTest {
         assertThat(requests()).isEqualTo(before);
         assertThat(found(caller, conversation, answer)).isEqualTo(ended);
         assertThat(ended.status()).isEqualTo(ending);
-        assertThat(events(caller, conversation, answer)).hasSize(3);
+        assertThat(events(caller, conversation, answer)).hasSize(ending == Status.BLOCKED ? 2 : 3);
     }
 
     /**

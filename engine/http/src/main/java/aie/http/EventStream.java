@@ -3,6 +3,7 @@ package aie.http;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 import aie.core.tenancy.api.ApiKeyLookup.Owner;
+import aie.http.api.model.MessageBlockedEvent;
 import aie.http.api.model.MessageCancelledEvent;
 import aie.http.api.model.MessageCompletedEvent;
 import aie.http.api.model.MessageDeltaEvent;
@@ -191,12 +192,16 @@ final class EventStream {
                 + JSON.writeValueAsString(data(event)) + "\n\n").getBytes(UTF_8);
     }
 
-    /** The contract's JSON of each type. An error is a problem whose code says why, and never the model's own words. */
+    /**
+     * The contract's JSON of each type. An error is a problem whose code says why, and never the model's own words; so is
+     * message.blocked a code alone, never what was blocked (M3-4-3).
+     */
     private static Object data(Event event) {
         return switch (event.type()) {
             case MESSAGE_STARTED -> new MessageStartedEvent(event.messageId());
             case MESSAGE_DELTA -> new MessageDeltaEvent(event.messageId(), event.text());
             case MESSAGE_COMPLETED -> new MessageCompletedEvent(event.messageId(), usage(event));
+            case MESSAGE_BLOCKED -> new MessageBlockedEvent(event.messageId(), event.code().wireName());
             case MESSAGE_CANCELLED -> new MessageCancelledEvent(event.messageId(), event.text(), usage(event));
             case ERROR -> Problems.of(status(event.code()), event.code().wireName(), null);
         };
@@ -204,12 +209,14 @@ final class EventStream {
 
     /**
      * The status an error event's problem carries, although the response itself is a 200 by then: the model failed
-     * upstream, 502; the writer went away, 503. Callers read the code.
+     * upstream, 502; the writer went away, 503. Callers read the code. output_blocked comes with message.blocked, never
+     * with an error event, which the database holds to.
      */
     static int status(ErrorCode code) {
         return switch (code) {
             case MODEL_FAILED -> 502;
             case STREAM_INTERRUPTED -> 503;
+            case OUTPUT_BLOCKED -> throw new IllegalStateException("output_blocked comes with message.blocked, not with error");
         };
     }
 
@@ -219,6 +226,7 @@ final class EventStream {
 
     /** Whether an event of this type ends its answer, so that nothing can follow it. */
     static boolean ending(EventType type) {
-        return type == EventType.MESSAGE_COMPLETED || type == EventType.MESSAGE_CANCELLED || type == EventType.ERROR;
+        return type == EventType.MESSAGE_COMPLETED || type == EventType.MESSAGE_BLOCKED || type == EventType.MESSAGE_CANCELLED
+                || type == EventType.ERROR;
     }
 }

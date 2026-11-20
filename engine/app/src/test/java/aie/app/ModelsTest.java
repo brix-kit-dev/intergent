@@ -113,6 +113,24 @@ class ModelsTest {
         assertThat(((Checked) gateway.checkInput(Answers.TASK, "Where is my parcel?")).dataClass()).isEqualTo(DataClass.PUBLIC);
     }
 
+    /**
+     * M3-4-3: the jp pack checks answers by the sentence with the trust layer's output check, so the fake model's echo of
+     * its prompt is stopped before any of it goes out.
+     */
+    @Test
+    void theGatewayOfThePackStopsAPromptLeak() {
+        Gateway gateway = Models.gateway(RegionPacks.read("jp"), () -> false);
+        String said = "[fake echo=instructions] Hi";
+        List<String> pieces = new ArrayList<>();
+
+        Result result = gateway.answer(new Request(Answers.TASK, List.of(new Turn(Role.USER, said)), () -> false, DataClass.PUBLIC,
+                (Checked) gateway.checkInput(Answers.TASK, said)), pieces::add);
+
+        assertThat(result).isInstanceOf(Gateway.OutputBlocked.class);
+        assertThat(((Gateway.OutputBlocked) result).rule()).isEqualTo("prompt_leak");
+        assertThat(pieces).isEmpty();
+    }
+
     /** RegionPacks refuses such a pack too; this is the gateway's own guard for a pack made any other way. */
     @Test
     void aModelWhoseAdapterTheEngineDoesNotHaveIsRefused() {

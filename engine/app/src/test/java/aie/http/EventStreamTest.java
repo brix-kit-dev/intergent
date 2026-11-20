@@ -219,10 +219,34 @@ class EventStreamTest {
                 "{\"message_id\":\"msg_1\",\"text\":\"Hel\",\"usage\":{\"input_tokens\":6,\"output_tokens\":1}}"));
     }
 
+    /**
+     * M3-4-3: message.blocked is an ending that carries its code alone, never what was blocked, and the stream ends
+     * there; the deltas it voided are gone from the log.
+     */
+    @Test
+    void aBlockIsAnEndingWithItsCodeAlone() {
+        log.at(Duration.ZERO, started(1))
+                .at(Duration.ZERO, event(4, EventType.MESSAGE_BLOCKED, null, new Messages.Usage(6, 2), ErrorCode.OUTPUT_BLOCKED));
+
+        String sent = send(0);
+
+        assertThat(sent).startsWith(sse(1, "message.started", "{\"message_id\":\"msg_1\"}") + "id: 4\nevent: message.blocked\ndata: ");
+        Map<?, ?> blocked = JSON.readValue(sent.lines().toList().get(6).substring("data: ".length()), Map.class);
+        assertThat(blocked).isEqualTo(Map.of("message_id", "msg_1", "code", "output_blocked"));
+        assertThat(EventStream.ending(EventType.MESSAGE_BLOCKED)).isTrue();
+    }
+
+    /** output_blocked comes with message.blocked; an error event never carries it, which the database holds to. */
+    @Test
+    void outputBlockedIsNoErrorEventsCode() {
+        assertThatThrownBy(() -> EventStream.status(ErrorCode.OUTPUT_BLOCKED)).isInstanceOf(IllegalStateException.class)
+                .hasMessage("output_blocked comes with message.blocked, not with error");
+    }
+
     /** M2-7 decision 1: 502 when the model failed upstream, 503 when the writer went away. Callers read the code. */
     @Test
     void anErrorIsAProblemWithItsCode() {
-        for (ErrorCode code : ErrorCode.values()) {
+        for (ErrorCode code : List.of(ErrorCode.MODEL_FAILED, ErrorCode.STREAM_INTERRUPTED)) {
             Log one = new Log(time).at(Duration.ZERO, event(1, EventType.ERROR, null, null, code));
             ByteArrayOutputStream out = new ByteArrayOutputStream();
 

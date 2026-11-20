@@ -520,6 +520,11 @@ final class TestApi {
         }
 
         @Override
+        public Written block(Owner caller, String conversationId, String messageId, Usage usage) {
+            throw notNeeded();
+        }
+
+        @Override
         public CancelRequest requestCancel(Owner caller, String conversationId, String messageId) {
             throw notNeeded();
         }

@@ -11,8 +11,9 @@ import java.util.Optional;
 /**
  * The messages of a conversation (blueprint 6.3), and the event log of each answer (blueprint 6.4). What the end user
  * says is stored whole. An answer starts in progress with its message.started event, grows by message.delta events, and
- * ends with exactly one ending event: completed, cancelled or error. Every call works within the caller's application, as
- * {@link Conversations} does: a conversation of another application or tenant is treated as one that does not exist.
+ * ends with exactly one ending event: completed, blocked, cancelled or error. Every call works within the caller's
+ * application, as {@link Conversations} does: a conversation of another application or tenant is treated as one that does
+ * not exist.
  */
 public interface Messages {
 
@@ -90,6 +91,14 @@ public interface Messages {
     Written fail(Owner caller, String conversationId, String messageId, ErrorCode code);
 
     /**
+     * Ends an answer with message.blocked and output_blocked, as the output check stopped it (M3-4-3): what was sent of it
+     * is void (blueprint 6.4). In the same transaction, its deltas go after the ending is written, so that the numbers
+     * never go back and a stream that resumes finds the ending; the answer keeps no text, and keeps its usage, since the
+     * model was paid for.
+     */
+    Written block(Owner caller, String conversationId, String messageId, Usage usage);
+
+    /**
      * Asks for an answer in progress to be cancelled (blueprint 6.4), whichever instance writes it. The request is kept
      * with the answer: from then on, the answer takes no more deltas, and message.cancelled is the only ending it can
      * get, so its writer meets {@link Written.CancelRequested} at its next write. Asking again changes nothing. Of a
@@ -154,12 +163,12 @@ public interface Messages {
 
     /** Where a message stands. Only an answer is ever in progress. */
     enum Status {
-        IN_PROGRESS, COMPLETED, CANCELLED, FAILED
+        IN_PROGRESS, COMPLETED, BLOCKED, CANCELLED, FAILED
     }
 
     /** The kinds of event, by the names the contract gives them. */
     enum EventType {
-        MESSAGE_STARTED, MESSAGE_DELTA, MESSAGE_COMPLETED, MESSAGE_CANCELLED, ERROR;
+        MESSAGE_STARTED, MESSAGE_DELTA, MESSAGE_COMPLETED, MESSAGE_BLOCKED, MESSAGE_CANCELLED, ERROR;
 
         /** The contract's name, such as message.delta. */
         public String wireName() {
@@ -167,12 +176,14 @@ public interface Messages {
         }
     }
 
-    /** Why an answer failed after it started (blueprint 6.10). */
+    /** Why an answer ended early after it started (blueprint 6.10). */
     enum ErrorCode {
         /** The model failed partway. */
         MODEL_FAILED,
         /** The writer stopped answering, and a reader ended the answer for it. */
-        STREAM_INTERRUPTED;
+        STREAM_INTERRUPTED,
+        /** The output check stopped the answer, which ended with message.blocked (M3-4-3). */
+        OUTPUT_BLOCKED;
 
         /** The contract's code, such as model_failed. */
         public String wireName() {
@@ -311,7 +322,8 @@ public interface Messages {
 
     /**
      * A message. While it is in progress, its completedAt, usage and code are null, and the text of an answer is its
-     * deltas so far. An ended answer has usage when it completed or was cancelled, and a code when it failed.
+     * deltas so far. An ended answer has usage when it completed, was blocked or was cancelled, and a code when it failed
+     * or was blocked; a blocked one has no text.
      */
     record Message(String messageId, String conversationId, Role role, Status status, String text, Usage usage,
             ErrorCode code, Instant createdAt, Instant completedAt) {
@@ -319,7 +331,7 @@ public interface Messages {
 
     /**
      * An event of an answer, with its number. A delta has text, and message.cancelled has what was generated. Usage comes
-     * with message.completed and message.cancelled, a code with error.
+     * with message.completed, message.blocked and message.cancelled, a code with error and message.blocked.
      */
     record Event(String messageId, long seq, EventType type, String text, Usage usage, ErrorCode code, Instant createdAt) {
     }

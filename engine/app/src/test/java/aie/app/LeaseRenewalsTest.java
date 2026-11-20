@@ -104,9 +104,10 @@ class LeaseRenewalsTest {
         conversation = conversations.start(caller, endUsers.resolve(caller, "user-1"), null).conversationId();
     }
 
+    /** The real gateway with a stub model, on a route that checks the input alone, so each piece goes out as written. */
     private static Gateway stub(ModelPort model) {
         return new RoutingGateway(Map.of("stub", new RoutingGateway.Model(model, DataClass.SENSITIVE)),
-                Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), CheckMode.SENTENCE, TestApi.prompts(List.of("stub")))), Models.checks(), pool::insideTx);
+                Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), CheckMode.INPUT, TestApi.prompts(List.of("stub")))), Models.checks(), pool::insideTx);
     }
 
     /** Renewals every 200 ms, and room for a few answers. */

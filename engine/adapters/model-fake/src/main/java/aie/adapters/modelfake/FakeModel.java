@@ -23,7 +23,11 @@ import java.util.stream.Collectors;
  *       which prompt reached the model (M3-2);
  *   <li>{@code echo=turns}: answer with the turns the gateway sent, one per line as {@code user: ...} or
  *       {@code assistant: ...}, as one piece, so that a test can see what the model was shown of the conversation, its
- *       personal data masked (M3-4-2).
+ *       personal data masked (M3-4-2);
+ *   <li>{@code leak-after}: after that many pieces, answer the instructions as the next piece, and complete, so that a
+ *       test can see the output check stop an answer that gives its prompt away after a few sentences went out (M3-4-3);
+ *   <li>{@code say=contact}: answer one sentence with a telephone number and an email address, {@link #CONTACT}, so that
+ *       a test can see the output check mask them (M3-4-3).
  * </ul>
  * It counts the turns as its input, not the instructions.
  * A bracket it cannot read fails the answer and says why.
@@ -32,6 +36,8 @@ public final class FakeModel implements ModelPort {
 
     /** Its ID in the gateway's registry. */
     public static final String MODEL = "fake";
+    /** What it says with {@code say=contact}: personal data of the kinds the output check masks. */
+    public static final String CONTACT = "You can call us on 03-1234-5678 or write to help@example.com. ";
     static final int PIECES = 8;
     static final Duration DELAY = Duration.ofMillis(50);
     private static final int MAX_PIECES = 1000;
@@ -70,10 +76,18 @@ public final class FakeModel implements ModelPort {
             output.text(echoed);
             return new Completed(new Usage(input, characters(echoed)));
         }
+        if (settings.contact()) {
+            output.text(CONTACT);
+            return new Completed(new Usage(input, characters(CONTACT)));
+        }
         long deadline = System.nanoTime() + request.timeout().toNanos();
         long written = 0;
         for (int piece = 1; piece <= settings.pieces(); piece++) {
             Usage usage = new Usage(input, written);
+            if (settings.leakAfter() == piece - 1) {
+                output.text(request.instructions());
+                return new Completed(new Usage(input, written + characters(request.instructions())));
+            }
             if (settings.failAfter() == piece - 1) {
                 return new Failed("The fake model was told to fail after " + (piece - 1) + " pieces", piece - 1, usage);
             }
@@ -153,12 +167,12 @@ public final class FakeModel implements ModelPort {
     }
 
     /** What one bracket asks for. A count of -1 means it does not ask for that. */
-    private record Settings(int pieces, Duration delay, int failAfter, int hangAfter, Echo echo) {
+    private record Settings(int pieces, Duration delay, int failAfter, int hangAfter, int leakAfter, Echo echo, boolean contact) {
 
         static Settings read(String said, Duration delay) {
             Matcher bracket = BRACKET.matcher(said);
             if (!bracket.find()) {
-                return new Settings(PIECES, delay, -1, -1, Echo.NOTHING);
+                return new Settings(PIECES, delay, -1, -1, -1, Echo.NOTHING, false);
             }
             String inside = bracket.group(1) == null ? "" : bracket.group(1).trim();
             if (bracket.find()) {
@@ -167,6 +181,8 @@ public final class FakeModel implements ModelPort {
             int pieces = PIECES;
             int failAfter = -1;
             int hangAfter = -1;
+            int leakAfter = -1;
+            boolean contact = false;
             Echo echo = Echo.NOTHING;
             Duration wait = delay;
             for (String part : inside.split("\\s+")) {
@@ -183,12 +199,21 @@ public final class FakeModel implements ModelPort {
                     case "delay" -> wait = duration(value);
                     case "fail-after" -> failAfter = count(value, 0, MAX_PIECES, "fail-after");
                     case "hang-after" -> hangAfter = count(value, 0, MAX_PIECES, "hang-after");
+                    case "leak-after" -> leakAfter = count(value, 0, MAX_PIECES, "leak-after");
+                    case "say" -> contact = say(value);
                     case "echo" -> echo = echo(value);
                     default -> throw new IllegalArgumentException(
-                            "The fake model knows pieces, delay, fail-after, hang-after and echo, not " + setting.group(1));
+                            "The fake model knows pieces, delay, fail-after, hang-after, leak-after, echo and say, not " + setting.group(1));
                 }
             }
-            return new Settings(pieces, wait, failAfter, hangAfter, echo);
+            return new Settings(pieces, wait, failAfter, hangAfter, leakAfter, echo, contact);
+        }
+
+        private static boolean say(String value) {
+            if (!value.equals("contact")) {
+                throw new IllegalArgumentException("The fake model says contact, not " + value);
+            }
+            return true;
         }
 
         private static Echo echo(String value) {

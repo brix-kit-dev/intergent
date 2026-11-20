@@ -1002,6 +1002,54 @@ class ApiRoleTest {
         assertThat(watermark(id)).isEqualTo("personal");
     }
 
+    /**
+     * M3-4-3 on the real database and the role's own gateway: the jp pack checks answers by the sentence. An answer that
+     * gives the prompt away after two sentences went out ends blocked: the stream sends the sentences it read before the
+     * block, in order, then message.blocked with output_blocked. The block deletes the deltas in the statement that ends
+     * the answer, so a reader that had not read one yet never sees it, which is why the count is not fixed; 300 ms
+     * between pieces makes it two as a rule. The answer then has no text, and its log only its start and its ending, so a
+     * stream read again from the start sends no voided sentence. A sentence with a telephone number and an email address
+     * goes out masked, and is stored so.
+     */
+    @Test
+    void anAnswerThatGivesThePromptAwayEndsBlockedAndContactsAreMasked() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String key = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "public")).key();
+        String id = JSON.readValue(startConversation(key, "out-1", "{\"external_user_id\":\"host-user-1\"}").body(),
+                Conversation.class).getId();
+
+        HttpResponse<String> streamed = HttpClient.newHttpClient().send(streamedWithKey(port, key, "out-2", id,
+                "{\"text\":\"[fake pieces=5 delay=300ms leak-after=2] Hi\"}"), HttpResponse.BodyHandlers.ofString());
+
+        List<String> sent = eventsOf(streamed.body());
+        List<String> kinds = lines(sent, "event: ");
+        assertThat(kinds.getFirst()).isEqualTo("event: message.started");
+        assertThat(kinds.getLast()).isEqualTo("event: message.blocked");
+        assertThat(kinds.subList(1, kinds.size() - 1)).hasSizeLessThanOrEqualTo(2).containsOnly("event: message.delta");
+        assertThat(lines(sent, "data: ").subList(1, kinds.size() - 1)).zipSatisfy(
+                List.of("Piece 1 of 5. ", "Piece 2 of 5. ").subList(0, kinds.size() - 2),
+                (data, piece) -> assertThat(data).contains("\"text\":\"" + piece + "\""));
+        assertThat(streamed.body()).doesNotContain("You answer the customers");
+        String answerId = JSON.readValue(lines(sent, "data: ").getFirst().substring("data: ".length()), Map.class)
+                .get("message_id").toString();
+        Map<?, ?> ending = JSON.readValue(lines(sent, "data: ").getLast().substring("data: ".length()), Map.class);
+        assertThat(ending).isEqualTo(Map.of("message_id", answerId, "code", "output_blocked"));
+        Message blocked = JSON.readValue(readMessage(key, id, answerId).body(), Message.class);
+        assertThat(blocked.getStatus()).isEqualTo("blocked");
+        assertThat(blocked.getCode()).isEqualTo("output_blocked");
+        assertThat(blocked.getText()).isEmpty();
+        assertThat(blocked.getUsage()).isNotNull();
+        assertThat(lines(eventsOf(events(port, key, id, answerId, null).body()), "event: "))
+                .containsExactly("event: message.started", "event: message.blocked");
+
+        HttpResponse<String> contact = sendMessage(key, "out-3", id, "{\"text\":\"[fake say=contact] How do I reach you?\"}");
+
+        assertThat(JSON.readValue(contact.body(), Message.class).getText()).isEqualTo("You can call us on [phone] or write to [email]. ");
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT text FROM engine.conversation_messages WHERE conversation_id = '"
+                + id + "' AND role = 'assistant' AND status = 'completed'")).containsExactly("You can call us on [phone] or write to [email]. ");
+    }
+
     private static String watermark(String conversationId) throws SQLException {
         return TestDatabase.firstColumn(DATABASE, "SELECT data_class_watermark FROM engine.conversation_conversations"
                 + " WHERE conversation_id = '" + conversationId + "'").getFirst();

@@ -222,6 +222,42 @@ class FakeModelTest {
                 turns.stream().mapToLong(turn -> turn.text().length()).sum(), echoed.length())));
     }
 
+    /** M3-4-3: leak-after gives the instructions away after so many pieces, as one more piece, and completes. */
+    @Test
+    void itLeaksTheInstructionsAfterSoManyPieces() {
+        Result result = generate("[fake pieces=5 leak-after=2]");
+
+        assertThat(pieces).containsExactly("Piece 1 of 5. ", "Piece 2 of 5. ", INSTRUCTIONS);
+        assertThat(result).isEqualTo(new Completed(new Usage("[fake pieces=5 leak-after=2]".length(),
+                2 * "Piece 1 of 5. ".length() + INSTRUCTIONS.length())));
+    }
+
+    @Test
+    void itCanLeakAtOnce() {
+        generate("[fake leak-after=0]");
+
+        assertThat(pieces).containsExactly(INSTRUCTIONS);
+    }
+
+    /** M3-4-3: say=contact answers one sentence with a telephone number and an email address, for the output check. */
+    @Test
+    void itSaysAContactWhenAsked() {
+        Result result = generate("[fake say=contact] How do I reach you?");
+
+        assertThat(pieces).containsExactly("You can call us on 03-1234-5678 or write to help@example.com. ");
+        assertThat(pieces).containsExactly(FakeModel.CONTACT);
+        assertThat(result).isEqualTo(new Completed(new Usage("[fake say=contact] How do I reach you?".length(),
+                FakeModel.CONTACT.length())));
+    }
+
+    @Test
+    void itSaysNothingElse() {
+        Result result = generate("[fake say=hello]");
+
+        assertThat(pieces).isEmpty();
+        assertThat(((Failed) result).reason()).isEqualTo("The fake model says contact, not hello");
+    }
+
     @Test
     void itEchoesNothingElse() {
         Result result = generate("[fake echo=prompt]");

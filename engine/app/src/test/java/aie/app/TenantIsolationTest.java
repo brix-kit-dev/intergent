@@ -75,9 +75,9 @@ class TenantIsolationTest {
                     INSERT INTO conversation_messages (message_id, tenant_id, conversation_id, role, status, data_class)
                     VALUES ('msg_{tenant}', '{tenant}', 'conv_{tenant}', 'assistant', 'in_progress', 'public')
                     """, "A message changes only through its events"),
-            Sample.appendOnly("conversation_events", """
+            Sample.voidsOnly("conversation_events", """
                     INSERT INTO conversation_events (tenant_id, message_id, type) VALUES ('{tenant}', 'msg_{tenant}', 'message.started')
-                    """),
+                    """, "Events are only added"),
             Sample.appendOnly("conversation_cancel_requests", """
                     INSERT INTO conversation_cancel_requests (tenant_id, message_id) VALUES ('{tenant}', 'msg_{tenant}')
                     """),
@@ -113,33 +113,48 @@ class TenantIsolationTest {
          * Neither by hand: the table grants UPDATE because its own rules need it, and refuses every change engine_app asks
          * for. It grants no DELETE.
          */
-        REFUSES_CHANGES
+        REFUSES_CHANGES,
+        /**
+         * Neither by hand: the table grants no UPDATE, and DELETE because its own rules need it, and refuses every delete
+         * engine_app asks for itself; only message.blocked voids deltas (V9).
+         */
+        VOIDS_ONLY
     }
 
     /**
      * How to add one row of a table for any tenant. Where engine_app may not change its own rows, the tests check that
      * the database refuses with the sample's refusal instead.
      */
-    private record Sample(String table, String insert, Writes writes, String refusal) {
+    private record Sample(String table, String insert, Writes writes, String refusal, String deleteRefusal) {
 
         Sample(String table, String insert) {
-            this(table, insert, Writes.OWN_ROWS, null);
+            this(table, insert, Writes.OWN_ROWS, null, null);
         }
 
         static Sample appendOnly(String table, String insert) {
-            return new Sample(table, insert, Writes.ADD_ONLY, "permission denied");
+            return new Sample(table, insert, Writes.ADD_ONLY, "permission denied", "permission denied");
         }
 
         static Sample refusingChanges(String table, String insert, String refusal) {
-            return new Sample(table, insert, Writes.REFUSES_CHANGES, refusal);
+            return new Sample(table, insert, Writes.REFUSES_CHANGES, refusal, "permission denied");
         }
 
         static Sample keptAndChanged(String table, String insert) {
-            return new Sample(table, insert, Writes.CHANGES_OWN_ROWS, "permission denied");
+            return new Sample(table, insert, Writes.CHANGES_OWN_ROWS, "permission denied", "permission denied");
+        }
+
+        /** No UPDATE, and a DELETE that the table's own rules refuse for engine_app with this reason. */
+        static Sample voidsOnly(String table, String insert, String deleteRefusal) {
+            return new Sample(table, insert, Writes.VOIDS_ONLY, "permission denied", deleteRefusal);
         }
 
         boolean grantsUpdate() {
-            return writes != Writes.ADD_ONLY;
+            return writes != Writes.ADD_ONLY && writes != Writes.VOIDS_ONLY;
+        }
+
+        /** Whether engine_app holds DELETE on the table at all, whether or not its rules then refuse the rows it reaches. */
+        boolean holdsDelete() {
+            return writes == Writes.OWN_ROWS || writes == Writes.VOIDS_ONLY;
         }
 
         boolean grantsDelete() {
@@ -263,7 +278,7 @@ class TenantIsolationTest {
             assertRefused(() -> withoutAContext(connection, update), "permission denied");
         }
         String delete = "DELETE FROM " + table;
-        if (sample.grantsDelete()) {
+        if (sample.holdsDelete()) {
             assertThat(withoutAContext(connection, delete)).isZero();
         } else {
             assertRefused(() -> withoutAContext(connection, delete), "permission denied");
@@ -329,16 +344,16 @@ class TenantIsolationTest {
 
         assertRefused(() -> asTenant(TENANT_A, "UPDATE " + table + " SET tenant_id = 'ten_a'"), sample.refusal());
         assertRefused(() -> asTenant(TENANT_A, "UPDATE " + table + " SET tenant_id = 'ten_b'"), sample.refusal());
-        assertRefused(() -> asTenant(TENANT_A, "DELETE FROM " + table), "permission denied");
+        assertRefused(() -> asTenant(TENANT_A, "DELETE FROM " + table), sample.deleteRefusal());
 
         assertThat(rowsIn(table)).containsExactly(TENANT_A, TENANT_B);
     }
 
-    /** Not even its own rows, also where it may change them: the grant is missing. */
+    /** Not even its own rows, also where it may change them: the grant is missing, or the table's rules refuse it. */
     @ParameterizedTest
     @MethodSource("undeletableTables")
     void anUndeletableTableRefusesEveryDelete(String table) throws SQLException {
-        assertRefused(() -> asTenant(TENANT_A, "DELETE FROM " + table), "permission denied");
+        assertRefused(() -> asTenant(TENANT_A, "DELETE FROM " + table), sampleOf(table).deleteRefusal());
 
         assertThat(rowsIn(table)).containsExactly(TENANT_A, TENANT_B);
     }

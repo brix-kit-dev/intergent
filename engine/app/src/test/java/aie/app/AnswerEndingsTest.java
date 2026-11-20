@@ -2,6 +2,7 @@ package aie.app;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
 
 import aie.adapters.storepg.PgDatabase;
 import aie.adapters.storepg.TestDatabase;
@@ -10,9 +11,11 @@ import aie.core.tenancy.api.EndUsers;
 import aie.core.tenancy.api.Provisioning;
 import aie.core.tenancy.internal.DatabaseEndUsers;
 import aie.core.tenancy.internal.DatabaseProvisioning;
+import aie.core.trust.api.DataClass;
 import aie.modules.conversation.api.Conversations;
 import aie.modules.conversation.api.EventSignals;
 import aie.modules.conversation.api.Messages;
+import aie.modules.conversation.api.Messages.Asked;
 import aie.modules.conversation.api.Messages.ErrorCode;
 import aie.modules.conversation.api.Messages.Event;
 import aie.modules.conversation.api.Messages.EventType;
@@ -22,6 +25,7 @@ import aie.modules.conversation.api.Messages.Usage;
 import aie.modules.conversation.api.Messages.Written;
 import aie.modules.conversation.api.Messages.Written.Added;
 import aie.modules.conversation.api.Messages.Written.AlreadyEnded;
+import aie.modules.conversation.api.Messages.Written.CancelRequested;
 import aie.modules.conversation.api.Messages.Written.NotFound;
 import aie.modules.conversation.internal.DatabaseConversations;
 import aie.modules.conversation.internal.DatabaseMessages;
@@ -127,7 +131,7 @@ class AnswerEndingsTest {
     private static List<String> endings() throws SQLException {
         return TestDatabase.firstColumn(DATABASE, """
                 SELECT message_id || ' ' || seq || ' ' || type FROM engine.conversation_events
-                WHERE type IN ('message.completed', 'message.cancelled', 'error') ORDER BY message_id
+                WHERE type IN ('message.completed', 'message.blocked', 'message.cancelled', 'error') ORDER BY message_id
                 """);
     }
 
@@ -223,6 +227,158 @@ class AnswerEndingsTest {
     }
 
     /** Whatever comes after the ending, the answer stays as it ended. */
+    /**
+     * M3-4-3, blueprint 6.4: message.blocked voids what was sent. It takes the next number after the deltas, then the
+     * deltas go in the same transaction, so the numbers never go back; the answer keeps no text, its usage and
+     * output_blocked.
+     */
+    @Test
+    void aBlockedAnswerIsVoidAndKeepsItsUsage() throws SQLException {
+        Owner caller = newApplication();
+        String conversation = newConversation(caller);
+        String answer = newAnswer(caller, conversation);
+        messages.addDelta(caller, conversation, answer, "Hel");
+        messages.addDelta(caller, conversation, answer, "lo");
+
+        assertThat(messages.block(caller, conversation, answer, USAGE)).isEqualTo(new Added(4));
+
+        Message blocked = found(caller, conversation, answer);
+        assertThat(blocked.status()).isEqualTo(Status.BLOCKED);
+        assertThat(blocked.text()).isEmpty();
+        assertThat(blocked.usage()).isEqualTo(USAGE);
+        assertThat(blocked.code()).isEqualTo(ErrorCode.OUTPUT_BLOCKED);
+        assertThat(blocked.completedAt()).isNotNull();
+        assertThat(events(caller, conversation, answer)).extracting(Event::seq, Event::type)
+                .containsExactly(tuple(1L, EventType.MESSAGE_STARTED), tuple(4L, EventType.MESSAGE_BLOCKED));
+        Event ending = events(caller, conversation, answer).getLast();
+        assertThat(ending.usage()).isEqualTo(USAGE);
+        assertThat(ending.code()).isEqualTo(ErrorCode.OUTPUT_BLOCKED);
+        assertThat(ending.text()).isNull();
+        assertThat(endings()).containsExactly(answer + " 4 message.blocked");
+    }
+
+    /** A stream that resumes after a delta that is gone still finds the ending, since the numbers never go back. */
+    @Test
+    void aStreamThatResumesAfterAVoidedDeltaFindsTheEnding() {
+        Owner caller = newApplication();
+        String conversation = newConversation(caller);
+        String answer = newAnswer(caller, conversation);
+        messages.addDelta(caller, conversation, answer, "Hel");
+        messages.addDelta(caller, conversation, answer, "lo");
+        messages.block(caller, conversation, answer, USAGE);
+
+        assertThat(messages.eventsAfter(caller, conversation, answer, 2, 10)).extracting(Event::seq).containsExactly(4L);
+        assertThat(messages.eventsAfter(caller, conversation, answer, 3, 10)).extracting(Event::type)
+                .containsExactly(EventType.MESSAGE_BLOCKED);
+    }
+
+    /** Only this answer's deltas go: another answer's, in the same conversation, stay. */
+    @Test
+    void aBlockVoidsItsOwnAnswerAlone() {
+        Owner caller = newApplication();
+        String conversation = newConversation(caller);
+        String blocked = newAnswer(caller, conversation);
+        String other = newAnswer(caller, conversation);
+        messages.addDelta(caller, conversation, blocked, "Bad");
+        messages.addDelta(caller, conversation, other, "Good");
+
+        messages.block(caller, conversation, blocked, USAGE);
+
+        assertThat(events(caller, conversation, other)).extracting(Event::type)
+                .containsExactly(EventType.MESSAGE_STARTED, EventType.MESSAGE_DELTA);
+        assertThat(found(caller, conversation, other).text()).isEqualTo("Good");
+    }
+
+    /** A blocked answer is no history: the model is never shown it, as with a failed one (M3-4-3). */
+    @Test
+    void aBlockedAnswerIsNoHistory() {
+        Owner caller = newApplication();
+        String conversation = newConversation(caller);
+        Asked first = TestApi.asked(messages.ask(caller, conversation, "Hi", DataClass.PUBLIC, DataClass.SENSITIVE));
+        messages.addDelta(caller, conversation, first.answer().messageId(), "Leaked. ");
+        messages.block(caller, conversation, first.answer().messageId(), USAGE);
+        Asked second = TestApi.asked(messages.ask(caller, conversation, "Again", DataClass.PUBLIC, DataClass.SENSITIVE));
+
+        assertThat(messages.historyFor(caller, conversation, second.answer().messageId()))
+                .extracting(Message::text).containsExactly("Hi", "Again");
+    }
+
+    /** A blocked answer has ended, so it takes nothing more, and a block of an answer that ended changes nothing. */
+    @Test
+    void aBlockedAnswerTakesNothingMore() {
+        Owner caller = newApplication();
+        String conversation = newConversation(caller);
+        String answer = newAnswer(caller, conversation);
+        String completed = newAnswer(caller, conversation);
+        messages.block(caller, conversation, answer, USAGE);
+        messages.complete(caller, conversation, completed, USAGE);
+
+        AlreadyEnded over = new AlreadyEnded(Status.BLOCKED);
+        assertThat(messages.addDelta(caller, conversation, answer, "more")).isEqualTo(over);
+        assertThat(messages.complete(caller, conversation, answer, USAGE)).isEqualTo(over);
+        assertThat(messages.block(caller, conversation, answer, USAGE)).isEqualTo(over);
+        assertThat(messages.fail(caller, conversation, answer, ErrorCode.MODEL_FAILED)).isEqualTo(over);
+        assertThat(messages.block(caller, conversation, completed, USAGE)).isEqualTo(new AlreadyEnded(Status.COMPLETED));
+        assertThat(found(caller, conversation, completed).status()).isEqualTo(Status.COMPLETED);
+    }
+
+    /** A cancel request wins over a block, as over any ending but message.cancelled, which keeps what went out. */
+    @Test
+    void aCancelRequestWinsOverABlock() {
+        Owner caller = newApplication();
+        String conversation = newConversation(caller);
+        String answer = newAnswer(caller, conversation);
+        messages.addDelta(caller, conversation, answer, "Hal");
+        messages.requestCancel(caller, conversation, answer);
+
+        assertThat(messages.block(caller, conversation, answer, USAGE)).isEqualTo(new CancelRequested());
+        assertThat(messages.cancel(caller, conversation, answer, USAGE)).isEqualTo(new Added(3));
+        assertThat(found(caller, conversation, answer).status()).isEqualTo(Status.CANCELLED);
+        assertThat(found(caller, conversation, answer).text()).isEqualTo("Hal");
+    }
+
+    /**
+     * V9: engine_app holds DELETE on the log for message.blocked alone. Every delete it asks for itself is refused: of a
+     * delta, of a blocked answer's other events, of any answer.
+     */
+    @Test
+    void theEngineDeletesNoEventItself() {
+        Owner caller = newApplication();
+        String conversation = newConversation(caller);
+        String answer = newAnswer(caller, conversation);
+        String blocked = newAnswer(caller, conversation);
+        messages.addDelta(caller, conversation, answer, "Hi");
+        messages.block(caller, conversation, blocked, USAGE);
+
+        for (String delete : List.of("DELETE FROM conversation_events WHERE message_id = '" + answer + "'",
+                "DELETE FROM conversation_events WHERE message_id = '" + answer + "' AND type = 'message.delta'",
+                "DELETE FROM conversation_events WHERE message_id = '" + blocked + "'",
+                "DELETE FROM conversation_events")) {
+            assertRefused(() -> database.inTenantTx(caller.tenantId(), tx -> tx.update(delete)), "Events are only added");
+        }
+        assertThat(events(caller, conversation, answer)).hasSize(2);
+        assertThat(events(caller, conversation, blocked)).hasSize(2);
+    }
+
+    /** SQL that goes around DatabaseMessages meets the rules of what message.blocked carries. */
+    @Test
+    void theLogKeepsWhatABlockCarries() {
+        Owner caller = newApplication();
+        String conversation = newConversation(caller);
+        String answer = newAnswer(caller, conversation);
+        messages.addDelta(caller, conversation, answer, "Half");
+
+        assertRefused(() -> addRow(caller, answer, "message.blocked", null, null, null, "output_blocked"), "conversation_events_usage");
+        assertRefused(() -> addRow(caller, answer, "message.blocked", null, 1L, 1L, null), "conversation_events_code");
+        assertRefused(() -> addRow(caller, answer, "message.blocked", null, 1L, 1L, "model_failed"), "conversation_events_code");
+        assertRefused(() -> addRow(caller, answer, "message.blocked", "Half", 1L, 1L, "output_blocked"), "conversation_events_text");
+        assertRefused(() -> addRow(caller, answer, "message.completed", null, 1L, 1L, "output_blocked"), "conversation_events_code");
+
+        assertThat(addRow(caller, answer, "message.blocked", null, 1L, 1L, "output_blocked")).isEqualTo(3);
+        assertThat(found(caller, conversation, answer).text()).isEmpty();
+        assertThatThrownBy(() -> messages.block(caller, conversation, answer, null)).isInstanceOf(IllegalArgumentException.class);
+    }
+
     @Test
     void anEndedAnswerTakesNothingMore() throws SQLException {
         Owner caller = newApplication();
@@ -334,7 +490,8 @@ class AnswerEndingsTest {
         assertThat(endings()).hasSize(20);
         assertThat(TestDatabase.firstColumn(DATABASE, """
                 SELECT count(*)::text FROM engine.conversation_events
-                WHERE type IN ('message.completed', 'message.cancelled', 'error') GROUP BY message_id HAVING count(*) > 1
+                WHERE type IN ('message.completed', 'message.blocked', 'message.cancelled', 'error') GROUP BY message_id
+                HAVING count(*) > 1
                 """)).isEmpty();
     }
 
@@ -535,6 +692,10 @@ class AnswerEndingsTest {
             "status = 'failed', completed_at = now()",
             "status = 'failed', completed_at = now(), code = 'output_blocked'",
             "status = 'failed', completed_at = now(), code = 'model_failed', input_tokens = 1, output_tokens = 1",
+            "status = 'blocked', completed_at = now()",
+            "status = 'blocked', completed_at = now(), input_tokens = 1, output_tokens = 1",
+            "status = 'blocked', completed_at = now(), input_tokens = 1, output_tokens = 1, code = 'model_failed'",
+            "status = 'blocked', completed_at = now(), input_tokens = 1, output_tokens = 1, code = 'output_blocked', text = 'x'",
             "status = 'in_progress', text = 'Hi'"})
     void theMessageTableKeepsAnEndedAnswerWhole(String change) throws SQLException {
         Owner caller = newApplication();
@@ -551,14 +712,19 @@ class AnswerEndingsTest {
         String conversation = newConversation(caller);
         String completed = newAnswer(caller, conversation);
         String failed = newAnswer(caller, conversation);
+        String blocked = newAnswer(caller, conversation);
 
         TestDatabase.asAdmin(DATABASE, "SET session_replication_role = replica; UPDATE engine.conversation_messages"
                 + " SET status = 'completed', completed_at = now(), input_tokens = 0, output_tokens = 0, text = 'x'"
                 + " WHERE message_id = '" + completed + "'");
         TestDatabase.asAdmin(DATABASE, "SET session_replication_role = replica; UPDATE engine.conversation_messages"
                 + " SET status = 'failed', completed_at = now(), code = 'stream_interrupted' WHERE message_id = '" + failed + "'");
+        TestDatabase.asAdmin(DATABASE, "SET session_replication_role = replica; UPDATE engine.conversation_messages"
+                + " SET status = 'blocked', completed_at = now(), input_tokens = 0, output_tokens = 0, code = 'output_blocked'"
+                + " WHERE message_id = '" + blocked + "'");
 
         assertThat(found(caller, conversation, completed).status()).isEqualTo(Status.COMPLETED);
         assertThat(found(caller, conversation, failed).status()).isEqualTo(Status.FAILED);
+        assertThat(found(caller, conversation, blocked).status()).isEqualTo(Status.BLOCKED);
     }
 }

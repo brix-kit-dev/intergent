@@ -454,7 +454,7 @@ class EventLogTest {
 
         assertRefused(() -> addRow(caller, answer, "message.delta", null), "conversation_events_text");
         assertRefused(() -> addRow(caller, answer, "message.delta", ""), "conversation_events_text");
-        for (String later : List.of("message.blocked", "message.citation", "tool.started", "handoff.requested")) {
+        for (String later : List.of("message.citation", "tool.started", "handoff.requested")) {
             assertRefused(() -> addRow(caller, answer, later, null), "conversation_events_type_check");
         }
         assertThat(rows()).containsExactly(answer + " 1 message.started -");
@@ -486,7 +486,10 @@ class EventLogTest {
         assertThat(rows()).hasSize(2);
     }
 
-    /** M2 deletes nothing, and an event never changes once written. */
+    /**
+     * An event never changes once written, and the engine deletes none itself: only message.blocked voids an answer's
+     * deltas, in the statement that adds it (M3-4-3, V9).
+     */
     @Test
     void theEngineCanNeitherChangeNorDeleteAnEvent() throws SQLException {
         Owner caller = newApplication();
@@ -497,7 +500,7 @@ class EventLogTest {
         assertRefused(() -> database.inTenantTx(caller.tenantId(), tx -> tx.update("UPDATE conversation_events SET text = 'b'")),
                 "permission denied");
         assertRefused(() -> database.inTenantTx(caller.tenantId(), tx -> tx.update("DELETE FROM conversation_events")),
-                "permission denied");
+                "Events are only added");
         assertThat(rows()).containsExactly(answer + " 1 message.started -", answer + " 2 message.delta a");
     }
 

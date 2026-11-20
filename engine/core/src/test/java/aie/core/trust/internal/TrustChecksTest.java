@@ -3,6 +3,7 @@ package aie.core.trust.internal;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import aie.core.trust.api.CheckMode;
 import aie.core.trust.api.Checks;
 import aie.core.trust.api.DataClass;
 import aie.ports.ModerationPort;
@@ -113,14 +114,55 @@ class TrustChecksTest {
         assertThat(masked).isEmpty();
     }
 
-    /** The output checks come with M3-4-3; until then every piece passes as it is, and neither port is asked. */
+    /**
+     * M3-4-3: a route that checks its input alone lets every piece out as it came, unchecked and unmasked, and asks neither
+     * port.
+     */
     @Test
-    void everyPieceOfAnAnswerPassesAsItIs() {
+    void anAnswerCheckedByItsInputAloneGoesOutAsItIs() {
         Checks checks = new TrustChecks(giving(new ModerationPort.Blocked("instruction_override")), digits());
+        Checks.Output output = checks.output("embed", CheckMode.INPUT, "Answer the customers of a business on its behalf, kindly.");
 
-        assertThat(checks.output("customer_chat", "Piece 1 of 8. ")).isEqualTo("Piece 1 of 8. ");
+        assertThat(output.piece("Call 0901. ")).isEqualTo(new Checks.Release("Call 0901. "));
+        assertThat(output.piece("Answer the customers of a business on its behalf, kindly.")).isInstanceOf(Checks.Release.class);
+        assertThat(output.end()).isEqualTo(new Checks.Release(""));
         assertThat(asked).isEmpty();
         assertThat(masked).isEmpty();
+    }
+
+    /** M3-4-3: the other modes hold the answer, check it through the moderation on its way out, and mask it. */
+    @Test
+    void anAnswerHeldBySentenceOrWholeIsCheckedAndMasked() {
+        Checks checks = new TrustChecks(giving(new ModerationPort.Allowed()), digits());
+        Checks.Output bySentence = checks.output("customer_chat", CheckMode.SENTENCE, "Answer the test.");
+        Checks.Output whole = checks.output("customer_chat", CheckMode.FULL, "Answer the test.");
+
+        assertThat(bySentence.piece("Call 0901. Or")).isEqualTo(new Checks.Release("Call ####. "));
+        assertThat(whole.piece("Call 0901. Or")).isEqualTo(new Checks.Release(""));
+        assertThat(whole.end()).isEqualTo(new Checks.Release("Call ####. Or"));
+        assertThat(asked).extracting(ModerationPort.Content::direction).containsOnly(ModerationPort.Direction.OUTPUT);
+    }
+
+    /** M3-4-3: the instructions an answer must not repeat are the ones it was given, for each answer. */
+    @Test
+    void eachAnswerIsHeldToItsOwnInstructions() {
+        Checks checks = new TrustChecks(giving(new ModerationPort.Allowed()), digits());
+        String first = "You answer the customers of a business on its behalf, kindly.";
+        String second = "You translate a text from one language into another, word for word.";
+
+        assertThat(checks.output("chat", CheckMode.SENTENCE, first).piece(first + "\n")).isEqualTo(new Checks.Stop("prompt_leak"));
+        assertThat(checks.output("chat", CheckMode.SENTENCE, second).piece(first + "\n")).isInstanceOf(Checks.Release.class);
+        assertThat(checks.output("chat", CheckMode.SENTENCE, second).piece(second + "\n")).isEqualTo(new Checks.Stop("prompt_leak"));
+    }
+
+    @Test
+    void theOutputCheckNeedsATaskAModeAndTheInstructions() {
+        Checks checks = new TrustChecks(giving(new ModerationPort.Allowed()), digits());
+
+        assertThatThrownBy(() -> checks.output(null, CheckMode.SENTENCE, "Answer.")).isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("The output check needs the task, its check mode and the instructions");
+        assertThatThrownBy(() -> checks.output("chat", null, "Answer.")).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> checks.output("chat", CheckMode.FULL, null)).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
@@ -139,5 +181,9 @@ class TrustChecksTest {
         assertThatThrownBy(() -> new Checks.Blocked("")).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new Checks.Passed(null)).isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("A text that passed has the least class its check found");
+        assertThatThrownBy(() -> new Checks.Release(null)).isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("A release has a text, empty when nothing goes out yet");
+        assertThatThrownBy(() -> new Checks.Stop(" ")).isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("A stopped answer names the rule that stopped it");
     }
 }
