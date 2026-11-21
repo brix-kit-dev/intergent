@@ -3,19 +3,29 @@ package aie.app;
 import aie.adapters.storepg.PgRuntime;
 import aie.core.tenancy.api.Provisioning;
 import aie.core.tenancy.internal.DatabaseProvisioning;
+import aie.core.trust.api.Audit;
+import aie.core.trust.api.AuditTrail;
+import aie.core.trust.internal.DatabaseAudit;
+import aie.http.RequestDateTimes;
 import aie.ports.DatabaseException;
+import aie.ports.DatabasePort;
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.format.DateTimeParseException;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 import org.springframework.boot.DefaultApplicationArguments;
+import tools.jackson.databind.json.JsonMapper;
 
 /**
- * The admin role of blueprint 12.5: opens tenants and applications, issues their first key, and issues and revokes
- * their site keys, from the command line, with no HTTP entry. Standard output holds only what was created or revoked,
- * so a script can take it from there.
+ * The admin role of blueprint 12.5: opens tenants and applications, issues their first key, issues and revokes their
+ * site keys, and reads a tenant's audit (M3-5-2), from the command line, with no HTTP entry. Standard output holds only
+ * what was created, revoked or read, so a script can take it from there.
  */
 final class AdminRole {
 
@@ -26,7 +36,8 @@ final class AdminRole {
             [--data-class=public|internal|personal|sensitive]
               create-key --tenant=<tenant id> --application=<application id>
               create-site-key --tenant=<tenant id> --application=<application id> --origins=<origin>[,<origin>...]
-              revoke-site-key --tenant=<tenant id> --site-key=<site key id>""";
+              revoke-site-key --tenant=<tenant id> --site-key=<site key id>
+              audit --tenant=<tenant id> [--from=<RFC 3339 time>] [--to=<RFC 3339 time>]""";
 
     private static final String CELL_CODE = "engine.cell.code";
     /** Blueprint 12.1: the cell code goes into API keys, and anything else would break parsing them. */
@@ -37,15 +48,24 @@ final class AdminRole {
             "create-application", new Options(Set.of("tenant"), Set.of("environment", "data-class")),
             "create-key", new Options(Set.of("tenant", "application"), Set.of()),
             "create-site-key", new Options(Set.of("tenant", "application", "origins"), Set.of()),
-            "revoke-site-key", new Options(Set.of("tenant", "site-key"), Set.of()));
+            "revoke-site-key", new Options(Set.of("tenant", "site-key"), Set.of()),
+            "audit", new Options(Set.of("tenant"), Set.of("from", "to")));
+    /** One line of the audit, as JSON, which a script can read a line at a time. */
+    private static final JsonMapper JSON = JsonMapper.builder().build();
 
     private AdminRole() {
     }
 
+    /**
+     * The command line is read whole first: a time of the audit's window that is not RFC 3339, or a window that ends
+     * before it starts, is a usage error like any other, before the role connects to the database.
+     */
     static int run(String... args) {
         Command command;
+        Window window;
         try {
             command = Command.parse(args);
+            window = command.name().equals("audit") ? Window.of(command) : null;
         } catch (IllegalArgumentException e) {
             System.err.println(e.getMessage());
             System.err.println(USAGE);
@@ -54,8 +74,14 @@ final class AdminRole {
         try {
             RoleSettings settings = RoleSettings.read(args);
             String cell = command.name().equals("create-tenant") ? cellCode(settings) : null;
-            Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(
-                    settings.required(RoleSettings.DATABASE_URL), settings.required(RoleSettings.APP_PASSWORD)));
+            DatabasePort database = PgRuntime.connect(
+                    settings.required(RoleSettings.DATABASE_URL), settings.required(RoleSettings.APP_PASSWORD));
+            if (window != null) {
+                new DatabaseAudit(database).read(command.option("tenant"), window.from(), window.to(),
+                        recorded -> System.out.println(line(recorded)));
+                return 0;
+            }
+            Provisioning provisioning = new DatabaseProvisioning(database);
             System.out.println(switch (command.name()) {
                 case "create-tenant" -> provisioning.createTenant(cell, command.option("parent"));
                 case "create-application" -> provisioning.createApplication(
@@ -86,6 +112,30 @@ final class AdminRole {
         return siteKeyId;
     }
 
+    /**
+     * One entry of the audit as one line of JSON (M3-5-2): its fields always in this order, each by its name in the
+     * table, with null for a field it does not have. The time is the database's, in UTC, as RFC 3339.
+     */
+    static String line(AuditTrail.Recorded recorded) {
+        Audit.Entry entry = recorded.entry();
+        Map<String, Object> line = new LinkedHashMap<>();
+        line.put("record_id", recorded.recordId());
+        line.put("created_at", recorded.createdAt().toString());
+        line.put("request_id", entry.requestId());
+        line.put("tenant_id", entry.tenantId());
+        line.put("application_id", entry.applicationId());
+        line.put("end_user_id", entry.endUserId());
+        line.put("conversation_id", entry.conversationId());
+        line.put("message_id", entry.messageId());
+        line.put("task", entry.task());
+        line.put("event", entry.event().wireName());
+        line.put("data_class", entry.dataClass() == null ? null : entry.dataClass().wireName());
+        line.put("model", entry.model());
+        line.put("prompt", entry.prompt());
+        line.put("rule", entry.rule());
+        return JSON.writeValueAsString(line);
+    }
+
     private static String cellCode(RoleSettings settings) {
         String cell = settings.required(CELL_CODE);
         if (!CELL.matcher(cell).matches()) {
@@ -104,6 +154,33 @@ final class AdminRole {
     }
 
     private record Options(Set<String> required, Set<String> optional) {
+    }
+
+    /** The time window of an audit read: from --from on and before --to, either of which may be left out. */
+    private record Window(Instant from, Instant to) {
+
+        static Window of(Command command) {
+            Instant from = time(command, "from");
+            Instant to = time(command, "to");
+            if (from != null && to != null && !from.isBefore(to)) {
+                throw new IllegalArgumentException("--from must come before --to.");
+            }
+            return new Window(from, to);
+        }
+
+        /** The option's time, read strictly as RFC 3339, as the contract reads a time (point 46), or null without one. */
+        private static Instant time(Command command, String option) {
+            String value = command.option(option);
+            if (value == null) {
+                return null;
+            }
+            try {
+                return OffsetDateTime.parse(value, RequestDateTimes.RFC_3339).toInstant();
+            } catch (DateTimeParseException e) {
+                throw new IllegalArgumentException("--" + option + " must be an RFC 3339 time, such as 2026-11-21T09:00:00+09:00,"
+                        + " not " + value + ".");
+            }
+        }
     }
 
     private record Command(String name, Map<String, String> options) {

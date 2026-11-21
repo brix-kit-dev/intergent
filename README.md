@@ -242,8 +242,15 @@ read -r KEY_ID API_KEY <<< "$(deploy/dev/admin.sh create-key --tenant="$TENANT" 
 | `create-key` | `--tenant`、`--application`：都必填 | 一行：密钥号和密钥，如 `key_01M6... aie_test_dev_...` |
 | `create-site-key` | `--tenant`、`--application`、`--origins`：都必填；`--origins` 用逗号隔开，如 `https://shop.example.com,http://localhost:3000` | 一行：站点键号和站点键，如 `site_01M6... aie_site_test_dev_...` |
 | `revoke-site-key` | `--tenant`、`--site-key=<站点键号>`：都必填 | 吊销了的站点键号 |
+| `audit` | `--tenant`：必填；`--from`、`--to`：RFC 3339 时间，都可以不写 | 这个租户的审计记录，一条一行 JSON，按时间先后（M3-5-2） |
 
-- **输出：** 标准输出只有新 ID，脚本可以直接接住。出错写到标准错误，退出码 1；命令或选项写错，退出码 2。
+- **输出：** 标准输出只有新 ID，或者读出来的审计记录，脚本可以直接接住。出错写到标准错误，退出码 1；命令或选项写错，退出码 2。
+- **查审计（M3-5-2）：** `audit` 按数据库的时间先后打印租户的审计记录，同一时间的按记录号排，一条一行 JSON，方便用 `jq` 筛选，比如 `deploy/dev/admin.sh audit --tenant="$TENANT" | jq 'select(.event == "input_blocked")'`。审计本身见“信任层”的审计。
+  - **字段：** 每行的字段和顺序都固定：`record_id`、`created_at`、`request_id`、`tenant_id`、`application_id`、`end_user_id`、`conversation_id`、`message_id`、`task`、`event`、`data_class`、`model`、`prompt`、`rule`，没有的写 `null`。`created_at` 是数据库记下的时间，用 UTC，按 RFC 3339 写。表里的会话号一列叫 `conv_id`，输出里叫 `conversation_id`。
+  - **时间窗：** 从 `--from` 那一刻起（包括它），到 `--to` 之前（不包括它），都可以不写。时间只认 RFC 3339，和契约读时间一样严格（第 46 点），时区随意，比如 `2026-11-21T09:00:00+09:00`。格式不对，或者 `--to` 不在 `--from` 之后，都算命令写错，退出码 2，这时还没连数据库。
+  - **只读这个租户：** 在这个租户的事务里读，行级安全挡住别的租户。租户号写错，或者这段时间没有记录，都什么都不打印，退出码 0。
+  - **记录多的时候：** 每次读一页 500 条，一页一个短事务，读完一页才打印这一页，下一页从这一页的最后一条之后接着读。中途出错时，已经打印的留着，退出码 1。表上有按租户、时间和记录号排的索引（`V2__index_audit_records_by_time.sql`）。
+  - **对外接口：** 没有，审计先只给 `admin` 查（M3 第 6 项）。
 - **测试里的密钥：** `AdminRoleTest` 用 `QuietOutput` 接住命令打印的内容，不转给控制台，所以 CI 日志里没有新发的密钥。Spring 的 `OutputCaptureExtension` 边接边转，不能用在这里，`QuietOutputTest` 会拦住改回去。测试失败时，`QuietOutput` 才把接住的内容打出来，密钥的机密部分换成 `<masked>`。断言失败时，报错里如果比对的正是密钥，仍会带出它，这时 `verify.sh` 会报出来，见[构建输出里不许有密钥](#ci-和依赖规则)。
 - **连接：** 和 `api` 一样先过启动自检，再用 `engine_app` 连接。地址里写的用户和会话参数都不起作用。
 - **单元码：** 新租户的单元码取自 `ENGINE_CELL_CODE`，必须是 1 到 8 位小写字母和数字，因为它会写进密钥。开发服务器不是单元，用 `dev`。
@@ -519,9 +526,9 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 - **不记的：** 网关之前就被拒绝的请求不记：没带密钥的 401、地区门禁的 403、会话不存在的 404、等级超限的 422 `no_eligible_model`、实例满了的 429。这些请求没有内容到达模型，请求日志里有它们。调用方代码写错、网关抛 `IllegalArgumentException` 的也不记。
 - **只追加：** `engine_app` 对这张表只有读和新增的权限，改、删、清空、`INSERT ... ON CONFLICT DO UPDATE`、`MERGE`、加锁读（`FOR UPDATE`、`FOR SHARE`）都没有权限；关行级安全、删约束、删策略、删表要表的所有者才行。表的所有者是 `migrate` 用的 `engine_owner`，运行时不用（蓝图 7.6）。`DatabaseAuditTest` 逐项试过，都被拒绝。
 - **对不上就不收：** 表的约束按事件检查字段：`input_blocked` 要有规则名、不能有调用的字段；调用的事件要有消息号、等级、模型和提示词，只有 `output_blocked` 带规则名。代码写错的记录进不去，`model_called` 进不去就不调模型。
-- **查看：** 先只给 `admin` 查（M3 第 6 项），命令在 M3-5-2 加。在那之前只能用数据库管理员身份查表。
+- **查看（M3-5-2）：** 先只给 `admin` 查（M3 第 6 项）：`admin audit --tenant=<租户号> [--from=<时间>] [--to=<时间>]`，一条一行 JSON，见[开通租户](#开通租户)。引擎里读审计的接口是 `AuditTrail`，只有 `admin` 用；网关只拿到记的那一半 `Audit`。
 
-- **以后：** `admin` 查审计（M3-5-2），`sensitive` 的 HMAC 和租户密钥（M3-5-3）。
+- **以后：** `sensitive` 的 HMAC 和租户密钥（M3-5-3）。
 
 ## 会话
 

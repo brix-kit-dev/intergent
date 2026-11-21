@@ -9,13 +9,17 @@ import aie.adapters.storepg.TestDatabase;
 import aie.core.trust.api.Audit;
 import aie.core.trust.api.Audit.Entry;
 import aie.core.trust.api.Audit.Event;
+import aie.core.trust.api.AuditTrail.Recorded;
 import aie.core.trust.api.DataClass;
 import aie.core.trust.internal.DatabaseAudit;
 import aie.ports.DatabaseException;
 import java.io.IOException;
 import java.sql.SQLException;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -28,6 +32,7 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * M3-5-1: the audit on the real scripts, as engine_app through a pool. Each entry is kept as it came, an entry whose
  * fields do not fit its event is refused, and nothing engine_app may do changes, deletes or locks an entry once added
  * (blueprint 9.4). That each tenant reads only its own entries, TenantIsolationTest shows for every tenant table.
+ * M3-5-2: a tenant's entries are read back oldest first, a page at a time, within a window of time.
  */
 @Testcontainers
 class DatabaseAuditTest {
@@ -191,6 +196,121 @@ class DatabaseAuditTest {
         assertThat(TestDatabase.firstColumn(DATABASE, ENTRIES)).isEqualTo(before);
         List<String> read = pool.inTenantTx(TENANT, tx -> tx.query("SELECT event FROM trust_audit_records", row -> row.string("event")));
         assertThat(read).containsExactly("completed");
+    }
+
+    /**
+     * M3-5-2: a tenant's entries come back oldest first, as they were added, a page at a time: each page after the last
+     * entry of the one before, and handed over only once its transaction has ended. The last page may be full.
+     */
+    @Test
+    void aTenantsEntriesAreReadOldestFirstAPageAtATime() {
+        List<Entry> added = new ArrayList<>();
+        for (int i = 1; i <= 6; i++) {
+            added.add(new Entry("req_" + i, TENANT, "app_a", "eu_a", "conv_a", "msg_" + i, "customer_chat", Event.MODEL_CALLED,
+                    DataClass.PUBLIC, "fake", "customer_chat/fake/v1", null));
+        }
+        added.forEach(audit::add);
+        List<Recorded> read = new CopyOnWriteArrayList<>();
+        List<Boolean> inside = new CopyOnWriteArrayList<>();
+
+        new DatabaseAudit(pool, 2).read(TENANT, null, null, recorded -> {
+            inside.add(pool.insideTx());
+            read.add(recorded);
+        });
+
+        assertThat(read).extracting(Recorded::entry).containsExactlyElementsOf(added);
+        assertThat(read).allSatisfy(recorded -> assertThat(recorded.recordId()).matches("aud_[0-9A-Z]{26}"));
+        assertThat(read).extracting(Recorded::createdAt).isSorted().doesNotContainNull();
+        assertThat(inside).hasSize(6).containsOnly(false);
+        List<Recorded> again = new ArrayList<>();
+        new DatabaseAudit(pool, 3).read(TENANT, null, null, again::add);
+        assertThat(again).isEqualTo(read);
+    }
+
+    /**
+     * M3-5-2: entries of the same time come in the order of their IDs, and a page that ends between them goes on with
+     * the next ID, so none is read twice or left out.
+     */
+    @Test
+    void entriesOfTheSameTimeComeByTheirIds() throws SQLException {
+        TestDatabase.asAdmin(DATABASE, """
+                INSERT INTO engine.trust_audit_records (record_id, tenant_id, created_at, application_id, end_user_id, conv_id,
+                    task, event, rule)
+                SELECT 'aud_' || id, 'ten_a', timestamptz '2026-11-02 00:00:00+00', 'app_a', 'eu_a', 'conv_a', 'customer_chat',
+                    'input_blocked', 'instruction_override'
+                FROM unnest(ARRAY['C', 'A', 'E', 'B', 'D']) AS id
+                """);
+        List<String> read = new ArrayList<>();
+
+        new DatabaseAudit(pool, 2).read(TENANT, null, null, recorded -> read.add(recorded.recordId()));
+
+        assertThat(read).containsExactly("aud_A", "aud_B", "aud_C", "aud_D", "aud_E");
+    }
+
+    /** M3-5-2: a window takes the entries from its start on and before its end; either end may be left open. */
+    @Test
+    void aWindowTakesTheEntriesFromItsStartAndBeforeItsEnd() throws SQLException {
+        TestDatabase.asAdmin(DATABASE, """
+                INSERT INTO engine.trust_audit_records (record_id, tenant_id, created_at, application_id, end_user_id, conv_id,
+                    task, event, rule)
+                SELECT 'aud_' || day, 'ten_a', timestamptz '2026-11-01 00:00:00+00' + (day - 1) * interval '1 day', 'app_a',
+                    'eu_a', 'conv_a', 'customer_chat', 'input_blocked', 'instruction_override'
+                FROM generate_series(1, 4) AS day
+                """);
+        Instant second = Instant.parse("2026-11-02T00:00:00Z");
+        Instant fourth = Instant.parse("2026-11-04T00:00:00Z");
+
+        assertThat(ids(second, fourth)).containsExactly("aud_2", "aud_3");
+        assertThat(ids(second, null)).containsExactly("aud_2", "aud_3", "aud_4");
+        assertThat(ids(null, second)).containsExactly("aud_1");
+        assertThat(ids(second.plusNanos(1000), fourth.plusNanos(1000))).containsExactly("aud_3", "aud_4");
+        assertThat(ids(null, null)).containsExactly("aud_1", "aud_2", "aud_3", "aud_4");
+    }
+
+    /** M3-5-2: a tenant reads its own entries alone, and one with none reads nothing. */
+    @Test
+    void aTenantReadsItsOwnEntriesAlone() {
+        audit.add(call(Event.COMPLETED, null));
+        audit.add(new Entry("req_b", "ten_b", "app_b", "eu_b", "conv_b", "msg_b", "customer_chat", Event.COMPLETED,
+                DataClass.PUBLIC, "fake", "customer_chat/fake/v1", null));
+        List<String> a = new ArrayList<>();
+        List<String> b = new ArrayList<>();
+        List<String> c = new ArrayList<>();
+
+        new DatabaseAudit(pool, 1).read(TENANT, null, null, recorded -> a.add(recorded.entry().tenantId()));
+        new DatabaseAudit(pool, 1).read("ten_b", null, null, recorded -> b.add(recorded.entry().requestId()));
+        new DatabaseAudit(pool, 1).read("ten_c", null, null, recorded -> c.add(recorded.recordId()));
+
+        assertThat(a).containsExactly(TENANT);
+        assertThat(b).containsExactly("req_b");
+        assertThat(c).isEmpty();
+    }
+
+    /** M3-5-2: a read needs its tenant and a window that ends after it starts; a page holds one entry at least. */
+    @Test
+    void aReadNeedsItsTenantAndAWindowThatEndsAfterItStarts() {
+        Instant now = Instant.parse("2026-11-21T00:00:00Z");
+
+        assertThatThrownBy(() -> audit(1).read(null, null, null, recorded -> { }))
+                .isInstanceOf(IllegalArgumentException.class).hasMessage("Reading the audit needs the tenant");
+        assertThatThrownBy(() -> audit(1).read(TENANT, now, now, recorded -> { }))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("The audit is read from a time before the one it is read to, not from " + now + " to " + now);
+        assertThatThrownBy(() -> audit(1).read(TENANT, now.plusSeconds(1), now, recorded -> { }))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new DatabaseAudit(pool, 0)).isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("A page of the audit holds at least one entry, not 0");
+    }
+
+    private static DatabaseAudit audit(int page) {
+        return new DatabaseAudit(pool, page);
+    }
+
+    /** The IDs of the test tenant's entries in this window, read a page of two at a time. */
+    private static List<String> ids(Instant from, Instant to) {
+        List<String> ids = new ArrayList<>();
+        new DatabaseAudit(pool, 2).read(TENANT, from, to, recorded -> ids.add(recorded.recordId()));
+        return ids;
     }
 
     /** The entry with one field set to this value, so that a test can make an entry that does not fit. */

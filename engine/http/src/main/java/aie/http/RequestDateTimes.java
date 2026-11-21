@@ -22,13 +22,14 @@ import tools.jackson.databind.ValueDeserializer;
  * the 400 names the field and shows the form. A JSON null is still no value, as for any field the request may leave out.
  */
 @JacksonComponent
-class RequestDateTimes extends ValueDeserializer<OffsetDateTime> {
+public class RequestDateTimes extends ValueDeserializer<OffsetDateTime> {
 
     /**
      * RFC 3339 section 5.6: a year of four digits, the seconds always, a fraction if any, then Z or an offset with a colon.
-     * T and Z may be lower case. A date that does not exist, such as 30 February, is refused rather than moved.
+     * T and Z may be lower case. A date that does not exist, such as 30 February, is refused rather than moved. The admin
+     * role reads the times of its options so as well (M3-5-2).
      */
-    static final DateTimeFormatter RFC_3339 = new DateTimeFormatterBuilder()
+    public static final DateTimeFormatter RFC_3339 = new DateTimeFormatterBuilder()
             .parseCaseInsensitive()
             .appendValue(ChronoField.YEAR, 4)
             .appendLiteral('-')
