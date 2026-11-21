@@ -24,6 +24,7 @@ import aie.core.tenancy.internal.DatabaseSiteKeyLookup;
 import aie.core.trust.api.TaskGate;
 import aie.core.trust.internal.DatabaseAudit;
 import aie.http.StreamLimit;
+import aie.modules.conversation.api.Answers;
 import aie.modules.conversation.api.Conversations;
 import aie.modules.conversation.api.EventSignals;
 import aie.modules.conversation.api.Messages;
@@ -49,6 +50,8 @@ class ApiRole {
     static final int POOL_SIZE = 10;
     /** The most event streams an instance may be set to keep open, so that a slip of the keyboard does not lift the cap. */
     static final int MAX_STREAMS = 10_000;
+    /** How many model calls one tenant may have under way on an instance at once, without a setting (M3-6 decision 5). */
+    static final int DEFAULT_TENANT_CALLS = 8;
 
     static int run(String... args) {
         try {
@@ -61,10 +64,10 @@ class ApiRole {
     }
 
     /**
-     * The session keys, the audit's master key (M3-5-3), the default monthly budget (M3-6-2), the stream limit and the
-     * region pack are checked before the pool opens, so a missing or weak key, a budget or a limit that is no number, or a
-     * pack that is missing or does not pass its checks (M3-1) never gets as far as the database. The budget's month is
-     * that of the pack's time zone.
+     * The session keys, the audit's master key (M3-5-3), the default monthly budget (M3-6-2), the stream limit, the
+     * tenant limit (M3-6-3) and the region pack are checked before the pool opens, so a missing or weak key, a budget or a
+     * limit that is no number, or a pack that is missing or does not pass its checks (M3-1) never gets as far as the
+     * database. The budget's month is that of the pack's time zone.
      * The pool runs the self-check of blueprint 7.6 before its first connection, so a role that may not serve traffic
      * never opens a port. The gateway comes next, because it asks the pool whether a call comes from inside a
      * transaction (A-14) and adds its audit's entries and its metering there (M3-5-1, M3-6-1); a route to a model that
@@ -83,11 +86,13 @@ class ApiRole {
         byte[] auditMasterKey = AuditKeys.masterKey(new EnvironmentSecrets(settings::optional));
         BigDecimal defaultBudget = MonthlyBudgets.defaultLimit(settings);
         StreamLimit streamLimit = streamLimit(settings);
+        int tenantCalls = tenantCalls(settings);
         RegionPack pack = RegionPacks.read(settings.required(RegionPacks.SETTING));
         PgPool database = PgRuntime.pool(address, password, POOL_SIZE);
         try {
             Gateway gateway = Models.gateway(pack, new DatabaseAudit(database, auditMasterKey), new DatabaseMetering(database),
-                    new DatabaseBudgets(database, pack.policy().timeZone(), defaultBudget, Clock.systemUTC()), database::insideTx);
+                    new DatabaseBudgets(database, pack.policy().timeZone(), defaultBudget, Clock.systemUTC()), tenantCalls,
+                    database::insideTx);
             return serve(context -> {
                 context.registerBean(PgPool.class, () -> database);
                 context.registerBean(ApiKeyLookup.class, () -> new DatabaseApiKeyLookup(database));
@@ -133,6 +138,26 @@ class ApiRole {
             throw new IllegalArgumentException(RoleSettings.variable(RoleSettings.STREAMS_MAX)
                     + " must be a whole number from 1 to " + MAX_STREAMS);
         }).orElse(StreamLimit.DEFAULT);
+    }
+
+    /**
+     * How many model calls one tenant may have under way on the instance at once (M3-6-3): engine.tenant.calls.max, a
+     * whole number from 1 to {@link Answers#MAX_RUNNING}, since an instance never has more under way, or 8 without one.
+     * Anything else refuses startup, by the variable an operator sets.
+     */
+    static int tenantCalls(RoleSettings settings) {
+        return settings.optional(RoleSettings.TENANT_CALLS_MAX).map(value -> {
+            try {
+                int max = Integer.parseInt(value.strip());
+                if (max >= 1 && max <= Answers.MAX_RUNNING) {
+                    return max;
+                }
+            } catch (NumberFormatException notAWholeNumber) {
+                // Refused below, with the rule.
+            }
+            throw new IllegalArgumentException(RoleSettings.variable(RoleSettings.TENANT_CALLS_MAX)
+                    + " must be a whole number from 1 to " + Answers.MAX_RUNNING);
+        }).orElse(DEFAULT_TENANT_CALLS);
     }
 
     /** The web layer, with the beans that connect it to the rest of the engine. Tests pass stand-ins for them. */

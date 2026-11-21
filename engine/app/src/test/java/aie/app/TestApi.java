@@ -90,6 +90,12 @@ final class TestApi {
         }
     };
 
+    /**
+     * How many model calls a tenant may have under way at once in tests that build their own gateway (M3-6-3): as many as
+     * an instance runs, so that only the tests of the limit meet it.
+     */
+    static final int TENANT_CALLS = Answers.MAX_RUNNING;
+
     /** The api's budgets on a test's database (M3-6-2): the default above, by the month of the jp pack's time zone. */
     static Budgets budgets(DatabasePort database) {
         return new DatabaseBudgets(database, RegionPacks.read("jp").policy().timeZone(), DEFAULT_BUDGET, Clock.systemUTC());
@@ -350,7 +356,9 @@ final class TestApi {
             /** The input check blocks what was said, by the rule instruction_override (M3-4-1). */
             BLOCKED,
             /** The tenant has spent its monthly budget (M3-6-2). */
-            OVER_BUDGET
+            OVER_BUDGET,
+            /** The tenant has as many answers under way as it may have at once (M3-6-3). */
+            TOO_MANY_CALLS
         }
 
         /** How a cancel of an answer in progress goes from now on. Each answer ends at most once. */
@@ -447,6 +455,9 @@ final class TestApi {
             }
             if (now == Outcome.OVER_BUDGET) {
                 return new Start.BudgetExceeded();
+            }
+            if (now == Outcome.TOO_MANY_CALLS) {
+                return new Start.TooManyCalls();
             }
             DataClass highest = ceiling;
             if (floor.compareTo(highest) > 0) {

@@ -26,6 +26,12 @@ public interface Gateway {
      * <p>The tenant's budget comes first (M3-6-2): once it has spent its monthly limit, no text of it is checked, and the
      * answer is {@link OverBudget}. Every model call needs a receipt from here, so none goes around the budget (T-4).
      *
+     * <p>Every model call holds one of the tenant's places among the calls under way on this instance while it is under
+     * way (M3-6-3). A receipt keeps the place of its first call from here on, so a tenant that holds all of its places
+     * gets {@link TooManyCalls} for a text that passed, and no receipt, before anything is stored. A caller that asks no
+     * model with a receipt after all gives it back ({@link Checked#release}). So no model call goes around the limit
+     * either (T-4).
+     *
      * @param caller who the text is checked for, as the audit names them
      * @throws IllegalArgumentException for a caller who is missing or not complete, a task that no route answers, or a
      *     text that is missing
@@ -51,7 +57,8 @@ public interface Gateway {
      *     whose class is below the class its receipt found; all are mistakes in the calling code, and no model is called.
      *     An exception from {@code output} also reaches the caller, and so does one from the audit before the call.
      * @throws IllegalStateException for a call from inside a database transaction, before any model is asked (A-14):
-     *     an answer would hold the transaction's connection for as long as it takes
+     *     an answer would hold the transaction's connection for as long as it takes; and for a later call with a receipt
+     *     whose first call took its place, while the tenant has no place free (M3-6-3)
      */
     Result answer(Request request, Output output);
 
@@ -101,8 +108,11 @@ public interface Gateway {
         }
     }
 
-    /** What the input check made of a text (M3-4-1), or that the tenant may not call a model this month (M3-6-2). */
-    sealed interface InputCheck permits Checked, Blocked, OverBudget {
+    /**
+     * What the input check made of a text (M3-4-1), or that the tenant may not call a model: not this month (M3-6-2), or
+     * not while it has as many calls under way as it may (M3-6-3).
+     */
+    sealed interface InputCheck permits Checked, Blocked, OverBudget, TooManyCalls {
     }
 
     /**
@@ -110,6 +120,14 @@ public interface Gateway {
      * limit; nothing of the text may be stored or sent. How much it spent is in the log, not here.
      */
     record OverBudget() implements InputCheck {
+    }
+
+    /**
+     * The tenant has as many model calls under way on this instance as it may have at once (M3-6-3), so the text, which
+     * passed its check, gets no receipt: nothing of it may be stored or sent now. A place comes free as soon as one of the
+     * tenant's answers ends.
+     */
+    record TooManyCalls() implements InputCheck {
     }
 
     /**
@@ -132,6 +150,15 @@ public interface Gateway {
          * (M3-4-2). The caller raises its call to it before anything is stored, and masking does not lower it.
          */
         DataClass dataClass();
+
+        /**
+         * Gives back the place the receipt keeps for its first call among the tenant's calls under way (M3-6-3). A caller
+         * that asks no model with a receipt after all, such as when storing the question failed, gives it back, or the
+         * tenant has one place fewer until the instance stops. A receipt whose first call took the place, or that was
+         * given back before, gives nothing back again, so a caller may give back every receipt once it is done with it.
+         * A receipt given back still serves later calls, which take places of their own.
+         */
+        void release();
     }
 
     /**

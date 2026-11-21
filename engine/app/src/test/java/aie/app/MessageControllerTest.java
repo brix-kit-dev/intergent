@@ -237,6 +237,22 @@ class MessageControllerTest {
         assertThat(response.headers().firstValue("Retry-After")).isEmpty();
     }
 
+    /**
+     * M3-6-3: a tenant with as many answers under way as it may have at once gets 429 rate_limited with Retry-After, as
+     * for a full instance, but with a detail of its own, since only this tenant waits.
+     */
+    @Test
+    void aTenantWithAsManyAnswersAsItMayHaveIs429WithRetryAfter() throws Exception {
+        ANSWERS.outcome = Outcome.TOO_MANY_CALLS;
+
+        HttpResponse<String> response = send("{\"text\":\"Hi\"}");
+
+        Problem problem = problem(response, 429, "rate_limited");
+        assertThat(problem.getDetail()).isEqualTo("The tenant has as many answers under way as it may have at once, so try again"
+                + " after Retry-After");
+        assertThat(response.headers().firstValue("Retry-After")).contains("5");
+    }
+
     @Test
     void theTextIsRequired() throws Exception {
         assertRefused(send("{}"), "text is required");
@@ -374,6 +390,11 @@ class MessageControllerTest {
         HttpResponse<String> spent = send("{\"text\":\"Hi\"}", "Accept", "text/event-stream");
         problem(spent, 402, "budget_exceeded");
         assertThat(spent.headers().firstValue("Content-Type")).contains("application/problem+json");
+
+        ANSWERS.outcome = Outcome.TOO_MANY_CALLS;
+        HttpResponse<String> many = send("{\"text\":\"Hi\"}", "Accept", "text/event-stream");
+        problem(many, 429, "rate_limited");
+        assertThat(many.headers().firstValue("Retry-After")).contains("5");
     }
 
     /**

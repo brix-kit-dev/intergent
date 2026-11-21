@@ -127,7 +127,9 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
      * end user it checks for and its audit can name them (M3-5-1); a conversation out of reach is NotFound, and its text
      * is not checked. The gateway checks the tenant's monthly budget and what the end user said before anything is
      * stored, outside any transaction, so a tenant that has spent its budget stores nothing (M3-6-2), and its receipt
-     * goes with the answer, so the text is checked once (M3-4-1). The class the check found raises the floor,
+     * goes with the answer, so the text is checked once (M3-4-1). The receipt holds one of the tenant's places among the
+     * calls under way on this instance, so a tenant without a free place stores nothing either, and one whose question is
+     * not stored after all gives the receipt back (M3-6-3). The class the check found raises the floor,
      * such as personal for a telephone number (M3-4-2). The storage measures the call's class against the gateway's
      * ceiling for the task while it holds the conversation's turn, so a call no model takes stores nothing.
      */
@@ -137,7 +139,7 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
             return new Start.Busy();
         }
         Asked asked;
-        Gateway.Checked question;
+        Gateway.Checked question = null;
         try {
             Optional<Conversation> conversation = conversations.find(caller, conversationId);
             if (conversation.isEmpty()) {
@@ -156,21 +158,30 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
                     slots.release();
                     return new Start.BudgetExceeded();
                 }
+                case Gateway.TooManyCalls many -> {
+                    slots.release();
+                    return new Start.TooManyCalls();
+                }
             }
             DataClass ceiling = gateway.ceiling(TASK);
             DataClass least = question.dataClass().compareTo(floor) > 0 ? question.dataClass() : floor;
             switch (messages.ask(caller, conversationId, text, least, ceiling)) {
                 case Asked stored -> asked = stored;
                 case Ask.NotFound missing -> {
+                    question.release();
                     slots.release();
                     return new Start.NotFound();
                 }
                 case Ask.AboveCeiling above -> {
+                    question.release();
                     slots.release();
                     return new Start.NoEligibleModel(above.dataClass(), ceiling);
                 }
             }
         } catch (RuntimeException e) {
+            if (question != null) {
+                question.release();
+            }
             slots.release();
             throw e;
         }
@@ -197,7 +208,10 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
         }
     }
 
-    /** On the answer's own thread. Whatever happens, the slot goes back and the waiters learn that the answer is over. */
+    /**
+     * On the answer's own thread. Whatever happens, the slot goes back and the waiters learn that the answer is over. The
+     * gateway gives the receipt's place back when its call ends; one that never got as far gives it back here (M3-6-3).
+     */
     private void generate(Answer answer) {
         try {
             Gateway.Result result = gateway.answer(new Gateway.Request(TASK, turns(answer), answer::stopRequested,
@@ -209,6 +223,7 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
             LOG.error("Answer {} went wrong before its end, so it ends as interrupted", answer.id(), e);
             answer.interrupt();
         } finally {
+            answer.question.release();
             running.remove(answer.id());
             slots.release();
             answer.ended.complete(null);

@@ -559,6 +559,98 @@ class ApiRoleTest {
                         .isEqualTo("Startup refused: ENGINE_STREAMS_MAX must be a whole number from 1 to 10000"));
     }
 
+    /** A message with an Idempotency-Key, to the api on this port, that wants JSON. */
+    private static HttpRequest keyedOn(int apiPort, String key, String idempotencyKey, String conversationId, String body) {
+        return HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + apiPort + "/v1/conversations/" + conversationId + "/messages"))
+                .header("Authorization", "Bearer " + key).header("Content-Type", "application/json")
+                .header("Idempotency-Key", idempotencyKey).timeout(Duration.ofSeconds(30)).POST(BodyPublishers.ofString(body)).build();
+    }
+
+    /**
+     * M3-6-3 on the real api with ENGINE_TENANT_CALLS_MAX=1: while a tenant's answer is under way, its next message is 429
+     * rate_limited with Retry-After 5, JSON and streamed alike, before anything is stored, and the Idempotency-Key is let
+     * go. Another tenant is answered meanwhile, and the tenant itself once its answer ended, under the same key.
+     */
+    @Test
+    void aTenantWithAsManyAnswersUnderWayAsItMayIs429AndStoresNothing() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String key = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "internal")).key();
+        String id = JSON.readValue(startConversation(key, "calls-1", "{\"external_user_id\":\"host-user-1\"}").body(),
+                Conversation.class).getId();
+        String other = provisioning.createTenant("jp1", null);
+        String otherKey = provisioning.createKey(other, provisioning.createApplication(other, "test", "internal")).key();
+        String otherId = JSON.readValue(startConversation(otherKey, "calls-2", "{\"external_user_id\":\"host-user-2\"}").body(),
+                Conversation.class).getId();
+        ConfigurableApplicationContext oneCall = ApiRole.start("--server.port=0", address(), password(TestDatabase.APP_PASSWORD),
+                TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING, TestApi.AUDIT_KEY_SETTING, TestApi.BUDGET_SETTING,
+                "--engine.tenant.calls.max=1");
+        try {
+            int onePort = ((ServletWebServerApplicationContext) oneCall).getWebServer().getPort();
+            HttpClient client = HttpClient.newHttpClient();
+            CompletableFuture<HttpResponse<String>> first = client.sendAsync(streamedWithKey(onePort, key, "calls-3", id,
+                    "{\"text\":\"[fake pieces=6 delay=300ms] Long\"}"), HttpResponse.BodyHandlers.ofString());
+            answerWithEvents(id, 2);
+            String hi = "{\"text\":\"[fake pieces=1 delay=1ms] Hi\"}";
+
+            HttpResponse<String> plain = client.send(keyedOn(onePort, key, "calls-4", id, hi), HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> streamed = client.send(streamedWithKey(onePort, key, "calls-5", id, hi),
+                    HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> otherTenant = client.send(keyedOn(onePort, otherKey, "calls-6", otherId, hi),
+                    HttpResponse.BodyHandlers.ofString());
+
+            for (HttpResponse<String> refused : List.of(plain, streamed)) {
+                assertThat(refused.statusCode()).isEqualTo(429);
+                assertThat(refused.headers().firstValue("Content-Type")).hasValueSatisfying(
+                        type -> assertThat(type).startsWith("application/problem+json"));
+                assertThat(refused.headers().firstValue("Retry-After")).contains("5");
+                Problem problem = JSON.readValue(refused.body(), Problem.class);
+                assertThat(problem.getCode()).isEqualTo("rate_limited");
+                assertThat(problem.getDetail()).isEqualTo("The tenant has as many answers under way as it may have at once, so try"
+                        + " again after Retry-After");
+            }
+            assertThat(otherTenant.statusCode()).isEqualTo(200);
+            assertThat(JSON.readValue(otherTenant.body(), Message.class).getStatus()).isEqualTo("completed");
+            assertThat(TestDatabase.firstColumn(DATABASE, "SELECT count(*) FROM engine.conversation_messages WHERE conversation_id = '"
+                    + id + "'")).containsExactly("2");
+            assertThat(TestDatabase.firstColumn(DATABASE, "SELECT count(*) FROM engine.tenancy_idempotency_keys WHERE"
+                    + " idempotency_key IN ('calls-4', 'calls-5')")).containsExactly("0");
+
+            assertThat(first.get(30, TimeUnit.SECONDS).statusCode()).isEqualTo(200);
+            HttpResponse<String> again = client.send(keyedOn(onePort, key, "calls-4", id, hi), HttpResponse.BodyHandlers.ofString());
+            assertThat(again.statusCode()).isEqualTo(200);
+            assertThat(JSON.readValue(again.body(), Message.class).getStatus()).isEqualTo("completed");
+        } finally {
+            oneCall.close();
+        }
+    }
+
+    /** M3-6 decision 5: without a setting a tenant may have 8 model calls under way on an instance; with one, its value. */
+    @Test
+    void aTenantMayHave8CallsUnderWayWithoutASetting() {
+        assertThat(ApiRole.tenantCalls(RoleSettings.read())).isEqualTo(8);
+        assertThat(ApiRole.tenantCalls(RoleSettings.read("--engine.tenant.calls.max= 3 "))).isEqualTo(3);
+        assertThat(ApiRole.tenantCalls(RoleSettings.read("--engine.tenant.calls.max=1"))).isEqualTo(1);
+        assertThat(ApiRole.tenantCalls(RoleSettings.read("--engine.tenant.calls.max=64"))).isEqualTo(64);
+    }
+
+    /**
+     * M3-6-3: a tenant limit that is no whole number from 1 to 64, the most answers an instance has under way, refuses
+     * startup, before the pool opens, by its variable.
+     */
+    @Test
+    void aTenantLimitThatIsNoWholeNumberUpToTheInstancesRefusesStartupBeforeTheDatabase(CapturedOutput output) {
+        for (String limit : List.of("0", "-1", "65", "many", "2.5")) {
+            assertThat(ApiRole.run(address(), password("wrong-secret-value"), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING,
+                    TestApi.AUDIT_KEY_SETTING, TestApi.BUDGET_SETTING, "--engine.tenant.calls.max=" + limit))
+                    .isEqualTo(EngineApplication.EXIT_FAILED);
+        }
+
+        assertThat(output.getErr().lines().filter(line -> line.startsWith("Startup refused: ")))
+                .hasSize(5).allSatisfy(line -> assertThat(line)
+                        .isEqualTo("Startup refused: ENGINE_TENANT_CALLS_MAX must be a whole number from 1 to 64"));
+    }
+
     private static HttpRequest askOn(int apiPort, String key, String conversationId, String text, String accept) {
         return HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + apiPort + "/v1/conversations/" + conversationId + "/messages"))
                 .header("Authorization", "Bearer " + key).header("Content-Type", "application/json").header("Accept", accept)

@@ -163,7 +163,7 @@ class ConversationController implements ConversationsApi, StreamsApi {
      *
      * <p>Everything about the request is checked before anything is stored, and a refusal is a plain problem, before any
      * stream starts. A full instance answers 429 and stores nothing, so the same Idempotency-Key may come back after
-     * Retry-After. A streamed answer is kept with its Idempotency-Key as its message, and a retry with the key gets the
+     * Retry-After; so does a tenant with as many answers under way on this instance as it may have (M3-6-3). A streamed answer is kept with its Idempotency-Key as its message, and a retry with the key gets the
      * same answer's events again, from the first, without asking anything (M2-10-2). A stream takes one of the instance's
      * stream slots before anything is asked or sent again, and gives it back when it ends; with none free it is 429, and
      * nothing is stored (point 40). A browser speaks only in its own end user's conversations, so another end user's is
@@ -207,6 +207,7 @@ class ConversationController implements ConversationsApi, StreamsApi {
                 case Answers.Start.NoEligibleModel refused -> throw new NoEligibleModel(refused);
                 case Answers.Start.InputBlocked blocked -> throw new InputBlocked(blocked);
                 case Answers.Start.BudgetExceeded spent -> throw new BudgetExceeded();
+                case Answers.Start.TooManyCalls many -> throw tenantFull();
             });
         }
         return switch (answers.ask(caller, conversation, text, floor)) {
@@ -217,6 +218,7 @@ class ConversationController implements ConversationsApi, StreamsApi {
             case Answers.Start.NoEligibleModel refused -> throw new NoEligibleModel(refused);
             case Answers.Start.InputBlocked blocked -> throw new InputBlocked(blocked);
             case Answers.Start.BudgetExceeded spent -> throw new BudgetExceeded();
+            case Answers.Start.TooManyCalls many -> throw tenantFull();
         };
     }
 
@@ -551,6 +553,18 @@ class ConversationController implements ConversationsApi, StreamsApi {
         ErrorResponseException full = new ErrorResponseException(HttpStatus.TOO_MANY_REQUESTS, ProblemDetail.forStatusAndDetail(
                 HttpStatus.TOO_MANY_REQUESTS, "This instance answers as many messages as it can, so try again after Retry-After"),
                 null);
+        full.getHeaders().set(HttpHeaders.RETRY_AFTER, Long.toString(RETRY_AFTER.toSeconds()));
+        return full;
+    }
+
+    /**
+     * The tenant has as many answers under way on this instance as it may (M3-6-3). Nothing was stored, so the same
+     * Idempotency-Key may come back, once one of its answers ended; an answer takes seconds, as for a full instance.
+     */
+    private static ErrorResponseException tenantFull() {
+        ErrorResponseException full = new ErrorResponseException(HttpStatus.TOO_MANY_REQUESTS, ProblemDetail.forStatusAndDetail(
+                HttpStatus.TOO_MANY_REQUESTS, "The tenant has as many answers under way as it may have at once, so try again after"
+                        + " Retry-After"), null);
         full.getHeaders().set(HttpHeaders.RETRY_AFTER, Long.toString(RETRY_AFTER.toSeconds()));
         return full;
     }

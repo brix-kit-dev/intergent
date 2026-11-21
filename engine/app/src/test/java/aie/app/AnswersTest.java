@@ -123,7 +123,7 @@ class AnswersTest {
     /** The real gateway with the fake model, on a route that lets an answer take this long at most. */
     private static Gateway fake(Duration routeTime) {
         return new RoutingGateway(Map.of(FakeModel.MODEL, new RoutingGateway.Model(new FakeModel(), DataClass.SENSITIVE, ModelSpec.Price.FREE)),
-                Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), routeTime, CheckMode.SENTENCE, TestApi.prompts(List.of(FakeModel.MODEL)))), Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), new DatabaseMetering(pool), TestApi.budgets(pool), pool::insideTx);
+                Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), routeTime, CheckMode.SENTENCE, TestApi.prompts(List.of(FakeModel.MODEL)))), Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), new DatabaseMetering(pool), TestApi.budgets(pool), TestApi.TENANT_CALLS, pool::insideTx);
     }
 
     /** The real gateway with a stub model that takes every class. */
@@ -136,7 +136,7 @@ class AnswersTest {
         return new RoutingGateway(Map.of("stub", new RoutingGateway.Model(model, DataClass.SENSITIVE, ModelSpec.Price.FREE)),
                 Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), checks,
                         Map.of("stub", new aie.core.gateway.internal.Prompt("customer_chat/test/v1", prompt)))),
-                Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), new DatabaseMetering(pool), TestApi.budgets(pool), pool::insideTx);
+                Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), new DatabaseMetering(pool), TestApi.budgets(pool), TestApi.TENANT_CALLS, pool::insideTx);
     }
 
     /** A model that writes these pieces, and stops as soon as it is told to, as a real one does. */
@@ -160,7 +160,7 @@ class AnswersTest {
      */
     private static Gateway stub(ModelPort model, DataClass max) {
         return new RoutingGateway(Map.of("stub", new RoutingGateway.Model(model, max, ModelSpec.Price.FREE)),
-                Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), CheckMode.INPUT, TestApi.prompts(List.of("stub")))), Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), new DatabaseMetering(pool), TestApi.budgets(pool), pool::insideTx);
+                Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), CheckMode.INPUT, TestApi.prompts(List.of("stub")))), Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), new DatabaseMetering(pool), TestApi.budgets(pool), TestApi.TENANT_CALLS, pool::insideTx);
     }
 
     private static Started started(Start start) {
@@ -802,7 +802,7 @@ class AnswersTest {
                         new ModelSpec.Price(new java.math.BigDecimal("3"), new java.math.BigDecimal("15")))),
                 Map.of(Answers.TASK, new Route(List.of("priced"), Duration.ofSeconds(30), CheckMode.SENTENCE,
                         Map.of("priced", new aie.core.gateway.internal.Prompt("customer_chat/test/v1", "Answer the test.")))),
-                Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), new DatabaseMetering(pool), TestApi.budgets(pool), pool::insideTx);
+                Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), new DatabaseMetering(pool), TestApi.budgets(pool), TestApi.TENANT_CALLS, pool::insideTx);
         try (GeneratingAnswers answers = new GeneratingAnswers(messages, conversations, priced)) {
             Started started = askedBy("req_metered", TRACE, () -> answers.ask(caller, conversation, "How much?", DataClass.PUBLIC));
             awaitEnd(started);
@@ -834,7 +834,7 @@ class AnswersTest {
                         new ModelSpec.Price(new BigDecimal("3"), new BigDecimal("15")))),
                 Map.of(Answers.TASK, new Route(List.of("priced"), Duration.ofSeconds(30), CheckMode.SENTENCE,
                         Map.of("priced", new aie.core.gateway.internal.Prompt("customer_chat/test/v1", "Answer the test.")))),
-                Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), new DatabaseMetering(pool), budgets, pool::insideTx);
+                Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), new DatabaseMetering(pool), budgets, TestApi.TENANT_CALLS, pool::insideTx);
         String tenant = provisioning.createTenant("jp1", null);
         Owner other = new Owner("key_unused", tenant, provisioning.createApplication(tenant, "test", "internal"));
         String otherConversation = conversations.start(other, endUsers.resolve(other, "user-1"), null).conversationId();
@@ -859,6 +859,88 @@ class AnswersTest {
             awaitEnd(started(answers.ask(caller, conversation, "And now?", DataClass.PUBLIC)));
             assertThat(answers.ask(caller, conversation, "Once more?", DataClass.PUBLIC)).isEqualTo(new Start.BudgetExceeded());
             assertThat(called).containsExactly("priced", "priced", "priced");
+        }
+    }
+
+    /** The real gateway with a stub model that takes data up to this class, where a tenant may have this many calls under way. */
+    private static Gateway limited(ModelPort model, DataClass max, int tenantCalls) {
+        return new RoutingGateway(Map.of("stub", new RoutingGateway.Model(model, max, ModelSpec.Price.FREE)),
+                Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), CheckMode.SENTENCE, TestApi.prompts(List.of("stub")))),
+                Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), new DatabaseMetering(pool), TestApi.budgets(pool),
+                tenantCalls, pool::insideTx);
+    }
+
+    /** Messages whose calls of this method fail, as when the database goes away. Everything else goes through. */
+    private static Messages failingOn(String failing) {
+        return (Messages) Proxy.newProxyInstance(Messages.class.getClassLoader(), new Class<?>[] {Messages.class},
+                (proxy, method, arguments) -> {
+                    if (method.getName().equals(failing)) {
+                        throw new IllegalStateException("The test's database went away");
+                    }
+                    try {
+                        return method.invoke(messages, arguments);
+                    } catch (InvocationTargetException e) {
+                        throw e.getCause();
+                    }
+                });
+    }
+
+    /**
+     * M3-6-3 on the real database and the real gateway: a tenant with as many answers under way as it may have at once,
+     * here one, gets TooManyCalls for its next question before anything is stored, and no model is called. The slot goes
+     * back, so the instance's other slot answers another tenant meanwhile; once the answer under way has ended, the
+     * tenant is answered again.
+     */
+    @Test
+    void aTenantWithAsManyAnswersUnderWayAsItMayStoresNothingMore() throws Exception {
+        CountDownLatch release = new CountDownLatch(1);
+        List<String> called = new CopyOnWriteArrayList<>();
+        ModelPort waiting = waitingFor(release);
+        ModelPort model = (request, output) -> {
+            called.add(request.turns().getLast().text());
+            return waiting.generate(request, output);
+        };
+        String tenant = provisioning.createTenant("jp1", null);
+        Owner other = new Owner("key_unused", tenant, provisioning.createApplication(tenant, "test", "internal"));
+        String otherConversation = conversations.start(other, endUsers.resolve(other, "user-1"), null).conversationId();
+        try (GeneratingAnswers answers = new GeneratingAnswers(messages, conversations, limited(model, DataClass.SENSITIVE, 1), 2,
+                Duration.ofSeconds(5))) {
+            Started first = started(answers.ask(caller, conversation, "First", DataClass.PUBLIC));
+            List<String> stored = rows();
+
+            assertThat(answers.ask(caller, conversation, "Second", DataClass.PUBLIC)).isEqualTo(new Start.TooManyCalls());
+            assertThat(rows()).isEqualTo(stored);
+            Started others = started(answers.ask(other, otherConversation, "Mine", DataClass.PUBLIC));
+            release.countDown();
+            awaitEnd(others);
+            awaitEnd(first);
+            awaitEnd(started(answers.ask(caller, conversation, "Third", DataClass.PUBLIC)));
+
+            assertThat(called).containsExactlyInAnyOrder("First", "Mine", "Third");
+        }
+    }
+
+    /**
+     * M3-6-3: a question that is not answered after all gives its receipt's place back, so the tenant's one place answers
+     * the next question: one above the task's ceiling (NoEligibleModel), one whose storing fails, and one whose answer
+     * goes wrong before its model is asked, here as its history cannot be read.
+     */
+    @Test
+    void aQuestionNotAnsweredGivesItsPlaceBack() throws Exception {
+        Gateway gateway = limited((request, output) -> new ModelPort.Completed(new ModelPort.Usage(1, 1)), DataClass.INTERNAL, 1);
+        try (GeneratingAnswers answers = new GeneratingAnswers(messages, conversations, gateway, 1, Duration.ofSeconds(5));
+                GeneratingAnswers unstored = new GeneratingAnswers(failingOn("ask"), conversations, gateway, 1, Duration.ofSeconds(5));
+                GeneratingAnswers unread = new GeneratingAnswers(failingOn("historyFor"), conversations, gateway, 1,
+                        Duration.ofSeconds(5))) {
+            assertThat(answers.ask(caller, conversation, "Too high", DataClass.SENSITIVE))
+                    .isEqualTo(new Start.NoEligibleModel(DataClass.SENSITIVE, DataClass.INTERNAL));
+            assertThatThrownBy(() -> unstored.ask(caller, conversation, "Lost", DataClass.PUBLIC))
+                    .hasMessage("The test's database went away");
+            awaitEnd(started(unread.ask(caller, conversation, "Unread", DataClass.PUBLIC)));
+
+            Started answered = started(answers.ask(caller, conversation, "Fine", DataClass.PUBLIC));
+            awaitEnd(answered);
+            assertThat(answerOf(answered).status()).isEqualTo(Status.COMPLETED);
         }
     }
 

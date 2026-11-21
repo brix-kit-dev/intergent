@@ -19,6 +19,8 @@ final class RoleSettings {
     static final String SESSION_PREVIOUS_KEY = "engine.session.previous.key";
     /** How many event streams an api instance keeps open at once (point 40); 256 without one. */
     static final String STREAMS_MAX = "engine.streams.max";
+    /** How many model calls one tenant may have under way on an api instance at once (M3-6-3); 8 without one. */
+    static final String TENANT_CALLS_MAX = "engine.tenant.calls.max";
 
     private final Environment environment;
 

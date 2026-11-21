@@ -48,11 +48,13 @@ final class Models {
      * @param audit the trust layer's audit, which the gateway adds its entries to (M3-5-1): the role's database
      * @param metering where the gateway records what each call used and cost (M3-6-1): the role's database
      * @param budgets where the gateway asks a tenant's monthly budget before it checks its text (M3-6-2)
+     * @param tenantCalls how many model calls one tenant may have under way on this instance at once (M3-6-3)
      * @param insideTx whether the calling thread is inside a database transaction, so that the gateway can refuse such a
      *     call (A-14): {@code insideTx} of the role's pool
      * @throws IllegalArgumentException for a model whose adapter this engine does not have
      */
-    static Gateway gateway(RegionPack pack, Audit audit, Metering metering, Budgets budgets, BooleanSupplier insideTx) {
+    static Gateway gateway(RegionPack pack, Audit audit, Metering metering, Budgets budgets, int tenantCalls,
+            BooleanSupplier insideTx) {
         Map<String, RoutingGateway.Model> registry = new LinkedHashMap<>();
         pack.models().forEach((id, spec) -> {
             Supplier<ModelPort> adapter = ADAPTERS.get(spec.adapter());
@@ -62,6 +64,6 @@ final class Models {
             }
             registry.put(id, new RoutingGateway.Model(adapter.get(), spec.maxDataClass(), spec.price()));
         });
-        return new RoutingGateway(registry, pack.routes(), checks(), audit, metering, budgets, insideTx);
+        return new RoutingGateway(registry, pack.routes(), checks(), audit, metering, budgets, tenantCalls, insideTx);
     }
 }

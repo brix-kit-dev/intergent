@@ -91,5 +91,13 @@ public interface Answers {
          */
         record BudgetExceeded() implements Start {
         }
+
+        /**
+         * The tenant has as many answers under way on this instance as it may have at once (M3-6-3), so this one does not
+         * start. Nothing was stored, and the conversation's watermark stayed as it was; a place comes free as soon as one
+         * of the tenant's answers ends.
+         */
+        record TooManyCalls() implements Start {
+        }
     }
 }

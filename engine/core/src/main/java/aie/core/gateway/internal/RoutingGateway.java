@@ -14,6 +14,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import org.slf4j.Logger;
@@ -50,6 +52,10 @@ public final class RoutingGateway implements Gateway {
     private final Audit audit;
     private final Metering metering;
     private final Budgets budgets;
+    /** How many model calls one tenant may have under way on this instance at once (M3-6-3). */
+    private final int tenantCalls;
+    /** The places each tenant holds among the calls under way here, for every tenant that holds any (M3-6-3). */
+    private final ConcurrentHashMap<String, Integer> placesHeld = new ConcurrentHashMap<>();
     private final BooleanSupplier insideTx;
 
     /**
@@ -59,17 +65,22 @@ public final class RoutingGateway implements Gateway {
      * @param audit the trust layer's audit, which gets an entry before every model call (blueprint 9.4)
      * @param metering where each model call's use is recorded at its end (M3-6-1)
      * @param budgets where each tenant's monthly budget is asked before its text is checked (M3-6-2)
+     * @param tenantCalls how many model calls one tenant may have under way on this instance at once, 1 or more (M3-6-3)
      * @param insideTx whether the calling thread is inside a database transaction, asked on every call; the role passes
      *     {@link aie.ports.DatabasePort#insideTx} of its pool
-     * @throws IllegalArgumentException for a route to a model that is not in the registry
+     * @throws IllegalArgumentException for a route to a model that is not in the registry, or a tenant limit below 1
      */
     public RoutingGateway(Map<String, Model> models, Map<String, Route> routes, Checks checks, Audit audit, Metering metering,
-            Budgets budgets, BooleanSupplier insideTx) {
+            Budgets budgets, int tenantCalls, BooleanSupplier insideTx) {
         Objects.requireNonNull(checks, "A gateway calls no model without the trust layer's checks (A-15)");
         Objects.requireNonNull(audit, "A gateway calls no model without the trust layer's audit (blueprint 9.4)");
         Objects.requireNonNull(metering, "A gateway calls no model without metering (M3-6-1)");
         Objects.requireNonNull(budgets, "A gateway calls no model without budgets (M3-6-2, T-4)");
         Objects.requireNonNull(insideTx, "A gateway needs to know whether a call comes from inside a transaction");
+        if (tenantCalls < 1) {
+            throw new IllegalArgumentException("A tenant may have 1 model call or more under way at once, not " + tenantCalls
+                    + " (M3-6-3, T-4)");
+        }
         routes.forEach((task, route) -> route.models().forEach(model -> {
             if (!models.containsKey(model)) {
                 throw new IllegalArgumentException(
@@ -86,6 +97,7 @@ public final class RoutingGateway implements Gateway {
         this.audit = audit;
         this.metering = metering;
         this.budgets = budgets;
+        this.tenantCalls = tenantCalls;
         this.insideTx = insideTx;
     }
 
@@ -93,7 +105,9 @@ public final class RoutingGateway implements Gateway {
      * Refuses a call from inside a transaction first, because a check may come to call a service. The tenant's budget
      * comes before the text, so a tenant that has spent it gets no check of its text either; that is noted in the log, by
      * the tenant, the month and the sums. A blocked text is noted in the log by its rule and task, never by its words, and
-     * so is it in the audit.
+     * so is it in the audit. A text that passes takes one of the tenant's places among the calls under way here, which its
+     * receipt holds (M3-6-3); without a free place it gets none, and the log notes the tenant and its limit. A blocked text
+     * takes no place.
      */
     @Override
     public InputCheck checkInput(Caller caller, String task, String text) {
@@ -116,7 +130,14 @@ public final class RoutingGateway implements Gateway {
             return new OverBudget();
         }
         return switch (checks.input(task, text)) {
-            case Checks.Passed passed -> new Receipt(this, caller, task, text, passed.dataClass());
+            case Checks.Passed passed -> {
+                if (!hold(caller.tenantId())) {
+                    LOG.info("The tenant {} has {} model call(s) under way here, as many as it may have at once, so its text gets"
+                            + " no receipt now", caller.tenantId(), tenantCalls);
+                    yield new TooManyCalls();
+                }
+                yield new Receipt(this, caller, task, text, passed.dataClass());
+            }
             case Checks.Blocked blocked -> {
                 LOG.info("The input check blocked a text for the task {} by the rule {}", task, blocked.rule());
                 tell(new Audit.Entry(requestId(), caller.tenantId(), caller.applicationId(), caller.endUserId(),
@@ -136,7 +157,10 @@ public final class RoutingGateway implements Gateway {
      * the model completes is checked then; what a model that failed or was cancelled leaves held never goes out. The
      * model's reason for a failure goes to the log alone, with the task, the model and the pieces sent; a stopped answer
      * is logged by its rule. The audit's entry before the call comes once everything else is ready, right before the
-     * model is asked; the entry at its end comes once the answer has ended, before the result goes back.
+     * model is asked; the entry at its end comes once the answer has ended, before the result goes back. Once the request
+     * is found well formed, the call takes one of its tenant's places (M3-6-3): the one the receipt kept since the check,
+     * for its first call, or a free one for a later call, which is refused without one. The place goes back when the call
+     * returns or throws. A request refused before that leaves the receipt's place kept, for its caller to give back.
      */
     @Override
     public Result answer(Request request, Output output) {
@@ -145,6 +169,20 @@ public final class RoutingGateway implements Gateway {
         }
         Route route = routeOf(request);
         Receipt question = (Receipt) request.question();
+        String tenantId = question.caller.tenantId();
+        if (!question.kept.compareAndSet(true, false) && !hold(tenantId)) {
+            throw new IllegalStateException("The tenant " + tenantId + " has " + tenantCalls + " model call(s) under way here, as"
+                    + " many as it may have at once, so a later call with this receipt waits until one of them ends (M3-6-3)");
+        }
+        try {
+            return answer(request, output, route, question);
+        } finally {
+            giveBack(tenantId);
+        }
+    }
+
+    /** The call itself, once it holds a place of its tenant: the place goes back when it returns, however it returns. */
+    private Result answer(Request request, Output output, Route route, Receipt question) {
         Caller caller = question.caller;
         String model = firstTaking(route, request.dataClass());
         Prompt prompt = route.prompts().get(model);
@@ -228,6 +266,28 @@ public final class RoutingGateway implements Gateway {
         } catch (RuntimeException e) {
             LOG.error("Metering could not record {}, so this line keeps it", use, e);
         }
+    }
+
+    /**
+     * Takes one of the tenant's places among the calls under way here, if it has one free (M3-6-3). The map changes one
+     * tenant at a time, so two checks at once never take more places than the tenant has.
+     */
+    private boolean hold(String tenantId) {
+        boolean[] held = new boolean[1];
+        placesHeld.compute(tenantId, (tenant, places) -> {
+            int now = places == null ? 0 : places;
+            if (now >= tenantCalls) {
+                return places;
+            }
+            held[0] = true;
+            return now + 1;
+        });
+        return held[0];
+    }
+
+    /** Gives one of the tenant's places back; a tenant that holds none is no longer kept. */
+    private void giveBack(String tenantId) {
+        placesHeld.computeIfPresent(tenantId, (tenant, places) -> places <= 1 ? null : places - 1);
     }
 
     /** The request ID of the calling thread's log context, which its request's log lines carry, or null outside one. */
@@ -322,11 +382,14 @@ public final class RoutingGateway implements Gateway {
 
     /**
      * The receipt of a text that passed this gateway's input check. It is private, so only this gateway makes one, and it
-     * knows the gateway that made it.
+     * knows the gateway that made it. It keeps one of its tenant's places for its first call, from the check until that
+     * call starts or its caller gives it back (M3-6-3).
      */
     private static final class Receipt implements Checked {
 
         private final RoutingGateway issuer;
+        /** Whether it still keeps the place its tenant took for it at the check (M3-6-3). */
+        private final AtomicBoolean kept = new AtomicBoolean(true);
         private final Caller caller;
         private final String task;
         private final String text;
@@ -358,6 +421,13 @@ public final class RoutingGateway implements Gateway {
         @Override
         public DataClass dataClass() {
             return dataClass;
+        }
+
+        @Override
+        public void release() {
+            if (kept.compareAndSet(true, false)) {
+                issuer.giveBack(caller.tenantId());
+            }
         }
     }
 
