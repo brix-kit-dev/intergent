@@ -1010,6 +1010,31 @@ class ApiRoleTest {
     }
 
     /**
+     * M3-6-1 on the real database and the role's own gateway: an answer is metered once, with the Request-Id its response
+     * gave and the answer's message, at the price jp's registry gives the fake model: nothing, written to six places, as
+     * a cost per million tokens divided down to one token is.
+     */
+    @Test
+    void anAnswerIsMeteredWithItsRequestsId() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String application = provisioning.createApplication(tenant, "test", "public");
+        String key = provisioning.createKey(tenant, application).key();
+        String id = JSON.readValue(startConversation(key, "meter-1", "{\"external_user_id\":\"host-user-1\"}").body(),
+                Conversation.class).getId();
+
+        HttpResponse<String> answered = sendMessage(key, "meter-2", id, "{\"text\":\"[fake pieces=2 delay=1ms] Hi\"}");
+
+        assertThat(answered.statusCode()).isEqualTo(200);
+        Message answer = JSON.readValue(answered.body(), Message.class);
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT concat_ws(' ', request_id, application_id, message_id, task, model,"
+                + " input_tokens, output_tokens, cost_usd) FROM engine.metering_usage WHERE tenant_id = '" + tenant + "'"))
+                .containsExactly(String.join(" ", answered.headers().firstValue("Request-Id").orElseThrow(), application, answer.getId(),
+                        "customer_chat", "fake", Long.toString(answer.getUsage().getInputTokens()),
+                        Long.toString(answer.getUsage().getOutputTokens()), "0.000000"));
+    }
+
+    /**
      * M3-4-2 on the real database and the role's own gateway: a question with a telephone number and an email address is
      * answered, the model is shown them masked, the database keeps them as said, and the conversation is personal.
      */

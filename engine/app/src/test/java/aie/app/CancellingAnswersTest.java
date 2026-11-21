@@ -7,8 +7,10 @@ import aie.adapters.storepg.PgPool;
 import aie.adapters.storepg.PgRuntime;
 import aie.adapters.storepg.TestDatabase;
 import aie.core.gateway.api.Gateway;
+import aie.core.gateway.api.ModelSpec;
 import aie.core.gateway.internal.Route;
 import aie.core.gateway.internal.RoutingGateway;
+import aie.core.metering.internal.DatabaseMetering;
 import aie.core.tenancy.api.ApiKeyLookup.Owner;
 import aie.core.tenancy.api.EndUsers;
 import aie.core.tenancy.api.Provisioning;
@@ -106,14 +108,14 @@ class CancellingAnswersTest {
 
     /** The real gateway with the fake model, on a route that lets an answer take a minute. */
     private static Gateway fake() {
-        return new RoutingGateway(Map.of(FakeModel.MODEL, new RoutingGateway.Model(new FakeModel(), DataClass.SENSITIVE)),
-                Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), Duration.ofSeconds(60), CheckMode.SENTENCE, TestApi.prompts(List.of(FakeModel.MODEL)))), Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), pool::insideTx);
+        return new RoutingGateway(Map.of(FakeModel.MODEL, new RoutingGateway.Model(new FakeModel(), DataClass.SENSITIVE, ModelSpec.Price.FREE)),
+                Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), Duration.ofSeconds(60), CheckMode.SENTENCE, TestApi.prompts(List.of(FakeModel.MODEL)))), Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), new DatabaseMetering(pool), pool::insideTx);
     }
 
     /** The real gateway with a stub model, on a route that checks the input alone, so each piece goes out as written. */
     private static Gateway stub(ModelPort model) {
-        return new RoutingGateway(Map.of("stub", new RoutingGateway.Model(model, DataClass.SENSITIVE)),
-                Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), CheckMode.INPUT, TestApi.prompts(List.of("stub")))), Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), pool::insideTx);
+        return new RoutingGateway(Map.of("stub", new RoutingGateway.Model(model, DataClass.SENSITIVE, ModelSpec.Price.FREE)),
+                Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), CheckMode.INPUT, TestApi.prompts(List.of("stub")))), Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), new DatabaseMetering(pool), pool::insideTx);
     }
 
     private static Started started(Start start) {

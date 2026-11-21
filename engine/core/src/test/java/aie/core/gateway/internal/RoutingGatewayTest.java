@@ -15,11 +15,14 @@ import aie.core.gateway.api.Gateway.Result;
 import aie.core.gateway.api.Gateway.Role;
 import aie.core.gateway.api.Gateway.Turn;
 import aie.core.gateway.api.Gateway.Usage;
+import aie.core.gateway.api.ModelSpec;
+import aie.core.metering.api.Metering;
 import aie.core.trust.api.Audit;
 import aie.core.trust.api.CheckMode;
 import aie.core.trust.api.Checks;
 import aie.core.trust.api.DataClass;
 import aie.ports.ModelPort;
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -44,6 +47,8 @@ class RoutingGatewayTest {
     private static final Gateway.Caller CALLER = new Gateway.Caller("ten_a", "app_a", "eu_a", "conv_a");
     /** The message the tests' answers are written to. */
     private static final String MESSAGE = "msg_a";
+    /** What the tests' models cost: 3 dollars a million tokens in, 15 out. */
+    private static final ModelSpec.Price PRICE = new ModelSpec.Price(new BigDecimal("3"), new BigDecimal("15"));
     /** Not inside a database transaction. */
     private static final BooleanSupplier OUTSIDE = () -> false;
     private static final Prompt PROMPT = new Prompt("chat/test/v1", "Answer the test.");
@@ -87,6 +92,10 @@ class RoutingGatewayTest {
     private final List<Audit.Entry> audited = new CopyOnWriteArrayList<>();
     /** The content each entry came with, in the same order. */
     private final List<Audit.Content> contents = new CopyOnWriteArrayList<>();
+    /** What metering recorded, in order. */
+    private final List<Metering.Use> metered = new CopyOnWriteArrayList<>();
+    /** Metering, which keeps each use it gets. */
+    private final Metering metering = metered::add;
     /** The audit, which keeps each entry it gets and the content it came with. */
     private final Audit audit = (entry, content) -> {
         audited.add(entry);
@@ -107,7 +116,7 @@ class RoutingGatewayTest {
                 output.text(piece);
             }
             return result;
-        }, max);
+        }, max, PRICE);
     }
 
     /** The same test prompt for each model, or none for a list a route refuses anyway. */
@@ -141,7 +150,7 @@ class RoutingGatewayTest {
     void itAnswersWithTheFirstModelOfTheTasksRoute() {
         Gateway gateway = new RoutingGateway(
                 Map.of("first", model("first", DONE, "a", "b"), "second", model("second", DONE, "x")),
-                Map.of("chat", route("first", "second")), PASSING, audit, OUTSIDE);
+                Map.of("chat", route("first", "second")), PASSING, audit, metering, OUTSIDE);
 
         Result result = answer(gateway, ask(gateway, "chat", "Hello"));
 
@@ -160,7 +169,7 @@ class RoutingGatewayTest {
                         "internal", model("internal", DataClass.INTERNAL, DONE),
                         "sensitive", model("sensitive", DataClass.SENSITIVE, DONE),
                         "public", model("public", DataClass.PUBLIC, DONE)),
-                Map.of("chat", route("internal", "sensitive", "public")), PASSING, audit, OUTSIDE);
+                Map.of("chat", route("internal", "sensitive", "public")), PASSING, audit, metering, OUTSIDE);
         Checked hello = checked(gateway, "chat", "Hello");
 
         for (DataClass dataClass : DataClass.values()) {
@@ -179,7 +188,7 @@ class RoutingGatewayTest {
                         "personal", model("personal", DataClass.PERSONAL, DONE),
                         "sensitive", model("sensitive", DataClass.SENSITIVE, DONE)),
                 Map.of("chat", route("public"), "translate", route("internal", "public"), "search", route("public", "personal"),
-                        "care", route("public", "sensitive", "internal")), PASSING, audit, OUTSIDE);
+                        "care", route("public", "sensitive", "internal")), PASSING, audit, metering, OUTSIDE);
 
         assertThat(gateway.ceiling("chat")).isEqualTo(DataClass.PUBLIC);
         assertThat(gateway.ceiling("translate")).isEqualTo(DataClass.INTERNAL);
@@ -198,7 +207,7 @@ class RoutingGatewayTest {
     @Test
     void aCallAboveTheCeilingReachesNoModel() {
         Gateway gateway = new RoutingGateway(Map.of("low", model("low", DataClass.INTERNAL, DONE, "a")),
-                Map.of("chat", route("low")), noting(), audit, OUTSIDE);
+                Map.of("chat", route("low")), noting(), audit, metering, OUTSIDE);
         Turn hello = new Turn(Role.USER, "Hello");
         Checked checked = checked(gateway, "chat", "Hello");
 
@@ -219,17 +228,19 @@ class RoutingGatewayTest {
     void aModelOfTheGatewayNeedsItsAdapterAndItsHighestClass() {
         ModelPort port = (request, output) -> DONE;
 
-        assertThatThrownBy(() -> new RoutingGateway.Model(null, DataClass.PUBLIC)).isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("A model of the gateway needs its adapter and the highest data class it takes");
-        assertThatThrownBy(() -> new RoutingGateway.Model(port, null)).isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("A model of the gateway needs its adapter and the highest data class it takes");
+        assertThatThrownBy(() -> new RoutingGateway.Model(null, DataClass.PUBLIC, PRICE)).isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("A model of the gateway needs its adapter, the highest data class it takes and its price");
+        assertThatThrownBy(() -> new RoutingGateway.Model(port, null, PRICE)).isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("A model of the gateway needs its adapter, the highest data class it takes and its price");
+        assertThatThrownBy(() -> new RoutingGateway.Model(port, DataClass.PUBLIC, null)).isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("A model of the gateway needs its adapter, the highest data class it takes and its price");
     }
 
     @Test
     void eachTaskGoesToItsOwnRoute() {
         Gateway gateway = new RoutingGateway(
                 Map.of("one", model("one", DONE), "two", model("two", DONE)),
-                Map.of("chat", route("one"), "translate", route("two")), PASSING, audit, OUTSIDE);
+                Map.of("chat", route("one"), "translate", route("two")), PASSING, audit, metering, OUTSIDE);
 
         answer(gateway, ask(gateway, "translate", "Hello"));
         answer(gateway, ask(gateway, "chat", "Hello"));
@@ -243,7 +254,7 @@ class RoutingGatewayTest {
         Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of(
                 "quick", new Route(List.of("m"), Duration.ofSeconds(3), CheckMode.SENTENCE, prompts(List.of("m"))),
                 "slow", new Route(List.of("m"), Duration.ofSeconds(90), CheckMode.SENTENCE, prompts(List.of("m")))),
-                PASSING, audit, OUTSIDE);
+                PASSING, audit, metering, OUTSIDE);
 
         answer(gateway, ask(gateway, "quick", "Hello"));
         answer(gateway, ask(gateway, "slow", "Hello"));
@@ -253,7 +264,7 @@ class RoutingGatewayTest {
 
     @Test
     void theModelGetsTheConversationAndTheCancel() {
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), PASSING, audit, OUTSIDE);
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), PASSING, audit, metering, OUTSIDE);
         AtomicBoolean cancel = new AtomicBoolean();
 
         answer(gateway, new Request("chat", List.of(new Turn(Role.USER, "Hi"), new Turn(Role.ASSISTANT, "Hello"),
@@ -273,7 +284,7 @@ class RoutingGatewayTest {
         Gateway gateway = new RoutingGateway(Map.of(
                 "stops", model("stops", new ModelPort.Cancelled(new ModelPort.Usage(4, 1))),
                 "breaks", model("breaks", new ModelPort.Failed("the model's own words", 2, new ModelPort.Usage(4, 6)))),
-                Map.of("stop", route("stops"), "break", route("breaks")), PASSING, audit, OUTSIDE);
+                Map.of("stop", route("stops"), "break", route("breaks")), PASSING, audit, metering, OUTSIDE);
 
         assertThat(answer(gateway, ask(gateway, "stop", "Hello"))).isEqualTo(new Cancelled(new Usage(4, 1)));
         assertThat(answer(gateway, ask(gateway, "break", "Hello"))).isEqualTo(new Failed(2, new Usage(4, 6)));
@@ -285,7 +296,7 @@ class RoutingGatewayTest {
     void aFailureIsLoggedWithTheModelsReason(CapturedOutput output) {
         Gateway gateway = new RoutingGateway(
                 Map.of("m", model("m", new ModelPort.Failed("the vendor is out of quota", 1, new ModelPort.Usage(5, 3)), "a")),
-                Map.of("chat", route("m")), PASSING, audit, OUTSIDE);
+                Map.of("chat", route("m")), PASSING, audit, metering, OUTSIDE);
 
         Result result = answer(gateway, ask(gateway, "chat", "Hello"));
 
@@ -296,7 +307,7 @@ class RoutingGatewayTest {
     /** A task without a route is a mistake, whether its text is checked or answered, and no check or model sees it. */
     @Test
     void aTaskWithoutARouteIsAMistake() {
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), noting(), audit, OUTSIDE);
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), noting(), audit, metering, OUTSIDE);
         Checked hello = checked(gateway, "chat", "Hello");
         events.clear();
 
@@ -313,7 +324,7 @@ class RoutingGatewayTest {
 
     @Test
     void aRequestThatIsNotWellFormedIsAMistake() {
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), noting(), audit, OUTSIDE);
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), noting(), audit, metering, OUTSIDE);
         Checked checked = checked(gateway, "chat", "Hello");
         events.clear();
         Turn hello = new Turn(Role.USER, "Hello");
@@ -339,7 +350,7 @@ class RoutingGatewayTest {
      */
     @Test
     void theChecksStandBetweenTheCallerAndTheModel() {
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a", "b")), Map.of("chat", route("m")), noting(), audit, OUTSIDE);
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a", "b")), Map.of("chat", route("m")), noting(), audit, metering, OUTSIDE);
 
         answer(gateway, ask(gateway, "chat", "Hello"));
 
@@ -349,7 +360,7 @@ class RoutingGatewayTest {
     /** M3-4-1: a text that passes comes back as the gateway's receipt for that task and that very text. */
     @Test
     void aTextThatPassesComesBackAsItsReceipt() {
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), noting(), audit, OUTSIDE);
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), noting(), audit, metering, OUTSIDE);
 
         Gateway.InputCheck check = gateway.checkInput(CALLER, "chat", "Hello there");
 
@@ -384,7 +395,7 @@ class RoutingGatewayTest {
                 return AS_IT_IS;
             }
         };
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a")), Map.of("chat", route("m")), blocking, audit, OUTSIDE);
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a")), Map.of("chat", route("m")), blocking, audit, metering, OUTSIDE);
 
         assertThat(gateway.checkInput(CALLER, "chat", "the secret words")).isEqualTo(new Blocked("test_rule"));
 
@@ -413,7 +424,7 @@ class RoutingGatewayTest {
                 return AS_IT_IS;
             }
         };
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a")), Map.of("chat", route("m")), failing, audit, OUTSIDE);
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a")), Map.of("chat", route("m")), failing, audit, metering, OUTSIDE);
 
         assertThatThrownBy(() -> gateway.checkInput(CALLER, "chat", "Hello")).hasMessage("not this one");
         assertThat(calls).isEmpty();
@@ -421,7 +432,7 @@ class RoutingGatewayTest {
 
     @Test
     void theInputCheckNeedsAText() {
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), noting(), audit, OUTSIDE);
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), noting(), audit, metering, OUTSIDE);
 
         assertThatThrownBy(() -> gateway.checkInput(CALLER, "chat", null))
                 .isInstanceOf(IllegalArgumentException.class).hasMessage("The input check needs the text the end user said");
@@ -437,8 +448,8 @@ class RoutingGatewayTest {
     void aQuestionWithoutThisGatewaysReceiptReachesNoModel() {
         Map<String, RoutingGateway.Model> models = Map.of("m", model("m", DONE));
         Map<String, Route> routes = Map.of("chat", route("m"), "translate", route("m"));
-        Gateway gateway = new RoutingGateway(models, routes, noting(), audit, OUTSIDE);
-        Gateway other = new RoutingGateway(models, routes, noting(), audit, OUTSIDE);
+        Gateway gateway = new RoutingGateway(models, routes, noting(), audit, metering, OUTSIDE);
+        Gateway other = new RoutingGateway(models, routes, noting(), audit, metering, OUTSIDE);
         Checked made = new Checked() {
             @Override
             public Gateway.Caller caller() {
@@ -481,7 +492,7 @@ class RoutingGatewayTest {
     /** Blueprint 9.1: the same text is checked once, so its receipt serves every call for it, each without a check. */
     @Test
     void aReceiptServesEveryCallForItsText() {
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), noting(), audit, OUTSIDE);
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), noting(), audit, metering, OUTSIDE);
         Request request = ask(gateway, "chat", "Hello");
 
         answer(gateway, request);
@@ -496,7 +507,7 @@ class RoutingGatewayTest {
      */
     @Test
     void theModelIsShownEveryTurnMasked() {
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), masking(DataClass.PUBLIC), audit,
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), masking(DataClass.PUBLIC), audit, metering,
                 OUTSIDE);
         List<Turn> turns = List.of(new Turn(Role.USER, "Call 0901"), new Turn(Role.ASSISTANT, "On 0901?"),
                 new Turn(Role.USER, "Yes, 0901"));
@@ -516,7 +527,7 @@ class RoutingGatewayTest {
      */
     @Test
     void aCallBelowTheClassItsCheckFoundReachesNoModel() {
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), masking(DataClass.PERSONAL), audit,
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), masking(DataClass.PERSONAL), audit, metering,
                 OUTSIDE);
         Checked checked = checked(gateway, "chat", "My number is 0901");
         List<Turn> turns = List.of(new Turn(Role.USER, "My number is 0901"));
@@ -537,7 +548,7 @@ class RoutingGatewayTest {
     /** A receipt carries the class its check found: public for a text without personal data. */
     @Test
     void aReceiptCarriesTheClassItsCheckFound() {
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), PASSING, audit, OUTSIDE);
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), PASSING, audit, metering, OUTSIDE);
 
         assertThat(checked(gateway, "chat", "Hello").dataClass()).isEqualTo(DataClass.PUBLIC);
     }
@@ -555,7 +566,7 @@ class RoutingGatewayTest {
         Gateway gateway = new RoutingGateway(Map.of("first", model("first", DONE), "second", model("second", DONE)),
                 Map.of("chat", new Route(List.of("first", "second"), MINUTE, CheckMode.FULL, prompts),
                         "embed", new Route(List.of("second"), MINUTE, CheckMode.INPUT, Map.of("second", prompts.get("second")))),
-                recording, audit, OUTSIDE);
+                recording, audit, metering, OUTSIDE);
 
         answer(gateway, ask(gateway, "chat", "Hello"));
         answer(gateway, ask(gateway, "embed", "Hello"));
@@ -570,7 +581,7 @@ class RoutingGatewayTest {
     @Test
     void whatTheCheckHoldsGoesOutWhenTheModelCompletes() {
         Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a", "b", "c")), Map.of("chat", route("m")),
-                outputs((task, mode, instructions) -> holding(new StringBuilder())), audit, OUTSIDE);
+                outputs((task, mode, instructions) -> holding(new StringBuilder())), audit, metering, OUTSIDE);
 
         Result result = answer(gateway, ask(gateway, "chat", "Hello"));
 
@@ -586,8 +597,8 @@ class RoutingGatewayTest {
     @ExtendWith(OutputCaptureExtension.class)
     void aStopTellsTheModelToStopAndEndsTheAnswerBlocked(CapturedOutput log) {
         List<String> checked = new CopyOnWriteArrayList<>();
-        Gateway gateway = new RoutingGateway(Map.of("m", new RoutingGateway.Model(listening("a", "secret b", "c"), DataClass.SENSITIVE)),
-                Map.of("chat", route("m")), outputs((task, mode, instructions) -> stoppingAt("secret", checked)), audit, OUTSIDE);
+        Gateway gateway = new RoutingGateway(Map.of("m", new RoutingGateway.Model(listening("a", "secret b", "c"), DataClass.SENSITIVE, PRICE)),
+                Map.of("chat", route("m")), outputs((task, mode, instructions) -> stoppingAt("secret", checked)), audit, metering, OUTSIDE);
 
         Result result = answer(gateway, ask(gateway, "chat", "Hello"));
 
@@ -606,7 +617,7 @@ class RoutingGatewayTest {
     void aModelThatGoesOnAfterTheStopIsNotHeard() {
         List<String> checked = new CopyOnWriteArrayList<>();
         Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a", "secret b", "c", "d")), Map.of("chat", route("m")),
-                outputs((task, mode, instructions) -> stoppingAt("secret", checked)), audit, OUTSIDE);
+                outputs((task, mode, instructions) -> stoppingAt("secret", checked)), audit, metering, OUTSIDE);
 
         Result result = answer(gateway, ask(gateway, "chat", "Hello"));
 
@@ -622,7 +633,7 @@ class RoutingGatewayTest {
                         "breaks", model("breaks", new ModelPort.Failed("the model's own words", 2, new ModelPort.Usage(4, 6)), "a", "b"),
                         "stops", model("stops", new ModelPort.Cancelled(new ModelPort.Usage(4, 1)), "a")),
                 Map.of("break", route("breaks"), "stop", route("stops")),
-                outputs((task, mode, instructions) -> holding(new StringBuilder())), audit, OUTSIDE);
+                outputs((task, mode, instructions) -> holding(new StringBuilder())), audit, metering, OUTSIDE);
 
         assertThat(answer(gateway, ask(gateway, "break", "Hello"))).isEqualTo(new Failed(2, new Usage(4, 6)));
         assertThat(answer(gateway, ask(gateway, "stop", "Hello"))).isEqualTo(new Cancelled(new Usage(4, 1)));
@@ -644,7 +655,7 @@ class RoutingGatewayTest {
             }
         };
         Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a")), Map.of("chat", route("m")),
-                outputs((task, mode, instructions) -> stopsAtTheEnd), audit, OUTSIDE);
+                outputs((task, mode, instructions) -> stopsAtTheEnd), audit, metering, OUTSIDE);
 
         assertThat(answer(gateway, ask(gateway, "chat", "Hello"))).isEqualTo(new Gateway.OutputBlocked("test_rule", new Usage(5, 2)));
         assertThat(events).containsExactly("model m");
@@ -657,7 +668,7 @@ class RoutingGatewayTest {
     @Test
     void aCallFromInsideATransactionIsRefusedBeforeAnything() {
         AtomicBoolean inside = new AtomicBoolean();
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a")), Map.of("chat", route("m")), noting(), audit, inside::get);
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a")), Map.of("chat", route("m")), noting(), audit, metering, inside::get);
         Request request = ask(gateway, "chat", "Hello");
         Request unrouted = new Request("translate", request.turns(), NEVER, DataClass.PUBLIC, request.question(), MESSAGE);
         events.clear();
@@ -680,7 +691,7 @@ class RoutingGatewayTest {
     @Test
     void itAsksAboutTheTransactionOnEveryCall() {
         AtomicBoolean inside = new AtomicBoolean();
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), PASSING, audit, inside::get);
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), PASSING, audit, metering, inside::get);
         Request request = ask(gateway, "chat", "Hello");
 
         Result before = answer(gateway, request);
@@ -704,18 +715,20 @@ class RoutingGatewayTest {
         Map<String, RoutingGateway.Model> models = Map.of("m", model("m", DONE));
         Map<String, Route> routes = Map.of("chat", route("m"));
 
-        assertThatThrownBy(() -> new RoutingGateway(models, routes, PASSING, audit, null)).isInstanceOf(NullPointerException.class);
-        assertThatThrownBy(() -> new RoutingGateway(models, routes, null, audit, OUTSIDE)).isInstanceOf(NullPointerException.class)
+        assertThatThrownBy(() -> new RoutingGateway(models, routes, PASSING, audit, metering, null)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new RoutingGateway(models, routes, null, audit, metering, OUTSIDE)).isInstanceOf(NullPointerException.class)
                 .hasMessage("A gateway calls no model without the trust layer's checks (A-15)");
-        assertThatThrownBy(() -> new RoutingGateway(models, routes, PASSING, null, OUTSIDE)).isInstanceOf(NullPointerException.class)
+        assertThatThrownBy(() -> new RoutingGateway(models, routes, PASSING, null, metering, OUTSIDE)).isInstanceOf(NullPointerException.class)
                 .hasMessage("A gateway calls no model without the trust layer's audit (blueprint 9.4)");
+        assertThatThrownBy(() -> new RoutingGateway(models, routes, PASSING, audit, null, OUTSIDE)).isInstanceOf(NullPointerException.class)
+                .hasMessage("A gateway calls no model without metering (M3-6-1)");
     }
 
     @Test
     void aRouteToAModelTheGatewayWasNotGivenStopsIt() {
         Map<String, RoutingGateway.Model> models = Map.of("m", model("m", DONE));
 
-        assertThatThrownBy(() -> new RoutingGateway(models, Map.of("chat", route("m", "missing")), PASSING, audit, OUTSIDE))
+        assertThatThrownBy(() -> new RoutingGateway(models, Map.of("chat", route("m", "missing")), PASSING, audit, metering, OUTSIDE))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("The route of chat names the model missing, which the gateway was not given");
     }
@@ -741,7 +754,7 @@ class RoutingGatewayTest {
         Map<String, Prompt> prompts = Map.of("first", new Prompt("chat/first/v2", "First family."),
                 "second", new Prompt("chat/second/v1", "Second family."));
         Gateway gateway = new RoutingGateway(Map.of("first", model("first", DONE), "second", model("second", DONE)),
-                Map.of("chat", new Route(List.of("first", "second"), MINUTE, CheckMode.SENTENCE, prompts)), PASSING, audit, OUTSIDE);
+                Map.of("chat", new Route(List.of("first", "second"), MINUTE, CheckMode.SENTENCE, prompts)), PASSING, audit, metering, OUTSIDE);
 
         answer(gateway, ask(gateway, "chat", "Hi"));
 
@@ -802,8 +815,8 @@ class RoutingGatewayTest {
         Map<String, Route> routes = new HashMap<>(Map.of("chat", route("m")));
         List<String> preference = new ArrayList<>(List.of("m"));
         Route route = new Route(preference, MINUTE, CheckMode.SENTENCE, prompts(preference));
-        Gateway gateway = new RoutingGateway(models, routes, PASSING, audit, OUTSIDE);
-        Gateway second = new RoutingGateway(models, Map.of("chat", route), PASSING, audit, OUTSIDE);
+        Gateway gateway = new RoutingGateway(models, routes, PASSING, audit, metering, OUTSIDE);
+        Gateway second = new RoutingGateway(models, Map.of("chat", route), PASSING, audit, metering, OUTSIDE);
 
         models.clear();
         routes.clear();
@@ -825,7 +838,7 @@ class RoutingGatewayTest {
             entriesTheModelFound.add(audited.size());
             output.text("a");
             return DONE;
-        }, DataClass.SENSITIVE)), Map.of("chat", route("m")), PASSING, audit, OUTSIDE);
+        }, DataClass.SENSITIVE, PRICE)), Map.of("chat", route("m")), PASSING, audit, metering, OUTSIDE);
         Gateway.Caller other = new Gateway.Caller("ten_b", "app_b", "eu_b", "conv_b");
         Request request = new Request("chat", List.of(new Turn(Role.USER, "Hello there")), NEVER, DataClass.PERSONAL,
                 (Checked) gateway.checkInput(other, "chat", "Hello there"), "msg_b");
@@ -850,7 +863,7 @@ class RoutingGatewayTest {
                         "breaks", model("breaks", new ModelPort.Failed("the model's own words", 2, new ModelPort.Usage(4, 6))),
                         "leaks", model("leaks", DONE, "a secret")),
                 Map.of("stop", route("stops"), "break", route("breaks"), "leak", route("leaks")),
-                outputs((task, mode, instructions) -> stoppingAt("secret", new ArrayList<>())), audit, OUTSIDE);
+                outputs((task, mode, instructions) -> stoppingAt("secret", new ArrayList<>())), audit, metering, OUTSIDE);
 
         answer(gateway, ask(gateway, "stop", "Hello"));
         answer(gateway, ask(gateway, "break", "Hello"));
@@ -872,7 +885,7 @@ class RoutingGatewayTest {
      */
     @Test
     void aBlockedTextIsAuditedAndOneThatPassesIsNot() {
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), blocking("secret"), audit, OUTSIDE);
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), blocking("secret"), audit, metering, OUTSIDE);
 
         assertThat(((Checked) gateway.checkInput(CALLER, "chat", "Hello")).caller()).isEqualTo(CALLER);
         assertThat(audited).isEmpty();
@@ -893,12 +906,12 @@ class RoutingGatewayTest {
     @Test
     void theAuditIsGivenTheQuestionAsCheckedAndTheAnswerAsTheCallerGotIt() {
         Gateway masked = new RoutingGateway(Map.of("m", model("m", DONE, "Call ", "0901")), Map.of("chat", route("m")),
-                masking(DataClass.PERSONAL), audit, OUTSIDE);
+                masking(DataClass.PERSONAL), audit, metering, OUTSIDE);
         Gateway stopping = new RoutingGateway(Map.of("m", new RoutingGateway.Model(listening("Fine. ", "secret b ", "c"),
-                DataClass.SENSITIVE)), Map.of("chat", route("m")), outputs((task, mode, instructions) -> stoppingAt("secret",
-                new ArrayList<>())), audit, OUTSIDE);
+                DataClass.SENSITIVE, PRICE)), Map.of("chat", route("m")), outputs((task, mode, instructions) -> stoppingAt("secret",
+                new ArrayList<>())), audit, metering, OUTSIDE);
         Gateway held = new RoutingGateway(Map.of("m", model("m", DONE, "a", "b")), Map.of("chat", route("m")),
-                outputs((task, mode, instructions) -> holding(new StringBuilder())), audit, OUTSIDE);
+                outputs((task, mode, instructions) -> holding(new StringBuilder())), audit, metering, OUTSIDE);
 
         assertThat(answer(masked, new Request("chat", List.of(new Turn(Role.USER, "My number is 0901")), NEVER, DataClass.PERSONAL,
                 (Checked) masked.checkInput(CALLER, "chat", "My number is 0901"), MESSAGE))).isInstanceOf(Completed.class);
@@ -924,7 +937,7 @@ class RoutingGatewayTest {
             }
         };
         Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "Tell no one. ")), Map.of("chat", route("m")), PASSING,
-                endsOutOfReach, OUTSIDE);
+                endsOutOfReach, metering, OUTSIDE);
 
         assertThat(answer(gateway, ask(gateway, "chat", "My secret question"))).isInstanceOf(Completed.class);
 
@@ -937,7 +950,7 @@ class RoutingGatewayTest {
     /** M3-5-1: the input check needs the caller the audit names, and a caller names all four of its IDs. */
     @Test
     void theInputCheckNeedsItsCaller() {
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), noting(), audit, OUTSIDE);
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), noting(), audit, metering, OUTSIDE);
 
         assertThatThrownBy(() -> gateway.checkInput(null, "chat", "Hello"))
                 .isInstanceOf(IllegalArgumentException.class).hasMessage("The input check needs the caller, whom the audit names");
@@ -953,7 +966,7 @@ class RoutingGatewayTest {
     /** M3-5-1: a request names the message its answer is written to, or it is a mistake: no entry, and no model. */
     @Test
     void aRequestWithoutItsMessageIsAMistake() {
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), PASSING, audit, OUTSIDE);
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), PASSING, audit, metering, OUTSIDE);
         Request request = ask(gateway, "chat", "Hello");
 
         assertThatThrownBy(() -> answer(gateway, new Request("chat", request.turns(), NEVER, DataClass.PUBLIC, request.question(), null)))
@@ -972,7 +985,7 @@ class RoutingGatewayTest {
         Audit outOfReach = (entry, content) -> {
             throw new IllegalStateException("The test's audit is out of reach");
         };
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a")), Map.of("chat", route("m")), PASSING, outOfReach, OUTSIDE);
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a")), Map.of("chat", route("m")), PASSING, outOfReach, metering, OUTSIDE);
         Request request = ask(gateway, "chat", "Hello");
 
         assertThatThrownBy(() -> answer(gateway, request))
@@ -995,7 +1008,7 @@ class RoutingGatewayTest {
             audited.add(entry);
         };
         Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a")), Map.of("chat", route("m")), blocking("secret"),
-                firstOnly, OUTSIDE);
+                firstOnly, metering, OUTSIDE);
 
         assertThat(gateway.checkInput(CALLER, "chat", "the secret words")).isEqualTo(new Blocked("test_rule"));
         assertThat(answer(gateway, ask(gateway, "chat", "Hello"))).isEqualTo(new Completed(new Usage(5, 2)));
@@ -1015,7 +1028,7 @@ class RoutingGatewayTest {
     /** M3-5-1: a call that goes wrong on its way, such as one whose output throws, keeps its first entry alone, as a crash does. */
     @Test
     void aCallThatGoesWrongOnItsWayKeepsItsFirstEntryAlone() {
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a")), Map.of("chat", route("m")), PASSING, audit, OUTSIDE);
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a")), Map.of("chat", route("m")), PASSING, audit, metering, OUTSIDE);
         Request request = ask(gateway, "chat", "Hello");
 
         assertThatThrownBy(() -> gateway.answer(request, piece -> {
@@ -1030,7 +1043,7 @@ class RoutingGatewayTest {
      */
     @Test
     void theEntriesCarryTheRequestIdOfTheLogContext() {
-        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), blocking("secret"), audit, OUTSIDE);
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE)), Map.of("chat", route("m")), blocking("secret"), audit, metering, OUTSIDE);
         MDC.put(LogContext.REQUEST_ID, "req_1");
         try {
             gateway.checkInput(CALLER, "chat", "the secret words");
@@ -1041,6 +1054,84 @@ class RoutingGatewayTest {
         answer(gateway, ask(gateway, "chat", "Hello"));
 
         assertThat(audited).extracting(Audit.Entry::requestId).containsExactly("req_1", "req_1", "req_1", null, null);
+    }
+
+    /**
+     * M3-6-1: each call is metered once at its end, however it ended, since the model was paid for it: the tokens it
+     * reports and what they cost by the model's price, exactly, for the caller of the question's receipt, the message and
+     * the request of the log context.
+     */
+    @Test
+    void eachCallIsMeteredAtItsEndHoweverItEnded() {
+        Gateway gateway = new RoutingGateway(Map.of(
+                        "done", model("done", new ModelPort.Completed(new ModelPort.Usage(1234, 567)), "a"),
+                        "stops", model("stops", new ModelPort.Cancelled(new ModelPort.Usage(4, 1))),
+                        "breaks", model("breaks", new ModelPort.Failed("the model's own words", 2, new ModelPort.Usage(4, 6))),
+                        "leaks", model("leaks", DONE, "a secret")),
+                Map.of("done", route("done"), "stop", route("stops"), "break", route("breaks"), "leak", route("leaks")),
+                outputs((task, mode, instructions) -> stoppingAt("secret", new ArrayList<>())), audit, metering, OUTSIDE);
+        MDC.put(LogContext.REQUEST_ID, "req_9");
+        try {
+            answer(gateway, ask(gateway, "done", "Hello"));
+            answer(gateway, ask(gateway, "stop", "Hello"));
+        } finally {
+            MDC.remove(LogContext.REQUEST_ID);
+        }
+        answer(gateway, ask(gateway, "break", "Hello"));
+        answer(gateway, ask(gateway, "leak", "Hello"));
+
+        assertThat(metered).containsExactly(
+                new Metering.Use("req_9", "ten_a", "app_a", MESSAGE, "done", "done", 1234, 567, new BigDecimal("0.012207")),
+                new Metering.Use("req_9", "ten_a", "app_a", MESSAGE, "stop", "stops", 4, 1, new BigDecimal("0.000027")),
+                new Metering.Use(null, "ten_a", "app_a", MESSAGE, "break", "breaks", 4, 6, new BigDecimal("0.000102")),
+                new Metering.Use(null, "ten_a", "app_a", MESSAGE, "leak", "leaks", 5, 2, new BigDecimal("0.000045")));
+    }
+
+    /**
+     * M3-6-1: what reached no model is not metered: a blocked text, a call from inside a transaction, one above the
+     * ceiling or without this gateway's receipt; and a call that goes wrong on its way, as a crash does, since its usage
+     * never came back.
+     */
+    @Test
+    void whatReachedNoModelOrWentWrongOnItsWayIsNotMetered() {
+        AtomicBoolean inside = new AtomicBoolean();
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DataClass.INTERNAL, DONE, "a")), Map.of("chat", route("m")),
+                blocking("secret"), audit, metering, inside::get);
+        Request hello = ask(gateway, "chat", "Hello");
+
+        gateway.checkInput(CALLER, "chat", "the secret words");
+        assertThatThrownBy(() -> answer(gateway, new Request("chat", hello.turns(), NEVER, DataClass.SENSITIVE, hello.question(), MESSAGE)))
+                .isInstanceOf(IllegalArgumentException.class);
+        inside.set(true);
+        assertThatThrownBy(() -> answer(gateway, hello)).isInstanceOf(IllegalStateException.class);
+        inside.set(false);
+        assertThatThrownBy(() -> gateway.answer(hello, piece -> {
+            throw new IllegalStateException("The caller went wrong");
+        })).hasMessage("The caller went wrong");
+
+        assertThat(metered).isEmpty();
+        assertThat(answer(gateway, hello)).isInstanceOf(Completed.class);
+        assertThat(metered).hasSize(1);
+    }
+
+    /**
+     * M3-6-1: a use that cannot be recorded changes nothing of what happened: an error in the log keeps it, with all of
+     * its fields, and the result stands.
+     */
+    @Test
+    @ExtendWith(OutputCaptureExtension.class)
+    void aUseThatCannotBeRecordedGoesToTheLog(CapturedOutput log) {
+        Metering outOfReach = use -> {
+            throw new IllegalStateException("The test's metering is out of reach");
+        };
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a")), Map.of("chat", route("m")), PASSING, audit,
+                outOfReach, OUTSIDE);
+
+        assertThat(answer(gateway, ask(gateway, "chat", "Hello"))).isEqualTo(new Completed(new Usage(5, 2)));
+
+        assertThat(errorLines(log)).containsExactly("Metering could not record Use[requestId=null, tenantId=ten_a, applicationId=app_a,"
+                + " messageId=msg_a, task=chat, model=m, inputTokens=5, outputTokens=2, cost=0.000045], so this line keeps it");
+        assertThat(audited).extracting(Audit.Entry::event).containsExactly(Audit.Event.MODEL_CALLED, Audit.Event.COMPLETED);
     }
 
     /** The messages of the log's ERROR lines, in order. */

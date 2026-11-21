@@ -9,8 +9,10 @@ import aie.adapters.storepg.PgPool;
 import aie.adapters.storepg.PgRuntime;
 import aie.adapters.storepg.TestDatabase;
 import aie.core.gateway.api.Gateway;
+import aie.core.gateway.api.ModelSpec;
 import aie.core.gateway.internal.Route;
 import aie.core.gateway.internal.RoutingGateway;
+import aie.core.metering.internal.DatabaseMetering;
 import aie.core.tenancy.api.ApiKeyLookup.Owner;
 import aie.core.tenancy.api.EndUsers;
 import aie.core.tenancy.api.Provisioning;
@@ -118,8 +120,8 @@ class AnswersTest {
 
     /** The real gateway with the fake model, on a route that lets an answer take this long at most. */
     private static Gateway fake(Duration routeTime) {
-        return new RoutingGateway(Map.of(FakeModel.MODEL, new RoutingGateway.Model(new FakeModel(), DataClass.SENSITIVE)),
-                Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), routeTime, CheckMode.SENTENCE, TestApi.prompts(List.of(FakeModel.MODEL)))), Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), pool::insideTx);
+        return new RoutingGateway(Map.of(FakeModel.MODEL, new RoutingGateway.Model(new FakeModel(), DataClass.SENSITIVE, ModelSpec.Price.FREE)),
+                Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), routeTime, CheckMode.SENTENCE, TestApi.prompts(List.of(FakeModel.MODEL)))), Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), new DatabaseMetering(pool), pool::insideTx);
     }
 
     /** The real gateway with a stub model that takes every class. */
@@ -129,10 +131,10 @@ class AnswersTest {
 
     /** The real gateway with a stub model, on a route that checks its answers so and gives the model this prompt. */
     private static Gateway stub(ModelPort model, CheckMode checks, String prompt) {
-        return new RoutingGateway(Map.of("stub", new RoutingGateway.Model(model, DataClass.SENSITIVE)),
+        return new RoutingGateway(Map.of("stub", new RoutingGateway.Model(model, DataClass.SENSITIVE, ModelSpec.Price.FREE)),
                 Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), checks,
                         Map.of("stub", new aie.core.gateway.internal.Prompt("customer_chat/test/v1", prompt)))),
-                Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), pool::insideTx);
+                Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), new DatabaseMetering(pool), pool::insideTx);
     }
 
     /** A model that writes these pieces, and stops as soon as it is told to, as a real one does. */
@@ -155,8 +157,8 @@ class AnswersTest {
      * goes out as the model wrote it; the tests of the output check give their route its own mode (M3-4-3).
      */
     private static Gateway stub(ModelPort model, DataClass max) {
-        return new RoutingGateway(Map.of("stub", new RoutingGateway.Model(model, max)),
-                Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), CheckMode.INPUT, TestApi.prompts(List.of("stub")))), Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), pool::insideTx);
+        return new RoutingGateway(Map.of("stub", new RoutingGateway.Model(model, max, ModelSpec.Price.FREE)),
+                Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), CheckMode.INPUT, TestApi.prompts(List.of("stub")))), Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), new DatabaseMetering(pool), pool::insideTx);
     }
 
     private static Started started(Start start) {
@@ -780,6 +782,33 @@ class AnswersTest {
                     "model_called sensitive " + TenantKeyProbe.hmac(DATABASE, caller.tenantId(), "question", question) + " - " + key,
                     "completed sensitive - " + TenantKeyProbe.hmac(DATABASE, caller.tenantId(), "answer", answer) + " " + key);
             assertThat(String.join("\n", auditOf(caller))).doesNotContain("sensitive question", "Piece");
+        }
+    }
+
+    /**
+     * M3-6-1 on the real database and the real gateway: an answer's model call is metered once, at its end, with the
+     * tokens the model reports and what they cost by the model's price, exactly, for the answer's message and the request
+     * that asked.
+     */
+    @Test
+    void eachAnswerIsMeteredByItsModelsPrice() throws Exception {
+        ModelPort model = (request, output) -> {
+            output.text("Fine. ");
+            return new ModelPort.Completed(new ModelPort.Usage(1234, 567));
+        };
+        Gateway priced = new RoutingGateway(Map.of("priced", new RoutingGateway.Model(model, DataClass.SENSITIVE,
+                        new ModelSpec.Price(new java.math.BigDecimal("3"), new java.math.BigDecimal("15")))),
+                Map.of(Answers.TASK, new Route(List.of("priced"), Duration.ofSeconds(30), CheckMode.SENTENCE,
+                        Map.of("priced", new aie.core.gateway.internal.Prompt("customer_chat/test/v1", "Answer the test.")))),
+                Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), new DatabaseMetering(pool), pool::insideTx);
+        try (GeneratingAnswers answers = new GeneratingAnswers(messages, conversations, priced)) {
+            Started started = askedBy("req_metered", TRACE, () -> answers.ask(caller, conversation, "How much?", DataClass.PUBLIC));
+            awaitEnd(started);
+
+            assertThat(TestDatabase.firstColumn(DATABASE, "SELECT concat_ws(' ', request_id, application_id, message_id, task, model,"
+                    + " input_tokens, output_tokens, cost_usd) FROM engine.metering_usage WHERE tenant_id = '" + caller.tenantId() + "'"))
+                    .containsExactly(String.join(" ", "req_metered", caller.applicationId(), started.asked().answer().messageId(),
+                            "customer_chat", "priced", "1234", "567", "0.012207"));
         }
     }
 

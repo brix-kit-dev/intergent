@@ -6,8 +6,10 @@ import aie.adapters.modelfake.FakeModel;
 import aie.adapters.storepg.PgPool;
 import aie.adapters.storepg.PgRuntime;
 import aie.adapters.storepg.TestDatabase;
+import aie.core.gateway.api.ModelSpec;
 import aie.core.gateway.internal.Route;
 import aie.core.gateway.internal.RoutingGateway;
+import aie.core.metering.internal.DatabaseMetering;
 import aie.core.tenancy.api.ApiKeyLookup.Owner;
 import aie.core.tenancy.internal.DatabaseEndUsers;
 import aie.core.tenancy.internal.DatabaseProvisioning;
@@ -64,8 +66,8 @@ class EventStreamDatabaseTest {
                 .isZero();
         pool = PgRuntime.pool(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD, 4);
         messages = new DatabaseMessages(pool);
-        answers = new GeneratingAnswers(messages, new DatabaseConversations(pool), new RoutingGateway(Map.of(FakeModel.MODEL, new RoutingGateway.Model(new FakeModel(), DataClass.SENSITIVE)),
-                Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), Duration.ofSeconds(30), CheckMode.SENTENCE, TestApi.prompts(List.of(FakeModel.MODEL)))), Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), pool::insideTx));
+        answers = new GeneratingAnswers(messages, new DatabaseConversations(pool), new RoutingGateway(Map.of(FakeModel.MODEL, new RoutingGateway.Model(new FakeModel(), DataClass.SENSITIVE, ModelSpec.Price.FREE)),
+                Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), Duration.ofSeconds(30), CheckMode.SENTENCE, TestApi.prompts(List.of(FakeModel.MODEL)))), Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), new DatabaseMetering(pool), pool::insideTx));
         DatabaseProvisioning provisioning = new DatabaseProvisioning(pool);
         String tenant = provisioning.createTenant("jp1", null);
         caller = new Owner("key_unused", tenant, provisioning.createApplication(tenant, "test", "internal"));
@@ -111,8 +113,8 @@ class EventStreamDatabaseTest {
     void theSignalsOfTheWritesWakeTheStream() {
         LocalEventSignals signals = new LocalEventSignals();
         Messages ringing = new DatabaseMessages(pool, signals);
-        try (GeneratingAnswers ringingAnswers = new GeneratingAnswers(ringing, new DatabaseConversations(pool), new RoutingGateway(Map.of(FakeModel.MODEL, new RoutingGateway.Model(new FakeModel(), DataClass.SENSITIVE)),
-                Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), Duration.ofSeconds(30), CheckMode.SENTENCE, TestApi.prompts(List.of(FakeModel.MODEL)))), Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), pool::insideTx))) {
+        try (GeneratingAnswers ringingAnswers = new GeneratingAnswers(ringing, new DatabaseConversations(pool), new RoutingGateway(Map.of(FakeModel.MODEL, new RoutingGateway.Model(new FakeModel(), DataClass.SENSITIVE, ModelSpec.Price.FREE)),
+                Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), Duration.ofSeconds(30), CheckMode.SENTENCE, TestApi.prompts(List.of(FakeModel.MODEL)))), Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), new DatabaseMetering(pool), pool::insideTx))) {
             Started started = (Started) ringingAnswers.ask(caller, conversation, "[fake pieces=3 delay=200ms] Quick", DataClass.PUBLIC);
 
             long start = System.nanoTime();

@@ -102,12 +102,29 @@ public record ModelSpec(String id, String adapter, String family, String process
      */
     public record Price(BigDecimal input, BigDecimal output) {
 
+        /** Nothing for any number of tokens, as the engine's own stand-in model costs. */
+        public static final Price FREE = new Price(BigDecimal.ZERO, BigDecimal.ZERO);
+
         /** @throws IllegalArgumentException for a missing or negative price */
         public Price {
             if (input == null || output == null || input.signum() < 0 || output.signum() < 0) {
                 throw new IllegalArgumentException("A price is a cost per million tokens in and out, zero or more, not "
                         + input + " and " + output);
             }
+        }
+
+        /**
+         * What a call that used these tokens cost, in US dollars, exactly: no rounding, so that the sum of many calls is
+         * the sum of their costs (M3-6-1).
+         *
+         * @throws IllegalArgumentException for a count of tokens below 0
+         */
+        public BigDecimal cost(long inputTokens, long outputTokens) {
+            if (inputTokens < 0 || outputTokens < 0) {
+                throw new IllegalArgumentException("A call uses 0 tokens or more, not " + inputTokens + " and " + outputTokens);
+            }
+            return input.multiply(BigDecimal.valueOf(inputTokens)).add(output.multiply(BigDecimal.valueOf(outputTokens)))
+                    .movePointLeft(6);
         }
     }
 }

@@ -103,6 +103,26 @@ class ModelSpecTest {
         assertThatThrownBy(() -> new Price(BigDecimal.ONE, null)).isInstanceOf(IllegalArgumentException.class);
     }
 
+    /**
+     * M3-6-1: what a call cost is the tokens in and out at the price of a million, exactly: no rounding, however small
+     * or large, so that a month of calls sums to what they cost.
+     */
+    @Test
+    void aCallCostsItsTokensAtTheirPriceExactly() {
+        Price price = new Price(new BigDecimal("3"), new BigDecimal("15"));
+
+        assertThat(price.cost(1234, 567)).isEqualByComparingTo("0.012207");
+        assertThat(price.cost(1, 0)).isEqualByComparingTo("0.000003");
+        assertThat(new Price(new BigDecimal("0.075"), new BigDecimal("0.3")).cost(1, 1)).isEqualByComparingTo("0.000000375");
+        assertThat(price.cost(0, 0)).isEqualByComparingTo("0");
+        assertThat(price.cost(Long.MAX_VALUE, Long.MAX_VALUE)).isEqualByComparingTo(
+                new BigDecimal(Long.MAX_VALUE).multiply(new BigDecimal("18")).movePointLeft(6));
+        assertThat(Price.FREE.cost(1_000_000, 1_000_000)).isEqualByComparingTo("0");
+        assertThatThrownBy(() -> price.cost(-1, 0)).isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("A call uses 0 tokens or more, not -1 and 0");
+        assertThatThrownBy(() -> price.cost(0, -1)).isInstanceOf(IllegalArgumentException.class);
+    }
+
     /** The classes compare by how sensitive they are, which routing needs (M3-3). */
     @Test
     void theDataClassesGoFromPublicToSensitive() {

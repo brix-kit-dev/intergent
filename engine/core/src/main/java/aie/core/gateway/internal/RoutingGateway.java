@@ -2,6 +2,8 @@ package aie.core.gateway.internal;
 
 import aie.core.LogContext;
 import aie.core.gateway.api.Gateway;
+import aie.core.gateway.api.ModelSpec;
+import aie.core.metering.api.Metering;
 import aie.core.trust.api.Audit;
 import aie.core.trust.api.Checks;
 import aie.core.trust.api.DataClass;
@@ -31,7 +33,8 @@ import org.slf4j.MDC;
  * the call cannot go without, and one at its end (M3-5-1); each carries the request ID of the calling thread's log
  * context, so an entry and its request's log lines share it. The entry before a call is given the question as it was
  * checked, and the one at its end what the caller got of the answer, for the audit to keep the HMAC of when the call is
- * sensitive (M3-5-3); neither goes to the log. Fallback, retries and budgets are not here yet.
+ * sensitive (M3-5-3); neither goes to the log. Each call's end is metered too: the tokens the model reports and what they
+ * cost by the model's price in the registry (M3-6-1). Fallback, retries and budgets are not here yet.
  */
 public final class RoutingGateway implements Gateway {
 
@@ -43,6 +46,7 @@ public final class RoutingGateway implements Gateway {
     private final Map<String, DataClass> ceilings;
     private final Checks checks;
     private final Audit audit;
+    private final Metering metering;
     private final BooleanSupplier insideTx;
 
     /**
@@ -50,14 +54,16 @@ public final class RoutingGateway implements Gateway {
      * @param routes each task's route
      * @param checks the trust layer's checks on the way to the model and back (A-15)
      * @param audit the trust layer's audit, which gets an entry before every model call (blueprint 9.4)
+     * @param metering where each model call's use is recorded at its end (M3-6-1)
      * @param insideTx whether the calling thread is inside a database transaction, asked on every call; the role passes
      *     {@link aie.ports.DatabasePort#insideTx} of its pool
      * @throws IllegalArgumentException for a route to a model that is not in the registry
      */
-    public RoutingGateway(
-            Map<String, Model> models, Map<String, Route> routes, Checks checks, Audit audit, BooleanSupplier insideTx) {
+    public RoutingGateway(Map<String, Model> models, Map<String, Route> routes, Checks checks, Audit audit, Metering metering,
+            BooleanSupplier insideTx) {
         Objects.requireNonNull(checks, "A gateway calls no model without the trust layer's checks (A-15)");
         Objects.requireNonNull(audit, "A gateway calls no model without the trust layer's audit (blueprint 9.4)");
+        Objects.requireNonNull(metering, "A gateway calls no model without metering (M3-6-1)");
         Objects.requireNonNull(insideTx, "A gateway needs to know whether a call comes from inside a transaction");
         routes.forEach((task, route) -> route.models().forEach(model -> {
             if (!models.containsKey(model)) {
@@ -73,6 +79,7 @@ public final class RoutingGateway implements Gateway {
         this.ceilings = Map.copyOf(ceilings);
         this.checks = checks;
         this.audit = audit;
+        this.metering = metering;
         this.insideTx = insideTx;
     }
 
@@ -142,6 +149,9 @@ public final class RoutingGateway implements Gateway {
             release(check.end(), output, stopped, released);
         }
         Result result = ending(request, model, prompt, outcome, stopped.get());
+        meter(new Metering.Use(requestId(), caller.tenantId(), caller.applicationId(), request.messageId(), request.task(), model,
+                result.usage().inputTokens(), result.usage().outputTokens(),
+                models.get(model).price().cost(result.usage().inputTokens(), result.usage().outputTokens())));
         tell(entry(caller, request, ended(result), model, prompt, result instanceof OutputBlocked blocked ? blocked.rule() : null),
                 new Audit.Content(null, released.toString()));
         return result;
@@ -191,6 +201,18 @@ public final class RoutingGateway implements Gateway {
             audit.add(entry, content);
         } catch (RuntimeException e) {
             LOG.error("The audit could not add {}, so this line keeps it", entry, e);
+        }
+    }
+
+    /**
+     * Records what a call used, once it has ended, however it ended. One that cannot be recorded goes to the log with all
+     * of its fields, as an audit entry of what happened does, and what happened stands.
+     */
+    private void meter(Metering.Use use) {
+        try {
+            metering.record(use);
+        } catch (RuntimeException e) {
+            LOG.error("Metering could not record {}, so this line keeps it", use, e);
         }
     }
 
@@ -330,12 +352,14 @@ public final class RoutingGateway implements Gateway {
      *
      * @param port the adapter that calls the model
      * @param maxDataClass the highest class of data the model takes, its region pack's {@code max_data_class}
+     * @param price what a million tokens cost, its region pack's {@code price}, which metering counts from (M3-6-1)
      */
-    public record Model(ModelPort port, DataClass maxDataClass) {
+    public record Model(ModelPort port, DataClass maxDataClass, ModelSpec.Price price) {
 
         public Model {
-            if (port == null || maxDataClass == null) {
-                throw new IllegalArgumentException("A model of the gateway needs its adapter and the highest data class it takes");
+            if (port == null || maxDataClass == null || price == null) {
+                throw new IllegalArgumentException("A model of the gateway needs its adapter, the highest data class it takes"
+                        + " and its price");
             }
         }
     }

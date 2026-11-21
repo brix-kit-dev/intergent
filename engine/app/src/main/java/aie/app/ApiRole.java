@@ -4,6 +4,7 @@ import aie.adapters.secretsenv.EnvironmentSecrets;
 import aie.adapters.storepg.PgPool;
 import aie.adapters.storepg.PgRuntime;
 import aie.core.gateway.api.Gateway;
+import aie.core.metering.internal.DatabaseMetering;
 import aie.core.tenancy.api.ApiKeyLookup;
 import aie.core.tenancy.api.ApiKeyManagement;
 import aie.core.tenancy.api.Applications;
@@ -63,13 +64,13 @@ class ApiRole {
      * (M3-1) never gets as far as the database.
      * The pool runs the self-check of blueprint 7.6 before its first connection, so a role that may not serve traffic
      * never opens a port. The gateway comes next, because it asks the pool whether a call comes from inside a
-     * transaction (A-14) and adds its audit's entries there (M3-5-1); a route to a model that does not exist still refuses
-     * startup. The gate opens the tasks the pack's policy offers, and no other (M3-4-4). The context closes the pool as
-     * it closes, because the pool is AutoCloseable, and so is the generator of answers. Beans close in the reverse order
-     * they were registered in, so the generator would end its answers while the pool is still open; it ends them even
-     * earlier, while Tomcat drains its requests, through {@link AnswersShutdown} (point 39). A context that fails before
-     * it has made its beans would not close the pool, and neither would a gateway that refuses its routes, so the role
-     * closes the pool itself then.
+     * transaction (A-14) and adds its audit's entries and its metering there (M3-5-1, M3-6-1); a route to a model that
+     * does not exist still refuses startup. The gate opens the tasks the pack's policy offers, and no other (M3-4-4).
+     * The context closes the pool as it closes, because the pool is AutoCloseable, and so is the generator of answers.
+     * Beans close in the reverse order they were registered in, so the generator would end its answers while the pool
+     * is still open; it ends them even earlier, while Tomcat drains its requests, through {@link AnswersShutdown}
+     * (point 39). A context that fails before it has made its beans would not close the pool, and neither would a
+     * gateway that refuses its routes, so the role closes the pool itself then.
      */
     static ConfigurableApplicationContext start(String... args) {
         RoleSettings settings = RoleSettings.read(args);
@@ -81,7 +82,8 @@ class ApiRole {
         RegionPack pack = RegionPacks.read(settings.required(RegionPacks.SETTING));
         PgPool database = PgRuntime.pool(address, password, POOL_SIZE);
         try {
-            Gateway gateway = Models.gateway(pack, new DatabaseAudit(database, auditMasterKey), database::insideTx);
+            Gateway gateway = Models.gateway(pack, new DatabaseAudit(database, auditMasterKey), new DatabaseMetering(database),
+                    database::insideTx);
             return serve(context -> {
                 context.registerBean(PgPool.class, () -> database);
                 context.registerBean(ApiKeyLookup.class, () -> new DatabaseApiKeyLookup(database));
