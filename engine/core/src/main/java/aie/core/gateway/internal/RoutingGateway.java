@@ -1,6 +1,8 @@
 package aie.core.gateway.internal;
 
+import aie.core.LogContext;
 import aie.core.gateway.api.Gateway;
+import aie.core.trust.api.Audit;
 import aie.core.trust.api.Checks;
 import aie.core.trust.api.DataClass;
 import aie.ports.ModelPort;
@@ -13,6 +15,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 /**
  * {@link Gateway} by route table (blueprint 8.2 to 8.4). It is built once from the models, the routes and the trust
@@ -24,7 +27,9 @@ import org.slf4j.LoggerFactory;
  * sentence or whole and can stop the answer (M3-4-3). Every call carries its route's time limit (A-9). A call from inside
  * a database transaction is refused before anything else (A-14). The model gets its family's prompt as instructions
  * (M3-2). A call goes to the first model of its route that takes the call's data class, and never to one below it
- * (blueprint 7.3, M3-3-2). Fallback, retries and budgets are not here yet.
+ * (blueprint 7.3, M3-3-2). The trust layer's audit gets an entry for a blocked text, one before each model call, which
+ * the call cannot go without, and one at its end (M3-5-1); each carries the request ID of the calling thread's log
+ * context, so an entry and its request's log lines share it. Fallback, retries and budgets are not here yet.
  */
 public final class RoutingGateway implements Gateway {
 
@@ -35,19 +40,22 @@ public final class RoutingGateway implements Gateway {
     /** Each task's ceiling: the highest class a model of its route takes. */
     private final Map<String, DataClass> ceilings;
     private final Checks checks;
+    private final Audit audit;
     private final BooleanSupplier insideTx;
 
     /**
      * @param models the registry: each model's ID, the adapter that calls it and the highest class it takes
      * @param routes each task's route
      * @param checks the trust layer's checks on the way to the model and back (A-15)
+     * @param audit the trust layer's audit, which gets an entry before every model call (blueprint 9.4)
      * @param insideTx whether the calling thread is inside a database transaction, asked on every call; the role passes
      *     {@link aie.ports.DatabasePort#insideTx} of its pool
      * @throws IllegalArgumentException for a route to a model that is not in the registry
      */
     public RoutingGateway(
-            Map<String, Model> models, Map<String, Route> routes, Checks checks, BooleanSupplier insideTx) {
+            Map<String, Model> models, Map<String, Route> routes, Checks checks, Audit audit, BooleanSupplier insideTx) {
         Objects.requireNonNull(checks, "A gateway calls no model without the trust layer's checks (A-15)");
+        Objects.requireNonNull(audit, "A gateway calls no model without the trust layer's audit (blueprint 9.4)");
         Objects.requireNonNull(insideTx, "A gateway needs to know whether a call comes from inside a transaction");
         routes.forEach((task, route) -> route.models().forEach(model -> {
             if (!models.containsKey(model)) {
@@ -62,17 +70,21 @@ public final class RoutingGateway implements Gateway {
                 .map(model -> this.models.get(model).maxDataClass()).max(Comparator.naturalOrder()).orElseThrow()));
         this.ceilings = Map.copyOf(ceilings);
         this.checks = checks;
+        this.audit = audit;
         this.insideTx = insideTx;
     }
 
     /**
      * Refuses a call from inside a transaction first, because a check may come to call a service. A blocked text is noted
-     * in the log by its rule and task, never by its words.
+     * in the log by its rule and task, never by its words, and so is it in the audit.
      */
     @Override
-    public InputCheck checkInput(String task, String text) {
+    public InputCheck checkInput(Caller caller, String task, String text) {
         if (insideTx.getAsBoolean()) {
             throw new IllegalStateException("No text is checked inside a database transaction (A-14), so end it first");
+        }
+        if (caller == null) {
+            throw new IllegalArgumentException("The input check needs the caller, whom the audit names");
         }
         if (task == null || !routes.containsKey(task)) {
             throw new IllegalArgumentException("No route answers the task " + task);
@@ -81,9 +93,11 @@ public final class RoutingGateway implements Gateway {
             throw new IllegalArgumentException("The input check needs the text the end user said");
         }
         return switch (checks.input(task, text)) {
-            case Checks.Passed passed -> new Receipt(this, task, text, passed.dataClass());
+            case Checks.Passed passed -> new Receipt(this, caller, task, text, passed.dataClass());
             case Checks.Blocked blocked -> {
                 LOG.info("The input check blocked a text for the task {} by the rule {}", task, blocked.rule());
+                tell(new Audit.Entry(requestId(), caller.tenantId(), caller.applicationId(), caller.endUserId(),
+                        caller.conversationId(), null, task, Audit.Event.INPUT_BLOCKED, null, null, null, blocked.rule()));
                 yield new Blocked(blocked.rule());
             }
         };
@@ -97,7 +111,8 @@ public final class RoutingGateway implements Gateway {
      * pieces it still sends are dropped, and the answer ends as blocked, whatever the model says. What is still held when
      * the model completes is checked then; what a model that failed or was cancelled leaves held never goes out. The
      * model's reason for a failure goes to the log alone, with the task, the model and the pieces sent; a stopped answer
-     * is logged by its rule.
+     * is logged by its rule. The audit's entry before the call comes once everything else is ready, right before the
+     * model is asked; the entry at its end comes once the answer has ended, before the result goes back.
      */
     @Override
     public Result answer(Request request, Output output) {
@@ -105,26 +120,35 @@ public final class RoutingGateway implements Gateway {
             throw new IllegalStateException("No model is called inside a database transaction (A-14), so end it first");
         }
         Route route = routeOf(request);
+        Caller caller = ((Receipt) request.question()).caller;
         String model = firstTaking(route, request.dataClass());
         Prompt prompt = route.prompts().get(model);
         Checks.Output check = checks.output(request.task(), route.checks(), prompt.text());
         AtomicReference<String> stopped = new AtomicReference<>();
         ModelPort.Request call = new ModelPort.Request(model, prompt.text(), request.turns().stream().map(this::masked).toList(),
                 route.timeout(), () -> stopped.get() != null || request.cancellation().requested());
-        ModelPort.Result result = models.get(model).port().generate(call, piece -> {
+        audit.add(entry(caller, request, Audit.Event.MODEL_CALLED, model, prompt, null));
+        ModelPort.Result outcome = models.get(model).port().generate(call, piece -> {
             if (stopped.get() == null) {
                 release(check.piece(piece), output, stopped);
             }
         });
-        if (stopped.get() == null && result instanceof ModelPort.Completed) {
+        if (stopped.get() == null && outcome instanceof ModelPort.Completed) {
             release(check.end(), output, stopped);
         }
-        if (stopped.get() != null) {
+        Result result = ending(request, model, prompt, outcome, stopped.get());
+        tell(entry(caller, request, ended(result), model, prompt, result instanceof OutputBlocked blocked ? blocked.rule() : null));
+        return result;
+    }
+
+    /** How the answer ended: blocked once the check stopped it, whatever the model said, or as the model ended it. */
+    private static Result ending(Request request, String model, Prompt prompt, ModelPort.Result outcome, String stoppedBy) {
+        if (stoppedBy != null) {
             LOG.info("The output check stopped the answer of the model {} to the task {} by the rule {}",
-                    model, request.task(), stopped.get());
-            return new OutputBlocked(stopped.get(), usage(result.usage()));
+                    model, request.task(), stoppedBy);
+            return new OutputBlocked(stoppedBy, usage(outcome.usage()));
         }
-        return switch (result) {
+        return switch (outcome) {
             case ModelPort.Completed done -> new Completed(usage(done.usage()));
             case ModelPort.Cancelled cancelled -> new Cancelled(usage(cancelled.usage()));
             case ModelPort.Failed failed -> {
@@ -133,6 +157,39 @@ public final class RoutingGateway implements Gateway {
                 yield new Failed(failed.pieces(), usage(failed.usage()));
             }
         };
+    }
+
+    /** The audit's event for how a call ended. */
+    private static Audit.Event ended(Result result) {
+        return switch (result) {
+            case Completed done -> Audit.Event.COMPLETED;
+            case Cancelled cancelled -> Audit.Event.CANCELLED;
+            case Failed failed -> Audit.Event.FAILED;
+            case OutputBlocked blocked -> Audit.Event.OUTPUT_BLOCKED;
+        };
+    }
+
+    /** The audit's entry of a call: its caller, the message, the class, the model and its prompt. */
+    private static Audit.Entry entry(Caller caller, Request request, Audit.Event event, String model, Prompt prompt, String rule) {
+        return new Audit.Entry(requestId(), caller.tenantId(), caller.applicationId(), caller.endUserId(),
+                caller.conversationId(), request.messageId(), request.task(), event, request.dataClass(), model, prompt.id(), rule);
+    }
+
+    /**
+     * Adds an entry that tells what has happened already: a blocked text, or how a call ended. One that cannot be added
+     * goes to the log with all of its fields, which hold no text of what anyone said, and what happened stands.
+     */
+    private void tell(Audit.Entry entry) {
+        try {
+            audit.add(entry);
+        } catch (RuntimeException e) {
+            LOG.error("The audit could not add {}, so this line keeps it", entry, e);
+        }
+    }
+
+    /** The request ID of the calling thread's log context, which its request's log lines carry, or null outside one. */
+    private static String requestId() {
+        return MDC.get(LogContext.REQUEST_ID);
     }
 
     @Override
@@ -160,6 +217,9 @@ public final class RoutingGateway implements Gateway {
         }
         if (request.dataClass() == null) {
             throw new IllegalArgumentException("A request needs its data class, which the model has to take");
+        }
+        if (request.messageId() == null) {
+            throw new IllegalArgumentException("A request names the message its answer is written to, for the audit");
         }
         Route route = request.task() == null ? null : routes.get(request.task());
         if (route == null) {
@@ -218,15 +278,22 @@ public final class RoutingGateway implements Gateway {
     private static final class Receipt implements Checked {
 
         private final RoutingGateway issuer;
+        private final Caller caller;
         private final String task;
         private final String text;
         private final DataClass dataClass;
 
-        Receipt(RoutingGateway issuer, String task, String text, DataClass dataClass) {
+        Receipt(RoutingGateway issuer, Caller caller, String task, String text, DataClass dataClass) {
             this.issuer = issuer;
+            this.caller = caller;
             this.task = task;
             this.text = text;
             this.dataClass = dataClass;
+        }
+
+        @Override
+        public Caller caller() {
+            return caller;
         }
 
         @Override

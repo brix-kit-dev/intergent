@@ -4,6 +4,8 @@ import aie.core.gateway.api.Gateway;
 import aie.core.tenancy.api.ApiKeyLookup.Owner;
 import aie.core.trust.api.DataClass;
 import aie.modules.conversation.api.Answers;
+import aie.modules.conversation.api.Conversations;
+import aie.modules.conversation.api.Conversations.Conversation;
 import aie.modules.conversation.api.Messages;
 import aie.modules.conversation.api.Messages.Ask;
 import aie.modules.conversation.api.Messages.Asked;
@@ -17,6 +19,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -70,6 +73,7 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(GeneratingAnswers.class);
 
     private final Messages messages;
+    private final Conversations conversations;
     private final Gateway gateway;
     private final int maxRunning;
     private final Duration drain;
@@ -81,17 +85,23 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
             Executors.newSingleThreadScheduledExecutor(Thread.ofVirtual().name("lease-", 0).factory());
     private final AtomicBoolean closing = new AtomicBoolean();
 
-    public GeneratingAnswers(Messages messages, Gateway gateway) {
-        this(messages, gateway, MAX_RUNNING, DRAIN);
+    /**
+     * @param messages where the questions and the answers are written
+     * @param conversations where an ask finds its conversation's end user first, whom the gateway's audit names
+     * @param gateway the only way to a model
+     */
+    public GeneratingAnswers(Messages messages, Conversations conversations, Gateway gateway) {
+        this(messages, conversations, gateway, MAX_RUNNING, DRAIN);
     }
 
     /** With another limit and drain, so that a test needs neither 64 answers nor 10 seconds. */
-    public GeneratingAnswers(Messages messages, Gateway gateway, int maxRunning, Duration drain) {
-        this(messages, gateway, maxRunning, drain, RENEWAL);
+    public GeneratingAnswers(Messages messages, Conversations conversations, Gateway gateway, int maxRunning, Duration drain) {
+        this(messages, conversations, gateway, maxRunning, drain, RENEWAL);
     }
 
     /** With another renewal too, so that a test need not wait 5 seconds for one. It must be far inside the lease. */
-    public GeneratingAnswers(Messages messages, Gateway gateway, int maxRunning, Duration drain, Duration renewal) {
+    public GeneratingAnswers(
+            Messages messages, Conversations conversations, Gateway gateway, int maxRunning, Duration drain, Duration renewal) {
         if (maxRunning < 1) {
             throw new IllegalArgumentException("At least one answer must be able to run, not " + maxRunning);
         }
@@ -102,6 +112,7 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
             throw new IllegalArgumentException("A renewal comes in less than half the lease, not every " + renewal);
         }
         this.messages = Objects.requireNonNull(messages, "Answers are written through Messages");
+        this.conversations = Objects.requireNonNull(conversations, "An ask finds its conversation through Conversations");
         this.gateway = Objects.requireNonNull(gateway, "Answers come from the gateway");
         this.maxRunning = maxRunning;
         this.drain = drain;
@@ -112,11 +123,12 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
     /**
      * The slot comes first and goes back when nothing was stored. Once the answer is stored, its thread gives the slot
      * back when the answer ends. Starting the thread fails only after {@link #close} has given up waiting; then the
-     * answer stays in progress until a reader ends it. The gateway checks what the end user said before anything is
-     * stored, outside any transaction, and its receipt goes with the answer, so the text is checked once (M3-4-1). The
-     * class the check found raises the floor, such as personal for a telephone number (M3-4-2). The storage measures the
-     * call's class against the gateway's ceiling for the task while it holds the conversation's turn, so a call no model
-     * takes stores nothing.
+     * answer stays in progress until a reader ends it. The conversation is looked up next, so that the gateway knows the
+     * end user it checks for and its audit can name them (M3-5-1); a conversation out of reach is NotFound, and its text
+     * is not checked. The gateway checks what the end user said before anything is stored, outside any transaction, and
+     * its receipt goes with the answer, so the text is checked once (M3-4-1). The class the check found raises the floor,
+     * such as personal for a telephone number (M3-4-2). The storage measures the call's class against the gateway's
+     * ceiling for the task while it holds the conversation's turn, so a call no model takes stores nothing.
      */
     @Override
     public Start ask(Owner caller, String conversationId, String text, DataClass floor) {
@@ -126,7 +138,14 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
         Asked asked;
         Gateway.Checked question;
         try {
-            switch (gateway.checkInput(TASK, text)) {
+            Optional<Conversation> conversation = conversations.find(caller, conversationId);
+            if (conversation.isEmpty()) {
+                slots.release();
+                return new Start.NotFound();
+            }
+            Gateway.Caller asking = new Gateway.Caller(
+                    caller.tenantId(), caller.applicationId(), conversation.get().endUserId(), conversationId);
+            switch (gateway.checkInput(asking, TASK, text)) {
                 case Gateway.Checked checked -> question = checked;
                 case Gateway.Blocked blocked -> {
                     slots.release();
@@ -176,8 +195,8 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
     /** On the answer's own thread. Whatever happens, the slot goes back and the waiters learn that the answer is over. */
     private void generate(Answer answer) {
         try {
-            Gateway.Result result = gateway.answer(new Gateway.Request(
-                    TASK, turns(answer), answer::stopRequested, answer.asked.dataClass(), answer.question), answer::write);
+            Gateway.Result result = gateway.answer(new Gateway.Request(TASK, turns(answer), answer::stopRequested,
+                    answer.asked.dataClass(), answer.question, answer.id()), answer::write);
             if (!answer.endedElsewhere) {
                 answer.end(result);
             }

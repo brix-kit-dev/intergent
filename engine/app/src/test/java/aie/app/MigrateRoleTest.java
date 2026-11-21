@@ -97,11 +97,20 @@ class MigrateRoleTest {
                 .isSortedAccordingTo(Comparator.comparingInt(Integer::parseInt));
     }
 
+    /** M3-5-1: the trust module's audit has a history of its own as well. */
+    @Test
+    void theTrustScriptsHaveAHistoryOfTheirOwn() throws SQLException {
+        assertThat(TestDatabase.firstColumn(
+                        DATABASE, "SELECT version FROM engine.flyway_history_trust WHERE type = 'SQL' ORDER BY installed_rank"))
+                .startsWith("1")
+                .isSortedAccordingTo(Comparator.comparingInt(Integer::parseInt));
+    }
+
     @Test
     void aSecondRunSaysNothingWasApplied(CapturedOutput output) {
         assertThat(migrate()).isZero();
 
-        assertThat(output.getOut()).contains("conversation: 0 applied", "tenancy: 0 applied");
+        assertThat(output.getOut()).contains("conversation: 0 applied", "tenancy: 0 applied", "trust: 0 applied");
     }
 
     @Test

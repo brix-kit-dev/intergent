@@ -58,8 +58,8 @@ class GatewayInTransactionTest {
                         DATABASE, "owner_password=" + TestDatabase.OWNER_PASSWORD, "app_password=" + TestDatabase.APP_PASSWORD)
                 .getExitCode()).isZero();
         pool = PgRuntime.pool(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD, 1);
-        gateway = Models.gateway(RegionPacks.read("jp"), pool::insideTx);
-        hello = (Gateway.Checked) gateway.checkInput(Answers.TASK, "Hello");
+        gateway = Models.gateway(RegionPacks.read("jp"), entry -> { }, pool::insideTx);
+        hello = (Gateway.Checked) gateway.checkInput(TestApi.CALLER, Answers.TASK, "Hello");
     }
 
     @AfterAll
@@ -69,18 +69,18 @@ class GatewayInTransactionTest {
 
     private Result ask() {
         return gateway.answer(
-                new Request(Answers.TASK, List.of(new Turn(Role.USER, "Hello")), () -> false, DataClass.PUBLIC, hello), pieces::add);
+                new Request(Answers.TASK, List.of(new Turn(Role.USER, "Hello")), () -> false, DataClass.PUBLIC, hello, "msg_1"), pieces::add);
     }
 
     /** M3-4-1: the input check may come to call a service, so it is refused inside a transaction too. */
     @Test
     void aCheckFromInsideATransactionIsRefused() {
-        assertThatThrownBy(() -> pool.inTenantTx(TENANT, tx -> gateway.checkInput(Answers.TASK, "Hello")))
+        assertThatThrownBy(() -> pool.inTenantTx(TENANT, tx -> gateway.checkInput(TestApi.CALLER, Answers.TASK, "Hello")))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage("No text is checked inside a database transaction (A-14), so end it first");
-        assertThatThrownBy(() -> pool.inSystemTx(tx -> gateway.checkInput(Answers.TASK, "Hello")))
+        assertThatThrownBy(() -> pool.inSystemTx(tx -> gateway.checkInput(TestApi.CALLER, Answers.TASK, "Hello")))
                 .isInstanceOf(IllegalStateException.class);
-        assertThat(gateway.checkInput(Answers.TASK, "Hello")).isInstanceOf(Gateway.Checked.class);
+        assertThat(gateway.checkInput(TestApi.CALLER, Answers.TASK, "Hello")).isInstanceOf(Gateway.Checked.class);
     }
 
     @Test

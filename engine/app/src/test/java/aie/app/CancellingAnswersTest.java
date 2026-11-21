@@ -16,6 +16,7 @@ import aie.core.tenancy.internal.DatabaseEndUsers;
 import aie.core.tenancy.internal.DatabaseProvisioning;
 import aie.core.trust.api.CheckMode;
 import aie.core.trust.api.DataClass;
+import aie.core.trust.internal.DatabaseAudit;
 import aie.modules.conversation.api.Answers;
 import aie.modules.conversation.api.Answers.Start;
 import aie.modules.conversation.api.Answers.Start.Started;
@@ -106,13 +107,13 @@ class CancellingAnswersTest {
     /** The real gateway with the fake model, on a route that lets an answer take a minute. */
     private static Gateway fake() {
         return new RoutingGateway(Map.of(FakeModel.MODEL, new RoutingGateway.Model(new FakeModel(), DataClass.SENSITIVE)),
-                Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), Duration.ofSeconds(60), CheckMode.SENTENCE, TestApi.prompts(List.of(FakeModel.MODEL)))), Models.checks(), pool::insideTx);
+                Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), Duration.ofSeconds(60), CheckMode.SENTENCE, TestApi.prompts(List.of(FakeModel.MODEL)))), Models.checks(), new DatabaseAudit(pool), pool::insideTx);
     }
 
     /** The real gateway with a stub model, on a route that checks the input alone, so each piece goes out as written. */
     private static Gateway stub(ModelPort model) {
         return new RoutingGateway(Map.of("stub", new RoutingGateway.Model(model, DataClass.SENSITIVE)),
-                Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), CheckMode.INPUT, TestApi.prompts(List.of("stub")))), Models.checks(), pool::insideTx);
+                Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), CheckMode.INPUT, TestApi.prompts(List.of("stub")))), Models.checks(), new DatabaseAudit(pool), pool::insideTx);
     }
 
     private static Started started(Start start) {
@@ -183,7 +184,7 @@ class CancellingAnswersTest {
     @Test
     void aCancelHereStopsTheModelAtOnce() throws Exception {
         String question = "[fake pieces=5 delay=2s] Slow";
-        try (GeneratingAnswers answers = new GeneratingAnswers(messages, fake())) {
+        try (GeneratingAnswers answers = new GeneratingAnswers(messages, conversations, fake())) {
             Started started = started(answers.ask(caller, conversation, question, DataClass.PUBLIC));
             waitForEvents(started, 2);
 
@@ -211,8 +212,8 @@ class CancellingAnswersTest {
     @Test
     void aCancelFromAnotherInstanceStopsTheWriterAtItsNextPiece() throws Exception {
         String question = "[fake pieces=50 delay=200ms] Long";
-        try (GeneratingAnswers writer = new GeneratingAnswers(messages, fake());
-                GeneratingAnswers other = new GeneratingAnswers(messages, fake())) {
+        try (GeneratingAnswers writer = new GeneratingAnswers(messages, conversations, fake());
+                GeneratingAnswers other = new GeneratingAnswers(messages, conversations, fake())) {
             Started started = started(writer.ask(caller, conversation, question, DataClass.PUBLIC));
             waitForEvents(started, 3);
 
@@ -244,8 +245,8 @@ class CancellingAnswersTest {
         CountDownLatch written = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         ModelPort completes = writesOnceThen(written, release, new ModelPort.Completed(new ModelPort.Usage(3, 4)));
-        try (GeneratingAnswers writer = new GeneratingAnswers(messages, stub(completes));
-                GeneratingAnswers other = new GeneratingAnswers(messages, stub(completes))) {
+        try (GeneratingAnswers writer = new GeneratingAnswers(messages, conversations, stub(completes));
+                GeneratingAnswers other = new GeneratingAnswers(messages, conversations, stub(completes))) {
             Started started = started(writer.ask(caller, conversation, "Done soon?", DataClass.PUBLIC));
             assertThat(written.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
             waitForEvents(started, 2);
@@ -269,8 +270,8 @@ class CancellingAnswersTest {
         CountDownLatch written = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         ModelPort fails = writesOnceThen(written, release, new ModelPort.Failed("broke", 1, new ModelPort.Usage(3, 4)));
-        try (GeneratingAnswers writer = new GeneratingAnswers(messages, stub(fails));
-                GeneratingAnswers other = new GeneratingAnswers(messages, stub(fails))) {
+        try (GeneratingAnswers writer = new GeneratingAnswers(messages, conversations, stub(fails));
+                GeneratingAnswers other = new GeneratingAnswers(messages, conversations, stub(fails))) {
             Started started = started(writer.ask(caller, conversation, "Breaks?", DataClass.PUBLIC));
             assertThat(written.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
             waitForEvents(started, 2);
@@ -303,8 +304,8 @@ class CancellingAnswersTest {
             }
             return new ModelPort.Cancelled(new ModelPort.Usage(2, 5));
         };
-        GeneratingAnswers writer = new GeneratingAnswers(messages, stub(silent), 4, Duration.ofMillis(100));
-        try (GeneratingAnswers other = new GeneratingAnswers(messages, stub(silent))) {
+        GeneratingAnswers writer = new GeneratingAnswers(messages, conversations, stub(silent), 4, Duration.ofMillis(100));
+        try (GeneratingAnswers other = new GeneratingAnswers(messages, conversations, stub(silent))) {
             Started started = started(writer.ask(caller, conversation, "Quiet?", DataClass.PUBLIC));
             assertThat(writing.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
             waitForEvents(started, 2);
@@ -329,7 +330,7 @@ class CancellingAnswersTest {
     void aCancelThatIsNotKeptStopsNothing() throws Exception {
         Owner otherApplication = new Owner("key_unused", caller.tenantId(),
                 provisioning.createApplication(caller.tenantId(), "test", "internal"));
-        try (GeneratingAnswers answers = new GeneratingAnswers(messages, fake())) {
+        try (GeneratingAnswers answers = new GeneratingAnswers(messages, conversations, fake())) {
             Started done = started(answers.ask(caller, conversation, "[fake pieces=2 delay=1ms] Quick", DataClass.PUBLIC));
             awaitEnd(done);
             Message ended = answerOf(done);
@@ -352,7 +353,7 @@ class CancellingAnswersTest {
     @Test
     void aCancelledAnswerGivesItsSlotBack() throws Exception {
         String question = "[fake pieces=5 delay=2s] Slow";
-        try (GeneratingAnswers answers = new GeneratingAnswers(messages, fake(), 1, Duration.ofSeconds(5))) {
+        try (GeneratingAnswers answers = new GeneratingAnswers(messages, conversations, fake(), 1, Duration.ofSeconds(5))) {
             Started started = started(answers.ask(caller, conversation, question, DataClass.PUBLIC));
             assertThat(answers.ask(caller, conversation, "Another?", DataClass.PUBLIC)).isEqualTo(new Start.Busy());
 
@@ -397,7 +398,7 @@ class CancellingAnswersTest {
             output.text("two ");
             return new ModelPort.Completed(new ModelPort.Usage(3, 8));
         };
-        try (GeneratingAnswers writer = new GeneratingAnswers(failingOnSecondDelta, stub(twoPieces))) {
+        try (GeneratingAnswers writer = new GeneratingAnswers(failingOnSecondDelta, conversations, stub(twoPieces))) {
             Started started = started(writer.ask(caller, conversation, "Two?", DataClass.PUBLIC));
             assertThat(written.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
             waitForEvents(started, 2);

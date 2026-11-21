@@ -5,6 +5,7 @@ import aie.adapters.moderationrules.RuleModeration;
 import aie.adapters.redactionrules.RuleRedaction;
 import aie.core.gateway.api.Gateway;
 import aie.core.gateway.internal.RoutingGateway;
+import aie.core.trust.api.Audit;
 import aie.core.trust.api.Checks;
 import aie.core.trust.internal.TrustChecks;
 import aie.modules.conversation.api.Answers;
@@ -40,13 +41,14 @@ final class Models {
 
     /**
      * The gateway of a region pack: each of its models called through a new adapter of the model's kind, with the highest
-     * class of data its contract lets it take, and its routes, behind the trust layer's checks.
+     * class of data its contract lets it take, and its routes, behind the trust layer's checks and with its audit.
      *
+     * @param audit the trust layer's audit, which the gateway adds its entries to (M3-5-1): the role's database
      * @param insideTx whether the calling thread is inside a database transaction, so that the gateway can refuse such a
      *     call (A-14): {@code insideTx} of the role's pool
      * @throws IllegalArgumentException for a model whose adapter this engine does not have
      */
-    static Gateway gateway(RegionPack pack, BooleanSupplier insideTx) {
+    static Gateway gateway(RegionPack pack, Audit audit, BooleanSupplier insideTx) {
         Map<String, RoutingGateway.Model> registry = new LinkedHashMap<>();
         pack.models().forEach((id, spec) -> {
             Supplier<ModelPort> adapter = ADAPTERS.get(spec.adapter());
@@ -56,6 +58,6 @@ final class Models {
             }
             registry.put(id, new RoutingGateway.Model(adapter.get(), spec.maxDataClass()));
         });
-        return new RoutingGateway(registry, pack.routes(), checks(), insideTx);
+        return new RoutingGateway(registry, pack.routes(), checks(), audit, insideTx);
     }
 }

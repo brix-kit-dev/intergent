@@ -1,6 +1,7 @@
 package aie.http;
 
 import aie.core.Ids;
+import aie.core.LogContext;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.RequestDispatcher;
 import jakarta.servlet.ServletException;
@@ -32,7 +33,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
 class RequestIdFilter extends OncePerRequestFilter {
 
     static final String HEADER = "Request-Id";
-    static final String LOG_KEY = "request_id";
+    static final String LOG_KEY = LogContext.REQUEST_ID;
     static final String PREFIX = "req";
 
     private static final Logger LOG = LoggerFactory.getLogger(RequestIdFilter.class);

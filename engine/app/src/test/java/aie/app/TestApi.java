@@ -1,5 +1,6 @@
 package aie.app;
 
+import aie.core.gateway.api.Gateway;
 import aie.core.gateway.internal.Prompt;
 import aie.core.tenancy.api.ApiKeyLookup;
 import aie.core.tenancy.api.ApiKeyLookup.Owner;
@@ -47,6 +48,8 @@ final class TestApi {
     /** Well formed, so it would pass the format check of a real lookup too. */
     static final String KEY = "aie_test_dev_" + "0123456789".repeat(4);
     static final Owner OWNER = new Owner("key_test", "ten_test", "app_test");
+    /** Who a test's call to a gateway is for, as the gateway's audit names them (M3-5-1). */
+    static final Gateway.Caller CALLER = new Gateway.Caller("ten_test", "app_test", "eu_test", "conv_test");
     static final String AUTHORIZATION = "Bearer " + KEY;
     /** 256 bits for tests that start the real api role, so its tokens are test tokens. */
     static final byte[] SESSION_KEY = sessionKey(7);

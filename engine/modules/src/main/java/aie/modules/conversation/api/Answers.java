@@ -24,7 +24,8 @@ public interface Answers {
      * Stores what the end user said, starts its answer and generates it in the background. Nothing is stored when the
      * conversation is out of reach, when this instance already generates as many answers as it may, when it is stopping,
      * when the input check blocks what the end user said (M3-4-1), or when no model of {@link #TASK} takes the call's data
-     * class (M3-3-2). The input check comes before anything is stored, and the same text is not checked again for the
+     * class (M3-3-2). The conversation is looked up first, so a text for a conversation out of reach is not checked
+     * (M3-5-1); then the input check comes, before anything is stored, and the same text is not checked again for the
      * answer.
      *
      * @param floor the least data class of the call, the higher of the application's default and the class the caller

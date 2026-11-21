@@ -84,6 +84,12 @@ class TenantIsolationTest {
             Sample.keptAndChanged("conversation_answer_leases", """
                     INSERT INTO conversation_answer_leases (tenant_id, message_id, expires_at)
                     VALUES ('{tenant}', 'msg_{tenant}', now() + interval '30 seconds')
+                    """),
+            Sample.appendOnly("trust_audit_records", """
+                    INSERT INTO trust_audit_records (record_id, tenant_id, application_id, end_user_id, conv_id, task, event,
+                        rule)
+                    VALUES ('aud_{tenant}', '{tenant}', 'app_{tenant}', 'eu_{tenant}', 'conv_{tenant}', 'customer_chat',
+                        'input_blocked', 'instruction_override')
                     """));
 
     private static final String TENANT_TABLES = """

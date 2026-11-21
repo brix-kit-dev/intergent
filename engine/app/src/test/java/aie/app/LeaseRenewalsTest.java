@@ -16,6 +16,7 @@ import aie.core.tenancy.internal.DatabaseEndUsers;
 import aie.core.tenancy.internal.DatabaseProvisioning;
 import aie.core.trust.api.CheckMode;
 import aie.core.trust.api.DataClass;
+import aie.core.trust.internal.DatabaseAudit;
 import aie.modules.conversation.api.Answers;
 import aie.modules.conversation.api.Answers.Start;
 import aie.modules.conversation.api.Answers.Start.Started;
@@ -107,12 +108,12 @@ class LeaseRenewalsTest {
     /** The real gateway with a stub model, on a route that checks the input alone, so each piece goes out as written. */
     private static Gateway stub(ModelPort model) {
         return new RoutingGateway(Map.of("stub", new RoutingGateway.Model(model, DataClass.SENSITIVE)),
-                Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), CheckMode.INPUT, TestApi.prompts(List.of("stub")))), Models.checks(), pool::insideTx);
+                Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), CheckMode.INPUT, TestApi.prompts(List.of("stub")))), Models.checks(), new DatabaseAudit(pool), pool::insideTx);
     }
 
     /** Renewals every 200 ms, and room for a few answers. */
     private static GeneratingAnswers renewingOften(Messages through, ModelPort model) {
-        return new GeneratingAnswers(through, stub(model), 4, Duration.ofSeconds(5), RENEWAL);
+        return new GeneratingAnswers(through, conversations, stub(model), 4, Duration.ofSeconds(5), RENEWAL);
     }
 
     private static Started started(Start start) {
@@ -202,7 +203,7 @@ class LeaseRenewalsTest {
     @Test
     void aWriterLearnsAtItsRenewalThatTheAnswerEnded() throws Exception {
         CountDownLatch writing = new CountDownLatch(1);
-        try (GeneratingAnswers writer = new GeneratingAnswers(messages, stub(silent(writing)), 1, Duration.ofSeconds(5), RENEWAL)) {
+        try (GeneratingAnswers writer = new GeneratingAnswers(messages, conversations, stub(silent(writing)), 1, Duration.ofSeconds(5), RENEWAL)) {
             Started started = started(writer.ask(caller, conversation, "Gone?", DataClass.PUBLIC));
             assertThat(writing.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
 
@@ -268,7 +269,7 @@ class LeaseRenewalsTest {
             }
             return new ModelPort.Completed(new ModelPort.Usage(1, 1));
         };
-        GeneratingAnswers answers = new GeneratingAnswers(renewalsFailFirst(0, renewals), stub(deaf), 4, Duration.ZERO, RENEWAL);
+        GeneratingAnswers answers = new GeneratingAnswers(renewalsFailFirst(0, renewals), conversations, stub(deaf), 4, Duration.ZERO, RENEWAL);
         try {
             started(answers.ask(caller, conversation, "Stop?", DataClass.PUBLIC));
             assertThat(writing.await(WAIT_SECONDS, TimeUnit.SECONDS)).isTrue();
@@ -290,9 +291,9 @@ class LeaseRenewalsTest {
         assertThat(GeneratingAnswers.RENEWAL).isEqualTo(Duration.ofSeconds(5));
         Gateway any = stub(silent(new CountDownLatch(1)));
         for (Duration wrong : new Duration[] {null, Duration.ZERO, Duration.ofSeconds(-1), Duration.ofSeconds(16)}) {
-            assertThatThrownBy(() -> new GeneratingAnswers(messages, any, 1, Duration.ZERO, wrong))
+            assertThatThrownBy(() -> new GeneratingAnswers(messages, conversations, any, 1, Duration.ZERO, wrong))
                     .isInstanceOf(IllegalArgumentException.class);
         }
-        new GeneratingAnswers(messages, any, 1, Duration.ZERO, Duration.ofSeconds(15)).close();
+        new GeneratingAnswers(messages, conversations, any, 1, Duration.ZERO, Duration.ofSeconds(15)).close();
     }
 }

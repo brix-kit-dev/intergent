@@ -58,7 +58,8 @@ class DataClassBackfillTest {
         assertThat(TestDatabase.firstColumn(DATABASE, """
                 SELECT table_name || '.' || column_name || ' ' || coalesce(column_default, 'no default')
                 FROM information_schema.columns
-                WHERE table_schema = 'engine' AND column_name IN ('data_class', 'data_class_watermark')
+                WHERE table_schema = 'engine' AND table_name LIKE 'conversation\\_%'
+                    AND column_name IN ('data_class', 'data_class_watermark')
                 ORDER BY table_name
                 """)).containsExactly("conversation_conversations.data_class_watermark 'public'::text",
                 "conversation_messages.data_class no default");
