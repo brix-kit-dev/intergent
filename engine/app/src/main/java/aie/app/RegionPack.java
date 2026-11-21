@@ -2,6 +2,7 @@ package aie.app;
 
 import aie.core.gateway.api.ModelSpec;
 import aie.core.gateway.internal.Route;
+import java.time.ZoneId;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -32,12 +33,14 @@ record RegionPack(String region, Map<String, ModelSpec> models, Map<String, Rout
      *     class (the gate of blueprint 9.1)
      * @param aiDisclosure whether an answer must say that an AI wrote it: kept in the policy and checked for its form, and
      *     acted on once an operation needs it
+     * @param timeZone the region's time zone, in which a tenant's budget month starts and ends (M3-6-2)
      */
-    record Policy(Set<String> tasks, AiDisclosure aiDisclosure) {
+    record Policy(Set<String> tasks, AiDisclosure aiDisclosure, ZoneId timeZone) {
 
         Policy {
             tasks = Set.copyOf(tasks);
             Objects.requireNonNull(aiDisclosure, "A region's policy says whether an answer must say an AI wrote it");
+            Objects.requireNonNull(timeZone, "A region's policy names its time zone");
         }
     }
 

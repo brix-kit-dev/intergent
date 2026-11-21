@@ -206,6 +206,7 @@ class ConversationController implements ConversationsApi, StreamsApi {
                 case Answers.Start.NotFound missing -> throw new ResponseStatusException(HttpStatus.NOT_FOUND);
                 case Answers.Start.NoEligibleModel refused -> throw new NoEligibleModel(refused);
                 case Answers.Start.InputBlocked blocked -> throw new InputBlocked(blocked);
+                case Answers.Start.BudgetExceeded spent -> throw new BudgetExceeded();
             });
         }
         return switch (answers.ask(caller, conversation, text, floor)) {
@@ -215,6 +216,7 @@ class ConversationController implements ConversationsApi, StreamsApi {
             case Answers.Start.NotFound missing -> throw new ResponseStatusException(HttpStatus.NOT_FOUND);
             case Answers.Start.NoEligibleModel refused -> throw new NoEligibleModel(refused);
             case Answers.Start.InputBlocked blocked -> throw new InputBlocked(blocked);
+            case Answers.Start.BudgetExceeded spent -> throw new BudgetExceeded();
         };
     }
 
@@ -237,6 +239,16 @@ class ConversationController implements ConversationsApi, StreamsApi {
     ResponseEntity<Object> inputBlocked(InputBlocked blocked) {
         return Problems.response(HttpStatus.UNPROCESSABLE_CONTENT.value(), "input_blocked", blocked.getMessage(),
                 HttpHeaders.EMPTY);
+    }
+
+    /**
+     * A tenant that has spent its monthly budget (M3-6-2): the request fails before anything is stored or sent, and before
+     * any stream starts. Trying again does not help this month (blueprint 6.10), so the product decides what to do, such
+     * as taking a message instead. The detail tells no sum: a browser's request reads it too.
+     */
+    @ExceptionHandler(BudgetExceeded.class)
+    ResponseEntity<Object> budgetExceeded(BudgetExceeded spent) {
+        return Problems.response(HttpStatus.PAYMENT_REQUIRED.value(), "budget_exceeded", spent.getMessage(), HttpHeaders.EMPTY);
     }
 
     /**
@@ -521,6 +533,16 @@ class ConversationController implements ConversationsApi, StreamsApi {
         InputBlocked(Answers.Start.InputBlocked blocked) {
             super("The input check blocked the text by its rule " + blocked.rule() + ", so nothing was sent or stored", null,
                     false, false);
+        }
+    }
+
+    /** A tenant's spent budget, before anything was stored or written, so that its handler can still answer with a problem. */
+    private static final class BudgetExceeded extends RuntimeException {
+
+        private static final long serialVersionUID = 1L;
+
+        BudgetExceeded() {
+            super("The tenant has spent its budget for this month, so nothing was sent or stored", null, false, false);
         }
     }
 

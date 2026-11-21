@@ -162,7 +162,7 @@ curl http://127.0.0.1:18080/healthz
 真实单元这样运行：
 
 ```bash
-ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD=... ENGINE_SESSION_KEY=... ENGINE_AUDIT_MASTER_KEY=... DEPLOY_REGION=jp java -jar engine.jar --role=api
+ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD=... ENGINE_SESSION_KEY=... ENGINE_AUDIT_MASTER_KEY=... ENGINE_DEFAULT_MONTHLY_BUDGET_USD=100 DEPLOY_REGION=jp java -jar engine.jar --role=api
 ```
 
 **区域包：** `DEPLOY_REGION` 是必填项，选这个单元用哪个区域包，见[网关](#网关)里的“区域包”。它没有默认值：漏写的部署直接停下，而不是把数据送到别的区域的模型那里。开发环境里 `api.sh` 填 `jp`。`api` 在连数据库之前就读区域包并检查，没写、写的不是区域名、没有这个区域包、区域包没通过检查，都拒绝启动，退出码 1，并写明原因。
@@ -199,6 +199,13 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 - **开发环境：** 由 `up.sh` 生成，`api.sh` 读出来交给 `api`。
 - **不能随便换：** 租户密钥是用它加密的，换一把主密钥，已经有的租户密钥就打不开了，`sensitive` 调用会因为记不下审计而失败。换主密钥要先把所有租户密钥用新主密钥重新加密一遍，这一步以后和密钥轮换一起做。
 
+**默认每月预算（M3-6-2）：** `ENGINE_DEFAULT_MONTHLY_BUDGET_USD` 是必填项：没单独设预算的租户，每月最多花这么多美元调用模型，见“计量”里的预算。这样每个租户都有上限（`T-4`），新开的租户也不用先设预算。
+
+- **写法：** 0 或更大的美元数，只写数字，可以带小数，比如 `100` 或 `12.50`。不能带正负号、货币符号、单位、千位分隔符或指数。`0` 表示没单独设预算的租户都不能调用模型。
+- **启动时检查：** 没给或写法不对，`api` 拒绝启动，退出码 1，在连数据库之前，报错里写明变量名和写法。
+- **`admin` 也要：** `admin budget` 和 `admin set-budget` 读它和 `DEPLOY_REGION`，算出和 `api` 一样的月份和上限，见[开通租户](#开通租户)。两边要给同样的值。
+- **开发环境：** `api.sh` 和 `admin.sh` 都填 `100`，可以用同名的环境变量改。jp 的模拟模型价格是 0，所以开发环境不会花到上限。
+
 **同时开着的事件流（第 40 点）：** 每个 `api` 最多同时开 256 条事件流，用 `ENGINE_STREAMS_MAX` 可以改，必须是 1 到 10000 的整数。这个值也在连数据库之前检查，不合格就拒绝启动，退出码 1，报错里写明变量名和规则。上限的用处见“会话”一节的事件流。
 
 **连接池：** `api` 持有一个连接池，最多 10 条连接。请求跑在虚拟线程上，同时进来的请求再多，数据库连接也不会超过 10 条，多出来的请求排队等空闲连接。租户号只在一个事务里有效，同一条连接上的下一个事务不带租户。`api` 停止时关掉所有连接；启动失败时也一样，比如端口被占用。
@@ -216,7 +223,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 
 | 角色 | 现状 |
 | --- | --- |
-| `api` | 先检查会话签名密钥和审计主密钥，再过启动自检、建连接池，然后提供 HTTP 服务，目前有 `/healthz`、新建和吊销密钥 |
+| `api` | 先检查会话签名密钥、审计主密钥和默认每月预算，再过启动自检、建连接池，然后提供 HTTP 服务，目前有 `/healthz`、新建和吊销密钥 |
 | `migrate` | 运行数据库迁移，完成后退出 |
 | `admin` | 开通租户和应用，完成后退出，见[开通租户](#开通租户) |
 | `worker` | 还没实现，打印提示后退出 |
@@ -228,7 +235,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 | 退出码 | 含义 |
 | --- | --- |
 | 0 | 正常结束 |
-| 1 | 启动失败，如端口被占用；会话签名密钥或审计主密钥不合格；启动自检不通过；迁移失败 |
+| 1 | 启动失败，如端口被占用；会话签名密钥、审计主密钥或默认每月预算不合格；启动自检不通过；迁移失败 |
 | 2 | 角色参数不对：没给、给了多个或不认识；`admin` 的命令或选项不对 |
 | 3 | 角色还没实现 |
 | 143 | 收到 SIGTERM，处理完请求后退出 |
@@ -251,14 +258,22 @@ read -r KEY_ID API_KEY <<< "$(deploy/dev/admin.sh create-key --tenant="$TENANT" 
 | `create-site-key` | `--tenant`、`--application`、`--origins`：都必填；`--origins` 用逗号隔开，如 `https://shop.example.com,http://localhost:3000` | 一行：站点键号和站点键，如 `site_01M6... aie_site_test_dev_...` |
 | `revoke-site-key` | `--tenant`、`--site-key=<站点键号>`：都必填 | 吊销了的站点键号 |
 | `audit` | `--tenant`：必填；`--from`、`--to`：RFC 3339 时间，都可以不写 | 这个租户的审计记录，一条一行 JSON，按时间先后（M3-5-2） |
+| `set-budget` | `--tenant`、`--monthly=<美元>`：都必填 | 设好以后这个租户本月的情况，一行 JSON，和 `budget` 一样（M3-6-2） |
+| `budget` | `--tenant`：必填 | 这个租户本月的情况，一行 JSON：月份、上限、上限是不是它自己的、已经花了多少（M3-6-2） |
 
-- **输出：** 标准输出只有新 ID，或者读出来的审计记录，脚本可以直接接住。出错写到标准错误，退出码 1；命令或选项写错，退出码 2。
+- **输出：** 标准输出只有新 ID，或者读出来的审计记录、预算情况，脚本可以直接接住。出错写到标准错误，退出码 1；命令或选项写错，退出码 2。
 - **查审计（M3-5-2）：** `audit` 按数据库的时间先后打印租户的审计记录，同一时间的按记录号排，一条一行 JSON，方便用 `jq` 筛选，比如 `deploy/dev/admin.sh audit --tenant="$TENANT" | jq 'select(.event == "input_blocked")'`。审计本身见“信任层”的审计。
   - **字段：** 每行的字段和顺序都固定：`record_id`、`created_at`、`request_id`、`tenant_id`、`application_id`、`end_user_id`、`conversation_id`、`message_id`、`task`、`event`、`data_class`、`model`、`prompt`、`rule`、`question_hmac`、`answer_hmac`、`key_id`，没有的写 `null`。最后三个只有 `sensitive` 的记录才有（M3-5-3）。`created_at` 是数据库记下的时间，用 UTC，按 RFC 3339 写。表里的会话号一列叫 `conv_id`，输出里叫 `conversation_id`。
   - **时间窗：** 从 `--from` 那一刻起（包括它），到 `--to` 之前（不包括它），都可以不写。时间只认 RFC 3339，和契约读时间一样严格（第 46 点），时区随意，比如 `2026-11-21T09:00:00+09:00`。格式不对，或者 `--to` 不在 `--from` 之后，都算命令写错，退出码 2，这时还没连数据库。
   - **只读这个租户：** 在这个租户的事务里读，行级安全挡住别的租户。租户号写错，或者这段时间没有记录，都什么都不打印，退出码 0。
   - **记录多的时候：** 每次读一页 500 条，一页一个短事务，读完一页才打印这一页，下一页从这一页的最后一条之后接着读。中途出错时，已经打印的留着，退出码 1。表上有按租户、时间和记录号排的索引（`V2__index_audit_records_by_time.sql`）。
   - **对外接口：** 没有，审计先只给 `admin` 查（M3 第 6 项）。
+- **预算（M3-6-2）：** `set-budget` 设置或修改租户每月的上限（M3 第 6 项），`budget` 看上限和本月已经花了多少。预算本身见“计量”里的预算。
+  - **输出：** 一行 JSON，字段和顺序固定：`tenant_id`、`month`（区域包时区里的本月，如 `2026-11`）、`monthly_limit_usd`（这个月的上限）、`own_limit`（`true` 是这个租户自己的，`false` 是单元的默认值）、`spent_usd`（本月已经花了多少）。金额都是美元，写成字符串，保留原来的小数位，比如 `{"tenant_id":"ten_01M6...","month":"2026-11","monthly_limit_usd":"12.50","own_limit":true,"spent_usd":"0.001938"}`。
+  - **金额：** `--monthly` 和 `ENGINE_DEFAULT_MONTHLY_BUDGET_USD` 的写法一样：0 或更大，只写数字，可以带小数。写法不对算命令写错，退出码 2，这时还没连数据库。存下来的就是写的那个数，小数位不变，`0` 表示这个租户不能再调用模型。
+  - **要先有租户：** 租户号写错（这个数据库里没有这个租户）时，两个命令都拒绝，退出码 1，什么都不设、不打印。
+  - **月份和默认值：** 和 `api` 一样，读 `DEPLOY_REGION` 的区域包的时区，和 `ENGINE_DEFAULT_MONTHLY_BUDGET_USD`。没给或不合格就拒绝，退出码 1，在连数据库之前。
+  - **马上生效：** `api` 每次提问都现查，所以改了上限，下一个提问就按新的算，不用重启。
 - **测试里的密钥：** `AdminRoleTest` 用 `QuietOutput` 接住命令打印的内容，不转给控制台，所以 CI 日志里没有新发的密钥。Spring 的 `OutputCaptureExtension` 边接边转，不能用在这里，`QuietOutputTest` 会拦住改回去。测试失败时，`QuietOutput` 才把接住的内容打出来，密钥的机密部分换成 `<masked>`。断言失败时，报错里如果比对的正是密钥，仍会带出它，这时 `verify.sh` 会报出来，见[构建输出里不许有密钥](#ci-和依赖规则)。
 - **连接：** 和 `api` 一样先过启动自检，再用 `engine_app` 连接。地址里写的用户和会话参数都不起作用。
 - **单元码：** 新租户的单元码取自 `ENGINE_CELL_CODE`，必须是 1 到 8 位小写字母和数字，因为它会写进密钥。开发服务器不是单元，用 `dev`。
@@ -302,6 +317,10 @@ read -r KEY_ID API_KEY <<< "$(deploy/dev/admin.sh create-key --tenant="$TENANT" 
 
 ```bash
 ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD=... ENGINE_CELL_CODE=jp1 java -jar engine.jar --role=admin create-tenant
+```
+
+```bash
+ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD=... DEPLOY_REGION=jp ENGINE_DEFAULT_MONTHLY_BUDGET_USD=100 java -jar engine.jar --role=admin set-budget --tenant=ten_01M6... --monthly=500
 ```
 
 ## 目录
@@ -399,10 +418,10 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 
 模块要用模型时只说任务，不说模型。网关 `aie.core.gateway` 按任务找路由，再从路由找模型，调用 `ModelPort`。别的模块只经它的公开接口 `aie.core.gateway.api.Gateway` 调用（`A-4`），只有网关能用模型端口（`A-2-ports`）：
 
-- **先查输入（M3-4-1）：** `checkInput(调用方, 任务, 文字)` 在存任何东西之前检查用户说的话，见下面的“信任层”。通过的拿到网关给的回执（`Checked`），被拦的拿到 `Blocked` 和拦下它的规则名。调用方（`Gateway.Caller`）写明租户、应用、终端用户和会话，都是引擎自己的号，审计按它记是谁（M3-5-1）；回执记着调用方，对这句话的回答也算这个调用方的。
+- **先查输入（M3-4-1）：** `checkInput(调用方, 任务, 文字)` 在存任何东西之前检查用户说的话，见下面的“信任层”。通过的拿到网关给的回执（`Checked`），被拦的拿到 `Blocked` 和拦下它的规则名。在这之前先查调用方租户本月的预算（M3-6-2）：已经花到上限，就拿到 `OverBudget`，没有回执，这句话也不检查、不审计，见下面“计量”里的预算。调用方（`Gateway.Caller`）写明租户、应用、终端用户和会话，都是引擎自己的号，审计按它记是谁（M3-5-1）；回执记着调用方，对这句话的回答也算这个调用方的。
 - **一次调用：** `answer(请求, 输出)` 一直阻塞到回答结束。请求写明任务名、到目前为止的对话（最后一句是用户说的）、取消信号、这次调用的数据等级（M3-3-1，见“会话”里的数据等级）、网关对最后一句的检查回执（M3-4-1），以及回答写进哪条消息（M3-5-1，审计记这个号），文本一段一段交给输出。发给模型的每一轮都先经信任层遮盖个人信息（M3-4-2），请求里的对话本身不变。
 - **审计（M3-5-1）：** 网关自己往信任层的审计里记：输入被拦记一条；调模型之前记一条，记不下就不调；调用结束再记一条。见下面“信任层”的审计。
-- **计量（M3-6-1）：** 每次调用结束时，网关把模型报的用量和按注册表价格算出的费用记进计量，见下面的“计量”。注册表的每个模型都带着价格（`RoutingGateway.Model` 的 `price`）。
+- **计量（M3-6-1）：** 每次调用结束时，网关把模型报的用量和按注册表价格算出的费用记进计量，见下面的“计量”。注册表的每个模型都带着价格（`RoutingGateway.Model` 的 `price`）。网关建好时必须给它计量和预算（`Budgets`，M3-6-2），没有不计量、不受预算限制的网关（`T-4`）。
 - **怎么结束：** 完成、取消、失败（包括超时）、被输出检查拦下（`OutputBlocked`，M3-4-3）都作为结果返回，带上到那时为止的用量。失败还写明已经交出了几段。模型给的失败原因只进网关的日志，和任务、模型号、段数写在一行；结果里没有它，所以到不了用户那里。
 - **写错了就抛异常：** 没有调用方的检查、没有路由的任务、格式不对的请求（没有对话、最后一句不是用户说的、缺取消信号、缺数据等级、缺消息号）、等级高过任务上限的请求、没有这个网关对最后一句的回执的请求、等级低于回执里检查发现的等级的请求（M3-4-2），都是调用方的代码写错了。网关直接抛 `IllegalArgumentException`，不做检查，不调模型，也不记审计。
 - **按等级选模型（M3-3-2，蓝图 7.3 和 8.2）：** 一次调用交给路由里第一个能收这个等级的模型，按路由的先后顺序。收不了的跳过，绝不交给等级低的模型；后面就算有等级更低、也收得了的模型，也不会越过前面的。
@@ -428,7 +447,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 - **文件：**
   - `models.yaml` 是注册表。每个模型写明 `id`（部署/模型）、`adapter`、`family`（取哪套提示词，M3-2 用）、`processing_region`（在哪里处理数据）、`retention`（厂商保留多久：`none` 或天数如 `30d`）、`training`（厂商能不能拿来训练）、`max_data_class`（最高收哪一级数据）、`capabilities`、`price`（每百万词元多少美元，进和出，M3-6 计量用）。
   - `routes.yaml` 是路由表。每个任务写明 `models`（第一个是首选，后面的是备用，M3-12 才用）、`timeout_seconds`（`A-9`）、`checks`（`sentence` 按句、`full` 全文、`input` 只查输入，见“信任层”的输出检查）和 `prompts`（见下面的“提示词”）。
-  - `policy.yaml` 是这个区域的策略（M3-4-4）：`tasks` 列出它开放的任务，`ai_disclosure` 写回答要不要标明是 AI 写的（`required` 或 `not_required`）。见“信任层”的地区门禁。
+  - `policy.yaml` 是这个区域的策略（M3-4-4）：`tasks` 列出它开放的任务，`ai_disclosure` 写回答要不要标明是 AI 写的（`required` 或 `not_required`），见“信任层”的地区门禁；`time_zone` 是这个区域的时区，每月的预算从这里的每月 1 日 0 点重新算（M3-6-2），见“计量”里的预算。jp 写 `Asia/Tokyo`。
 - **打进 jar：** 构建时把 `regions/` 整个复制进 `engine.jar`，`DEPLOY_REGION` 只能从里面选一个，不能改里面的内容。租户和运维以后设的任何东西都改不了模型的范围（`R-2`）。区域名只能是小写字母、数字和 `-`，所以指不到包外面的文件。
 - **检查（`R-4`）：** 下面任何一条不满足，`api` 拒绝启动，并写明文件和是哪个模型、哪个任务。`RegionPacksTest` 在 CI 里用同样的检查读仓库里的每个区域包。
   - 每个字段都要写，也不能多写，写错名字的字段不会被悄悄忽略；同一个键写两次也拒绝。
@@ -438,6 +457,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
   - 路由里每个模型的系列都有提示词，不多也不少；提示词的版本号是这个任务、这个系列的，jar 里有它的文字（M3-2）。
   - 策略开放的任务都是引擎有的任务（现在只有 `customer_chat`），不重复；路由的任务正好是开放的任务，不多也不少：开放了却没有路由，答不了；有路由却没开放，永远不会被用到（M3-4-4）。M3-1 原来的“引擎要用的每个任务都有路由”换成了这一条，否则门禁永远拦不了什么。
   - `ai_disclosure` 只能是 `required` 或 `not_required`。
+  - `time_zone` 要写 tz 数据库里的时区名，比如 `Asia/Tokyo`，也认 `UTC`；`Tokyo`、`JST` 这样的写法拒绝（M3-6-2）。
   - 区域包可以什么都不开放：`tasks: []`，也就没有路由。这样的单元照常启动，只是发消息都被门禁拒绝。
 - **以后：** 真实模型随适配器加进 `models.yaml`（M3-9 到 11）。
 
@@ -468,7 +488,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 - **只认整句说法：** 每条规则都要一整句说法，比如动词、“之前的”和“指令”都在，不是看到一个词就拦。所以 `Where are the instructions for my blender?`、`我之前的订单什么时候到？`、`手机一直显示系统提示，怎么办？`、`前の注文をキャンセルしたいです` 都照常通过。误拦的代价是用户换个说法再问，因为被拦的话什么都没存。
 - **换个写法也认得：** 先按 NFKC 折叠（全角字母、半角片假名变成常规写法），转成小写，去掉零宽空格、软连字符这类格式字符。英文的连续空白算一个空格；中文和日文去掉所有空白再查，所以 `忽 略 之 前 的 指 令` 也会被拦。
 - **只查输入：** 模型写的文字这些规则不拦，那是下面的输出检查的事。
-- **怎么接上：** `GeneratingAnswers.ask` 先占实例的名额，再找会话（M3-5-1，这样网关知道终端用户是谁，审计才记得下；找不到就还回名额，回 `Start.NotFound`，不做检查），再经网关的 `checkInput` 检查这句话，在任何事务之外。被拦就还回名额，回 `Start.InputBlocked`（带规则名），不存问题、不建回答、水位也不动：没发给模型的内容不进历史，也不抬水位（蓝图 7.3）。发消息接口据此回答 422 `input_blocked`，见“会话”里的发消息。
+- **怎么接上：** `GeneratingAnswers.ask` 先占实例的名额，再找会话（M3-5-1，这样网关知道终端用户是谁，审计才记得下；找不到就还回名额，回 `Start.NotFound`，不做检查），再经网关的 `checkInput` 检查这句话，在任何事务之外。被拦就还回名额，回 `Start.InputBlocked`（带规则名），不存问题、不建回答、水位也不动：没发给模型的内容不进历史，也不抬水位（蓝图 7.3）。发消息接口据此回答 422 `input_blocked`，见“会话”里的发消息。租户的预算已经花完时（M3-6-2），网关在检查之前就回 `OverBudget`，生成方同样还回名额，回 `Start.BudgetExceeded`，什么都不存，发消息接口回答 402 `budget_exceeded`。
 - **只查一次：** 通过的话拿到网关的回执，回执跟着这条回答，生成时放进网关的请求里。网关不再查一遍（蓝图 9.1：同一请求里相同的内容只检查一次），但没有回执、回执不是这个网关给的、任务不同、或者文字和对话的最后一句不一样，网关都不调模型，直接抛 `IllegalArgumentException`。回执的类是网关私有的，别的代码造不出来，所以绕不过检查（`A-15`）。同一句话的回执可以用于多次调用。
 - **日志和审计：** 拦下时网关记一行 INFO，写明任务和规则名，不写原文，因为原文可能带个人信息。审计里也记一条（M3-5-1），见下面的“审计”。
 - **以前的消息：** M3-4-1 之前存下的消息没有过这道检查，作为历史发给模型时也不会补查。现在还没有部署，没有这样的数据。
@@ -542,7 +562,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 - **已经发生的事记不下时：** `input_blocked` 和结束的那条记的是已经发生的事，记不下也改变不了结果：网关记一行 ERROR，带上这条记录的全部字段（都是号和名字，没有原文），结果照旧，比如照样回 422、照样写完回答。
 - **中途出错：** 进程在调用中途崩溃，或者调用中途抛出异常（比如写回答失败），就只有 `model_called` 那一条，从中看得出这次调用没正常结束。
 - **审计和消息各说各的：** 结束的那条说的是模型的调用怎么结束的，消息的状态说的是回答怎么结束的。比如有取消请求时模型正好完成，审计记 `completed`，消息照样是 `message.cancelled`。
-- **不记的：** 网关之前就被拒绝的请求不记：没带密钥的 401、地区门禁的 403、会话不存在的 404、等级超限的 422 `no_eligible_model`、实例满了的 429。这些请求没有内容到达模型，请求日志里有它们。调用方代码写错、网关抛 `IllegalArgumentException` 的也不记。
+- **不记的：** 网关之前就被拒绝的请求不记：没带密钥的 401、地区门禁的 403、会话不存在的 404、等级超限的 422 `no_eligible_model`、实例满了的 429。预算花完的 402（M3-6-2）也不记：网关在检查这句话之前就拒绝了。这些请求没有内容到达模型，请求日志里有它们。调用方代码写错、网关抛 `IllegalArgumentException` 的也不记。
 - **只追加：** `engine_app` 对这张表只有读和新增的权限，改、删、清空、`INSERT ... ON CONFLICT DO UPDATE`、`MERGE`、加锁读（`FOR UPDATE`、`FOR SHARE`）都没有权限；关行级安全、删约束、删策略、删表要表的所有者才行。表的所有者是 `migrate` 用的 `engine_owner`，运行时不用（蓝图 7.6）。`DatabaseAuditTest` 逐项试过，都被拒绝。
 - **对不上就不收：** 表的约束按事件检查字段：`input_blocked` 要有规则名、不能有调用的字段；调用的事件要有消息号、等级、模型和提示词，只有 `output_blocked` 带规则名。代码写错的记录进不去，`model_called` 进不去就不调模型。
 - **查看（M3-5-2）：** 先只给 `admin` 查（M3 第 6 项）：`admin audit --tenant=<租户号> [--from=<时间>] [--to=<时间>]`，一条一行 JSON，见[开通租户](#开通租户)。引擎里读审计的接口是 `AuditTrail`，只有 `admin` 用；网关只拿到记的那一半 `Audit`。
@@ -559,7 +579,18 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 - **费用怎么算：** 模型报的输入、输出词元数，乘注册表里每百万词元的价格，单位是美元（M3-6 第 1 项）。用 `BigDecimal` 精确地算，不舍入；表里的 `cost_usd` 是不限小数位的 `numeric`，所以把很多次调用加起来，就是它们实际的花费，不会有舍入误差。jp 的模拟模型价格是 0，所以费用都是 0。
 - **记不下时：** 和审计的结束记录一样，网关记一行 ERROR，带上这条用量的全部字段，回答照旧。
 - **只追加：** `engine_app` 对这张表只有读和新增的权限，改、删、清空、加锁读都没有权限。`DatabaseMeteringTest` 逐项试过。
-- **以后：** 每个租户每月的预算上限（M3-6-2），每个租户的并发上限（M3-6-3），`GET /v1/usage`（M3-6-4）。
+
+**预算（M3-6-2）：** 每个租户每月调用模型最多花一个上限的美元（蓝图 7.4），超了就在调模型之前拒绝。
+
+- **公开接口：** `aie.core.metering.api.Budgets`：`standing(租户)` 说这个租户本月的情况（月份、上限、上限是不是它自己的、已经花了多少），`set(租户, 上限)` 设它自己的上限。实现是 `DatabaseBudgets`。
+- **上限：** 表 `metering_budgets` 一个租户一行，存它自己的上限（`monthly_limit_usd`，不限小数位，0 或更大）。没有这一行的租户用单元的默认值 `ENGINE_DEFAULT_MONTHLY_BUDGET_USD`，见[启动](#启动)（M3-6 第 4 项）。用 `admin set-budget` 设置或修改，见[开通租户](#开通租户)。`engine_app` 能读、新增和修改，不能删除；删除要等删除租户时一起做。
+- **花了多少：** 这个租户本月 `metering_usage` 的费用加起来，精确到最后一位。“本月”按区域包的时区算（`policy.yaml` 的 `time_zone`，M3-6 第 2 项）：jp 从东京时间每月 1 日 0 点（UTC 前一天 15:00）起，到下个月 1 日 0 点之前。上限和花了多少在同一个短事务里读。`metering_usage` 上有按租户和时间排的索引（`V2__create_budgets.sql`）。
+- **什么时候查：** 网关的 `checkInput` 最先查，在输入检查之前，也在存任何东西之前。已经花的钱小于上限才放行；正好花到上限也算花完了，上限是 0 就一次都不能调。花完了就回 `OverBudget`，这句话不检查、不审计、不计量，日志里记一行 INFO，写明租户、已花的钱、上限和月份，不写原文。
+- **正在进行的调用：** 照常做完（M3-6 第 3 项）。用量要到调用结束才知道，所以只在开始前查；月底最多超出一点，超出多少受并发上限约束。
+- **绕不过去：** 调模型要网关检查输入时给的回执，预算就在这一步，所以以后的模块也绕不过去（`T-4`）。
+- **发消息时：** 402 `budget_exceeded`，什么都不存，流式请求在流开始前就回答，见“会话”里的发消息。
+- **查不了时：** 读预算出错（比如数据库出错），这次提问就失败，不调模型，回答 500。
+- **以后：** 每个租户的并发上限（M3-6-3），`GET /v1/usage`（M3-6-4）。按终端用户、按应用的预算，快用完时的提醒，都不在 M3-6 里。
 
 ## 会话
 
@@ -664,10 +695,11 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
   - 输入检查拦下了这句话（M3-4-1）：422 `input_blocked`，什么都不存，水位也不动。`detail` 写明拦下它的规则名，不带原文，比如 `The input check blocked the text by its rule instruction_override, so nothing was sent or stored`。用户看到什么由产品层按 `code` 决定。检查在找会话之后（M3-5-1，审计要记下会话的终端用户）：往不存在的会话或者别人的会话里发，不管写的是什么，都是 404，不做检查，也不记审计。M3-4-1 到 M3-5-1 之间，用服务端密钥往不存在的会话里发这样的话是 422。带同一个 `Idempotency-Key` 重试，拿到同样的 422（失败也原样重放），换个说法要换新键。
   - 没有模型收得了这次调用的等级（M3-3-2）：422 `no_eligible_model`，什么都不存。`detail` 写明这次调用的等级和模型最高收到哪一级，比如 `The call's data is sensitive, but the models that may answer it take data up to internal, so nothing was sent or stored`。这两个等级只取决于调用方自己的应用和会话。现在 jp 区域包只有 `fake`，它收得了 `sensitive`，所以 jp 上不会出现这个 422。
   - 这个部署不开放 `customer_chat`（M3-4-4，见“信任层”的地区门禁）：403 `forbidden`，在数据等级之前，什么都不存。
+  - 租户本月的预算已经花完（M3-6-2，见“计量”里的预算）：402 `budget_exceeded`，什么都不存，不带 `Retry-After`：这个月重试没有用，产品层决定怎么办，比如转留言（蓝图 6.10）。`detail` 不写金额，因为浏览器也读得到：`The tenant has spent its budget for this month, so nothing was sent or stored`。服务端密钥和浏览器的令牌都一样。预算在输入检查之前查，所以花完以后，不管写的是什么都是 402。带同一个 `Idempotency-Key` 重试，拿到同样的 402（失败也原样重放），提高上限以后也一样，要换新键。
   - 实例满了（同时 64 个回答）：429 `rate_limited`，带 `Retry-After: 5`，什么都不存。因为 429 不占用 `Idempotency-Key`，等过 `Retry-After` 可以用同一个键再发。
   - **流式：** `Accept` 里写明 `text/event-stream`（权重大于 0）就发流，即使同时也写了 JSON；只写 `*/*`、`application/json` 或不带 `Accept` 的拿 JSON。只写 `text/*` 这类既不是 JSON、也没写明流的，回答 406 `invalid_request`，在存任何东西之前。
     - 流从第 1 个事件 `message.started` 一直发到结束事件，用下面的事件流，回答的 `Content-Type` 是 `text/event-stream`，带 `Cache-Control: no-cache` 和 `X-Accel-Buffering: no`，免得代理把流攒着不发。
-    - 检查不过的（400、404、422、429）在流开始前回答普通的 problem。流开始后回答本身出错，是日志里的 `error` 事件；读日志出错，按第 34 点切断连接，不编造结束事件。
+    - 检查不过的（400、402、404、422、429）在流开始前回答普通的 problem。流开始后回答本身出错，是日志里的 `error` 事件；读日志出错，按第 34 点切断连接，不编造结束事件。
     - 流式请求也收 `Idempotency-Key`（M2-10-2）：回答一建好、第一个事件发出之前，键就记下这条回答的消息号。带同一个键重试，不会再生成一次，而是从这条回答的第 1 个事件重发：还在生成就接着收，已经结束就重放到结束事件，落到哪个实例都一样。同一个键既用来要流、又用来要 JSON，算不同的请求，回答 422 `idempotency_key_reused`。
   - 带同一个 `Idempotency-Key` 重试，拿到同样的回答，不会再生成一次。要 JSON 的请求还在生成时重试，回答 409 `idempotency_key_in_use`；要流的请求重试时接上同一个流，见上面的流式。
   - 等回答的一方断开，不影响生成。api 停机时，正在生成的回答按“生成”里说的处理；等着的调用拿到回答收尾以后的样子：10 秒内写完的是完整回答，被停下的是 `failed`、`stream_interrupted` 和已经写下的文字（第 39 点）。
@@ -922,6 +954,7 @@ const answer = await fetch("https://引擎地址/v1/anonymous-sessions", {
 | 请求格式不对：参数、JSON、方法、媒体类型、请求体太大 | 400、405、406、413、415 | `invalid_request` |
 | 同一个 `Idempotency-Key` 的请求还在处理 | 409 | `idempotency_key_in_use` |
 | 同一个 `Idempotency-Key` 配了不同的请求 | 422 | `idempotency_key_reused` |
+| 租户本月的预算已经花完（M3-6-2） | 402 | `budget_exceeded` |
 | 输入检查拦下了用户说的话（M3-4-1） | 422 | `input_blocked` |
 | 没有模型收得了这次调用的数据等级 | 422 | `no_eligible_model` |
 | 实例同时生成的回答已满 | 429 | `rate_limited`，带 `Retry-After` |

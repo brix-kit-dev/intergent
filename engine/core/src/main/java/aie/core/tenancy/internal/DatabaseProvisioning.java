@@ -51,6 +51,12 @@ public final class DatabaseProvisioning implements Provisioning {
         return applicationId;
     }
 
+    /** The same count as {@link #createApplication}: row-level security shows the tenant only its own row. */
+    @Override
+    public boolean hasTenant(String tenantId) {
+        return database.inTenantTx(tenantId, tx -> tx.query(TENANT_EXISTS, row -> row.number("found")).get(0) > 0);
+    }
+
     /** Row-level security hides the applications of other tenants, so one of them reads as missing. */
     @Override
     public IssuedKey createKey(String tenantId, String applicationId) {

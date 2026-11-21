@@ -2,6 +2,8 @@ package aie.app;
 
 import aie.core.gateway.api.Gateway;
 import aie.core.gateway.internal.Prompt;
+import aie.core.metering.api.Budgets;
+import aie.core.metering.internal.DatabaseBudgets;
 import aie.core.tenancy.api.ApiKeyLookup;
 import aie.core.tenancy.api.ApiKeyLookup.Owner;
 import aie.core.tenancy.api.ApiKeyManagement;
@@ -22,9 +24,12 @@ import aie.modules.conversation.api.Answers;
 import aie.modules.conversation.api.Conversations;
 import aie.modules.conversation.api.EventSignals;
 import aie.modules.conversation.api.Messages;
+import aie.ports.DatabasePort;
+import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.YearMonth;
 import java.time.ZoneOffset;
 import java.util.Arrays;
 import java.util.Base64;
@@ -68,6 +73,27 @@ final class TestApi {
 
     /** The region pack for tests that start the real api role, which needs one (M3-1). */
     static final String REGION_SETTING = "--deploy.region=jp";
+    /** The cell's default monthly budget in tests (M3-6-2), in US dollars: more than any test spends. */
+    static final BigDecimal DEFAULT_BUDGET = new BigDecimal("1000");
+    /** The default monthly budget for tests that start the real api role, which needs one (M3-6-2). */
+    static final String BUDGET_SETTING = "--engine.default.monthly.budget.usd=" + DEFAULT_BUDGET.toPlainString();
+    /** Budgets for tests without the metering tables: every tenant is within the default and has spent nothing. */
+    static final Budgets WITHIN_BUDGET = new Budgets() {
+        @Override
+        public Standing standing(String tenantId) {
+            return new Standing(YearMonth.of(2026, 11), DEFAULT_BUDGET, false, BigDecimal.ZERO);
+        }
+
+        @Override
+        public void set(String tenantId, BigDecimal monthlyLimit) {
+            throw new UnsupportedOperationException("No test sets a budget here");
+        }
+    };
+
+    /** The api's budgets on a test's database (M3-6-2): the default above, by the month of the jp pack's time zone. */
+    static Budgets budgets(DatabasePort database) {
+        return new DatabaseBudgets(database, RegionPacks.read("jp").policy().timeZone(), DEFAULT_BUDGET, Clock.systemUTC());
+    }
     /** Real tokens signed with {@link #SESSION_KEY}, which need no database, so a test can check what the api issued. */
     static final SessionTokens SESSION_TOKENS = new SignedSessionTokens(Clock.systemUTC(), SESSION_KEY, List.of());
     /** Well formed, so it passes the format check of a real lookup too. Public, as every site key is. */
@@ -322,7 +348,9 @@ final class TestApi {
             /** No such conversation. */
             MISSING,
             /** The input check blocks what was said, by the rule instruction_override (M3-4-1). */
-            BLOCKED
+            BLOCKED,
+            /** The tenant has spent its monthly budget (M3-6-2). */
+            OVER_BUDGET
         }
 
         /** How a cancel of an answer in progress goes from now on. Each answer ends at most once. */
@@ -416,6 +444,9 @@ final class TestApi {
             }
             if (now == Outcome.BLOCKED) {
                 return new Start.InputBlocked("instruction_override");
+            }
+            if (now == Outcome.OVER_BUDGET) {
+                return new Start.BudgetExceeded();
             }
             DataClass highest = ceiling;
             if (floor.compareTo(highest) > 0) {

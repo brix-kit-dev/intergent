@@ -10,7 +10,9 @@ import aie.core.trust.api.DataClass;
 import java.io.IOException;
 import java.io.InputStream;
 import java.math.BigDecimal;
+import java.time.DateTimeException;
 import java.time.Duration;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumSet;
@@ -40,7 +42,7 @@ import org.yaml.snakeyaml.error.YAMLException;
  *   <li>every route names models of the pack, a time limit and its checks (A-15);
  *   <li>every route names one prompt version for each family of its models, and the jar has its text (M3-2);
  *   <li>the policy offers only tasks the engine has, and the routes are those of the tasks it offers, no more and no
- *       fewer (M3-4-4); ai_disclosure is required or not_required.
+ *       fewer (M3-4-4); ai_disclosure is required or not_required; time_zone is a time zone, such as Asia/Tokyo (M3-6-2).
  * </ul>
  * Each refusal names the file, and the model or the task, so that the operator knows what to fix.
  */
@@ -67,7 +69,7 @@ final class RegionPacks {
     private static final List<String> ROUTE_FIELDS = List.of("models", "timeout_seconds", "checks", "prompts");
     /** A prompt's fields. Only the version so far; a canary goes next to it when one comes (blueprint 8.7). */
     private static final List<String> PROMPT_FIELDS = List.of("version");
-    private static final List<String> POLICY_FIELDS = List.of("tasks", "ai_disclosure");
+    private static final List<String> POLICY_FIELDS = List.of("tasks", "ai_disclosure", "time_zone");
 
     private RegionPacks() {
     }
@@ -160,7 +162,17 @@ final class RegionPacks {
         RegionPack.AiDisclosure aiDisclosure = Arrays.stream(RegionPack.AiDisclosure.values())
                 .filter(value -> value.wireName().equals(disclosure)).findFirst().orElseThrow(() -> new IllegalArgumentException(
                         where + ": ai_disclosure must be required or not_required, not " + disclosure));
-        return new RegionPack.Policy(tasks, aiDisclosure);
+        return new RegionPack.Policy(tasks, aiDisclosure, timeZone(policy.get("time_zone"), where));
+    }
+
+    /** A time zone by its name in the tz database, such as Asia/Tokyo, or by its offset, such as UTC or +09:00. */
+    private static ZoneId timeZone(Object node, String where) {
+        String name = text(node, where + ": time_zone");
+        try {
+            return ZoneId.of(name);
+        } catch (DateTimeException notAZone) {
+            throw new IllegalArgumentException(where + ": time_zone must be a time zone, such as Asia/Tokyo, not " + name);
+        }
     }
 
     /** The one top-level field of a file. Duplicate keys are refused, since YAML would keep the last one silently. */

@@ -28,6 +28,9 @@ public interface Provisioning {
     /** Revokes a site key of the tenant. False when the tenant has no such key, or it was revoked before. */
     boolean revokeSiteKey(String tenantId, String siteKeyId);
 
+    /** Whether the tenant lives in this database, so that a mistyped ID is caught before anything is set for it. */
+    boolean hasTenant(String tenantId);
+
     /** The ID names the key from then on. The key is what the host keeps. */
     record IssuedKey(String keyId, String key) {
     }

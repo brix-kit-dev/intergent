@@ -23,6 +23,9 @@ public interface Gateway {
      * caller. A blocked text is added to the audit, by its rule and never by its words (M3-5-1); one that passes is not, as
      * the entry before its model call tells of it.
      *
+     * <p>The tenant's budget comes first (M3-6-2): once it has spent its monthly limit, no text of it is checked, and the
+     * answer is {@link OverBudget}. Every model call needs a receipt from here, so none goes around the budget (T-4).
+     *
      * @param caller who the text is checked for, as the audit names them
      * @throws IllegalArgumentException for a caller who is missing or not complete, a task that no route answers, or a
      *     text that is missing
@@ -98,8 +101,15 @@ public interface Gateway {
         }
     }
 
-    /** What the input check made of a text (M3-4-1). */
-    sealed interface InputCheck permits Checked, Blocked {
+    /** What the input check made of a text (M3-4-1), or that the tenant may not call a model this month (M3-6-2). */
+    sealed interface InputCheck permits Checked, Blocked, OverBudget {
+    }
+
+    /**
+     * The tenant has spent its monthly budget (M3-6-2), so no model is called for it until the next month or a higher
+     * limit; nothing of the text may be stored or sent. How much it spent is in the log, not here.
+     */
+    record OverBudget() implements InputCheck {
     }
 
     /**

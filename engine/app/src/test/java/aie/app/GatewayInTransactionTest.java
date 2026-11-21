@@ -58,7 +58,7 @@ class GatewayInTransactionTest {
                         DATABASE, "owner_password=" + TestDatabase.OWNER_PASSWORD, "app_password=" + TestDatabase.APP_PASSWORD)
                 .getExitCode()).isZero();
         pool = PgRuntime.pool(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD, 1);
-        gateway = Models.gateway(RegionPacks.read("jp"), (entry, content) -> { }, use -> { }, pool::insideTx);
+        gateway = Models.gateway(RegionPacks.read("jp"), (entry, content) -> { }, use -> { }, TestApi.WITHIN_BUDGET, pool::insideTx);
         hello = (Gateway.Checked) gateway.checkInput(TestApi.CALLER, Answers.TASK, "Hello");
     }
 

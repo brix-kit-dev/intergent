@@ -14,6 +14,7 @@ import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -58,6 +59,7 @@ class RegionPacksTest {
             policy:
               tasks: [customer_chat]
               ai_disclosure: required
+              time_zone: Asia/Tokyo
             """;
 
     @Test
@@ -70,7 +72,8 @@ class RegionPacksTest {
         assertThat(jp.routes()).isEqualTo(Map.of("customer_chat",
                 new Route(List.of("fake"), Duration.ofSeconds(120), CheckMode.SENTENCE, Map.of("fake",
                         new Prompt("customer_chat/fake/v1", Files.readString(PROMPTS.resolve("customer_chat/fake/v1.txt")))))));
-        assertThat(jp.policy()).isEqualTo(new RegionPack.Policy(Set.of("customer_chat"), RegionPack.AiDisclosure.REQUIRED));
+        assertThat(jp.policy()).isEqualTo(new RegionPack.Policy(Set.of("customer_chat"), RegionPack.AiDisclosure.REQUIRED,
+                ZoneId.of("Asia/Tokyo")));
     }
 
     /** R-4 in CI: every pack of the repository passes the checks the api role runs, and the jar carries it unchanged. */
@@ -95,9 +98,14 @@ class RegionPacksTest {
         RegionPack pack = RegionPacks.parse("test", MODELS, ROUTES, POLICY);
 
         assertThat(pack.routes()).containsOnlyKeys("customer_chat");
-        assertThat(pack.policy()).isEqualTo(new RegionPack.Policy(Set.of("customer_chat"), RegionPack.AiDisclosure.REQUIRED));
+        assertThat(pack.policy()).isEqualTo(new RegionPack.Policy(Set.of("customer_chat"), RegionPack.AiDisclosure.REQUIRED,
+                ZoneId.of("Asia/Tokyo")));
         assertThat(RegionPacks.parse("test", MODELS, ROUTES, POLICY.replace("required", "not_required")).policy().aiDisclosure())
                 .isEqualTo(RegionPack.AiDisclosure.NOT_REQUIRED);
+        assertThat(RegionPacks.parse("test", MODELS, ROUTES, POLICY.replace("Asia/Tokyo", "Europe/Berlin")).policy().timeZone())
+                .isEqualTo(ZoneId.of("Europe/Berlin"));
+        assertThat(RegionPacks.parse("test", MODELS, ROUTES, POLICY.replace("Asia/Tokyo", "UTC")).policy().timeZone())
+                .isEqualTo(ZoneId.of("UTC"));
     }
 
     /**
@@ -106,7 +114,8 @@ class RegionPacksTest {
      */
     @Test
     void aPackMayOfferNothing() {
-        RegionPack pack = RegionPacks.parse("test", MODELS, "routes: {}\n", "policy:\n  tasks: []\n  ai_disclosure: not_required\n");
+        RegionPack pack = RegionPacks.parse("test", MODELS, "routes: {}\n",
+                "policy:\n  tasks: []\n  ai_disclosure: not_required\n  time_zone: Asia/Tokyo\n");
 
         assertThat(pack.routes()).isEmpty();
         assertThat(pack.policy().tasks()).isEmpty();
@@ -136,6 +145,14 @@ class RegionPacksTest {
                         policy + ": ai_disclosure must be required or not_required, not true"),
                 arguments(MODELS, ROUTES, POLICY.replace("  ai_disclosure: required\n", ""), policy + ": policy needs the field ai_disclosure"),
                 arguments(MODELS, ROUTES, POLICY.replace("  tasks: [customer_chat]\n", ""), policy + ": policy needs the field tasks"),
+                arguments(MODELS, ROUTES, POLICY.replace("  time_zone: Asia/Tokyo\n", ""), policy + ": policy needs the field time_zone"),
+                arguments(MODELS, ROUTES, POLICY.replace("Asia/Tokyo", "Tokyo"),
+                        policy + ": time_zone must be a time zone, such as Asia/Tokyo, not Tokyo"),
+                arguments(MODELS, ROUTES, POLICY.replace("Asia/Tokyo", "Asia/Tokio"),
+                        policy + ": time_zone must be a time zone, such as Asia/Tokyo, not Asia/Tokio"),
+                arguments(MODELS, ROUTES, POLICY.replace("Asia/Tokyo", "JST"), policy + ": time_zone must be a time zone, such as Asia/Tokyo, not JST"),
+                arguments(MODELS, ROUTES, POLICY.replace("Asia/Tokyo", "9"), policy + ": time_zone must be text, not 9"),
+                arguments(MODELS, ROUTES, POLICY.replace("Asia/Tokyo", "\"\""), policy + ": time_zone must be text, not "),
                 arguments(MODELS, ROUTES, POLICY + "  ai_content_label: required\n", policy + ": policy has the unknown field ai_content_label"),
                 arguments(MODELS, ROUTES, "tasks: [customer_chat]\n", policy + " has the unknown field tasks"),
                 arguments(MODELS, ROUTES.replace("[fake]", "[gpt]"), POLICY,

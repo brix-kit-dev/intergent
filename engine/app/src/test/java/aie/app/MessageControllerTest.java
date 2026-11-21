@@ -222,6 +222,21 @@ class MessageControllerTest {
         assertThat(response.headers().firstValue("Retry-After")).isEmpty();
     }
 
+    /**
+     * M3-6-2: a tenant that has spent its monthly budget gets 402 budget_exceeded, a problem whose detail tells no sum,
+     * since a browser reads it too. Trying again does not help this month, so there is no Retry-After.
+     */
+    @Test
+    void aTenantThatHasSpentItsBudgetIs402BudgetExceeded() throws Exception {
+        ANSWERS.outcome = Outcome.OVER_BUDGET;
+
+        HttpResponse<String> response = send("{\"text\":\"Hi\"}");
+
+        Problem problem = problem(response, 402, "budget_exceeded");
+        assertThat(problem.getDetail()).isEqualTo("The tenant has spent its budget for this month, so nothing was sent or stored");
+        assertThat(response.headers().firstValue("Retry-After")).isEmpty();
+    }
+
     @Test
     void theTextIsRequired() throws Exception {
         assertRefused(send("{}"), "text is required");
@@ -354,6 +369,11 @@ class MessageControllerTest {
         HttpResponse<String> blocked = send("{\"text\":\"Hi\"}", "Accept", "text/event-stream");
         problem(blocked, 422, "input_blocked");
         assertThat(blocked.headers().firstValue("Content-Type")).contains("application/problem+json");
+
+        ANSWERS.outcome = Outcome.OVER_BUDGET;
+        HttpResponse<String> spent = send("{\"text\":\"Hi\"}", "Accept", "text/event-stream");
+        problem(spent, 402, "budget_exceeded");
+        assertThat(spent.headers().firstValue("Content-Type")).contains("application/problem+json");
     }
 
     /**

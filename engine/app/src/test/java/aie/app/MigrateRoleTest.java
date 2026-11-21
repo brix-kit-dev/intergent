@@ -97,12 +97,12 @@ class MigrateRoleTest {
                 .isSortedAccordingTo(Comparator.comparingInt(Integer::parseInt));
     }
 
-    /** M3-6-1: the metering module's usage has a history of its own as well. */
+    /** M3-6-1: the metering module's usage has a history of its own as well, and its budgets (M3-6-2) come next. */
     @Test
     void theMeteringScriptsHaveAHistoryOfTheirOwn() throws SQLException {
         assertThat(TestDatabase.firstColumn(
                         DATABASE, "SELECT version FROM engine.flyway_history_metering WHERE type = 'SQL' ORDER BY installed_rank"))
-                .startsWith("1")
+                .startsWith("1", "2")
                 .isSortedAccordingTo(Comparator.comparingInt(Integer::parseInt));
     }
 

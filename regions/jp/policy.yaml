@@ -6,6 +6,9 @@
 # ai_disclosure  whether an answer must say that an AI wrote it: required or not_required. Kept here, and checked for its
 #                form; the engine acts on it once an operation needs it. Revisit with the platform plan's compliance
 #                findings (P-1).
+# time_zone      the region's time zone, by its name in the tz database: a tenant's monthly budget starts again on the
+#                first of each month at midnight here (M3-6-2)
 policy:
   tasks: [customer_chat]
   ai_disclosure: required
+  time_zone: Asia/Tokyo

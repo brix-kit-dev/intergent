@@ -110,7 +110,7 @@ class LeaseRenewalsTest {
     /** The real gateway with a stub model, on a route that checks the input alone, so each piece goes out as written. */
     private static Gateway stub(ModelPort model) {
         return new RoutingGateway(Map.of("stub", new RoutingGateway.Model(model, DataClass.SENSITIVE, ModelSpec.Price.FREE)),
-                Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), CheckMode.INPUT, TestApi.prompts(List.of("stub")))), Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), new DatabaseMetering(pool), pool::insideTx);
+                Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), CheckMode.INPUT, TestApi.prompts(List.of("stub")))), Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), new DatabaseMetering(pool), TestApi.budgets(pool), pool::insideTx);
     }
 
     /** Renewals every 200 ms, and room for a few answers. */

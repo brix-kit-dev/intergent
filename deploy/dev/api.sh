@@ -18,5 +18,8 @@ ENGINE_AUDIT_MASTER_KEY=$(sed -n 's/^ENGINE_AUDIT_MASTER_KEY=//p' .env)
 export ENGINE_AUDIT_MASTER_KEY
 # The region pack the api loads. The dev server is no cell; it runs the pack of jp-general, the first cell.
 export DEPLOY_REGION=jp
+# What a tenant without a budget of its own may spend on models each month, in US dollars (M3-6-2). admin.sh gives the
+# same, so that both tell the same limit. jp's fake model is free, so the dev server never spends it.
+export ENGINE_DEFAULT_MONTHLY_BUDGET_USD="${ENGINE_DEFAULT_MONTHLY_BUDGET_USD:-100}"
 
 exec java -jar ../../engine/app/target/engine.jar --role=api "$@"

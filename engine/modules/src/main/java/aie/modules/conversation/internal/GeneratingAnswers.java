@@ -125,8 +125,9 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
      * back when the answer ends. Starting the thread fails only after {@link #close} has given up waiting; then the
      * answer stays in progress until a reader ends it. The conversation is looked up next, so that the gateway knows the
      * end user it checks for and its audit can name them (M3-5-1); a conversation out of reach is NotFound, and its text
-     * is not checked. The gateway checks what the end user said before anything is stored, outside any transaction, and
-     * its receipt goes with the answer, so the text is checked once (M3-4-1). The class the check found raises the floor,
+     * is not checked. The gateway checks the tenant's monthly budget and what the end user said before anything is
+     * stored, outside any transaction, so a tenant that has spent its budget stores nothing (M3-6-2), and its receipt
+     * goes with the answer, so the text is checked once (M3-4-1). The class the check found raises the floor,
      * such as personal for a telephone number (M3-4-2). The storage measures the call's class against the gateway's
      * ceiling for the task while it holds the conversation's turn, so a call no model takes stores nothing.
      */
@@ -150,6 +151,10 @@ public final class GeneratingAnswers implements Answers, AutoCloseable {
                 case Gateway.Blocked blocked -> {
                     slots.release();
                     return new Start.InputBlocked(blocked.rule());
+                }
+                case Gateway.OverBudget spent -> {
+                    slots.release();
+                    return new Start.BudgetExceeded();
                 }
             }
             DataClass ceiling = gateway.ceiling(TASK);

@@ -4,6 +4,7 @@ import aie.adapters.secretsenv.EnvironmentSecrets;
 import aie.adapters.storepg.PgPool;
 import aie.adapters.storepg.PgRuntime;
 import aie.core.gateway.api.Gateway;
+import aie.core.metering.internal.DatabaseBudgets;
 import aie.core.metering.internal.DatabaseMetering;
 import aie.core.tenancy.api.ApiKeyLookup;
 import aie.core.tenancy.api.ApiKeyManagement;
@@ -31,6 +32,7 @@ import aie.modules.conversation.internal.DatabaseMessages;
 import aie.modules.conversation.internal.GeneratingAnswers;
 import aie.modules.conversation.internal.LocalEventSignals;
 import aie.ports.DatabaseException;
+import java.math.BigDecimal;
 import java.time.Clock;
 import java.util.function.Consumer;
 import org.springframework.boot.WebApplicationType;
@@ -59,9 +61,10 @@ class ApiRole {
     }
 
     /**
-     * The session keys, the audit's master key (M3-5-3), the stream limit and the region pack are checked before the pool
-     * opens, so a missing or weak key, a limit that is no number, or a pack that is missing or does not pass its checks
-     * (M3-1) never gets as far as the database.
+     * The session keys, the audit's master key (M3-5-3), the default monthly budget (M3-6-2), the stream limit and the
+     * region pack are checked before the pool opens, so a missing or weak key, a budget or a limit that is no number, or a
+     * pack that is missing or does not pass its checks (M3-1) never gets as far as the database. The budget's month is
+     * that of the pack's time zone.
      * The pool runs the self-check of blueprint 7.6 before its first connection, so a role that may not serve traffic
      * never opens a port. The gateway comes next, because it asks the pool whether a call comes from inside a
      * transaction (A-14) and adds its audit's entries and its metering there (M3-5-1, M3-6-1); a route to a model that
@@ -78,12 +81,13 @@ class ApiRole {
         String password = settings.required(RoleSettings.APP_PASSWORD);
         SessionTokens sessionTokens = SessionKeys.tokens(settings, Clock.systemUTC());
         byte[] auditMasterKey = AuditKeys.masterKey(new EnvironmentSecrets(settings::optional));
+        BigDecimal defaultBudget = MonthlyBudgets.defaultLimit(settings);
         StreamLimit streamLimit = streamLimit(settings);
         RegionPack pack = RegionPacks.read(settings.required(RegionPacks.SETTING));
         PgPool database = PgRuntime.pool(address, password, POOL_SIZE);
         try {
             Gateway gateway = Models.gateway(pack, new DatabaseAudit(database, auditMasterKey), new DatabaseMetering(database),
-                    database::insideTx);
+                    new DatabaseBudgets(database, pack.policy().timeZone(), defaultBudget, Clock.systemUTC()), database::insideTx);
             return serve(context -> {
                 context.registerBean(PgPool.class, () -> database);
                 context.registerBean(ApiKeyLookup.class, () -> new DatabaseApiKeyLookup(database));

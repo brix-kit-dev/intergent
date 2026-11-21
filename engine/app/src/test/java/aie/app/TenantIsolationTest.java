@@ -90,6 +90,9 @@ class TenantIsolationTest {
                         output_tokens, cost_usd)
                     VALUES ('use_{tenant}', '{tenant}', 'app_{tenant}', 'msg_{tenant}', 'customer_chat', 'fake', 5, 2, 0.000045)
                     """),
+            Sample.keptAndChanged("metering_budgets", """
+                    INSERT INTO metering_budgets (tenant_id, monthly_limit_usd) VALUES ('{tenant}', 100)
+                    """),
             Sample.appendOnly("trust_tenant_keys", """
                     INSERT INTO trust_tenant_keys (key_id, tenant_id, master_key_id, wrapped)
                     VALUES ('tk_{tenant}', '{tenant}', '0123456789abcdef', repeat('A', 80))

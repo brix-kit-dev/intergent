@@ -3,6 +3,7 @@ package aie.core.gateway.internal;
 import aie.core.LogContext;
 import aie.core.gateway.api.Gateway;
 import aie.core.gateway.api.ModelSpec;
+import aie.core.metering.api.Budgets;
 import aie.core.metering.api.Metering;
 import aie.core.trust.api.Audit;
 import aie.core.trust.api.Checks;
@@ -34,7 +35,8 @@ import org.slf4j.MDC;
  * context, so an entry and its request's log lines share it. The entry before a call is given the question as it was
  * checked, and the one at its end what the caller got of the answer, for the audit to keep the HMAC of when the call is
  * sensitive (M3-5-3); neither goes to the log. Each call's end is metered too: the tokens the model reports and what they
- * cost by the model's price in the registry (M3-6-1). Fallback, retries and budgets are not here yet.
+ * cost by the model's price in the registry (M3-6-1). A tenant that has spent its monthly budget gets no receipt, so no
+ * model call (M3-6-2). Fallback and retries are not here yet.
  */
 public final class RoutingGateway implements Gateway {
 
@@ -47,6 +49,7 @@ public final class RoutingGateway implements Gateway {
     private final Checks checks;
     private final Audit audit;
     private final Metering metering;
+    private final Budgets budgets;
     private final BooleanSupplier insideTx;
 
     /**
@@ -55,15 +58,17 @@ public final class RoutingGateway implements Gateway {
      * @param checks the trust layer's checks on the way to the model and back (A-15)
      * @param audit the trust layer's audit, which gets an entry before every model call (blueprint 9.4)
      * @param metering where each model call's use is recorded at its end (M3-6-1)
+     * @param budgets where each tenant's monthly budget is asked before its text is checked (M3-6-2)
      * @param insideTx whether the calling thread is inside a database transaction, asked on every call; the role passes
      *     {@link aie.ports.DatabasePort#insideTx} of its pool
      * @throws IllegalArgumentException for a route to a model that is not in the registry
      */
     public RoutingGateway(Map<String, Model> models, Map<String, Route> routes, Checks checks, Audit audit, Metering metering,
-            BooleanSupplier insideTx) {
+            Budgets budgets, BooleanSupplier insideTx) {
         Objects.requireNonNull(checks, "A gateway calls no model without the trust layer's checks (A-15)");
         Objects.requireNonNull(audit, "A gateway calls no model without the trust layer's audit (blueprint 9.4)");
         Objects.requireNonNull(metering, "A gateway calls no model without metering (M3-6-1)");
+        Objects.requireNonNull(budgets, "A gateway calls no model without budgets (M3-6-2, T-4)");
         Objects.requireNonNull(insideTx, "A gateway needs to know whether a call comes from inside a transaction");
         routes.forEach((task, route) -> route.models().forEach(model -> {
             if (!models.containsKey(model)) {
@@ -80,12 +85,15 @@ public final class RoutingGateway implements Gateway {
         this.checks = checks;
         this.audit = audit;
         this.metering = metering;
+        this.budgets = budgets;
         this.insideTx = insideTx;
     }
 
     /**
-     * Refuses a call from inside a transaction first, because a check may come to call a service. A blocked text is noted
-     * in the log by its rule and task, never by its words, and so is it in the audit.
+     * Refuses a call from inside a transaction first, because a check may come to call a service. The tenant's budget
+     * comes before the text, so a tenant that has spent it gets no check of its text either; that is noted in the log, by
+     * the tenant, the month and the sums. A blocked text is noted in the log by its rule and task, never by its words, and
+     * so is it in the audit.
      */
     @Override
     public InputCheck checkInput(Caller caller, String task, String text) {
@@ -100,6 +108,12 @@ public final class RoutingGateway implements Gateway {
         }
         if (text == null) {
             throw new IllegalArgumentException("The input check needs the text the end user said");
+        }
+        Budgets.Standing standing = budgets.standing(caller.tenantId());
+        if (!standing.allowsACall()) {
+            LOG.info("The tenant {} has spent {} of its monthly budget of {} US dollars in {}, so no model is called for it",
+                    caller.tenantId(), standing.spent().toPlainString(), standing.limit().toPlainString(), standing.month());
+            return new OverBudget();
         }
         return switch (checks.input(task, text)) {
             case Checks.Passed passed -> new Receipt(this, caller, task, text, passed.dataClass());

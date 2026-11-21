@@ -13,6 +13,8 @@ import aie.core.trust.api.DataClass;
 import aie.core.trust.internal.DatabaseAudit;
 import java.io.IOException;
 import java.sql.SQLException;
+import java.time.YearMonth;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -59,6 +61,7 @@ class AdminRoleTest {
     void startEmpty() throws SQLException {
         TestDatabase.asAdmin(DATABASE, "TRUNCATE engine.tenancy_tenants CASCADE");
         TestDatabase.asAdmin(DATABASE, "TRUNCATE engine.trust_audit_records");
+        TestDatabase.asAdmin(DATABASE, "TRUNCATE engine.metering_usage, engine.metering_budgets");
     }
 
     /** The settings a cell gives the role, then the command. A setting given in the command replaces the cell's. */
@@ -67,7 +70,9 @@ class AdminRoleTest {
         for (String setting : List.of(
                 "--engine.database.url=" + DATABASE.getJdbcUrl(),
                 "--engine.app.password=" + TestDatabase.APP_PASSWORD,
-                "--engine.cell.code=jp1")) {
+                "--engine.cell.code=jp1",
+                TestApi.REGION_SETTING,
+                "--engine.default.monthly.budget.usd=100")) {
             String name = setting.substring(0, setting.indexOf('=') + 1);
             if (Arrays.stream(more).noneMatch(arg -> arg.startsWith(name))) {
                 args.add(setting);
@@ -607,5 +612,151 @@ class AdminRoleTest {
 
         assertThat(output.getErr()).containsAnyOf("audit needs --tenant.", "audit does not take --application.",
                 "audit does not take --since.");
+    }
+
+    /** This month in the jp pack's time zone, before and after a command ran, so that a month that ends meanwhile still matches. */
+    private static List<String> months(Runnable command) {
+        ZoneId zone = RegionPacks.read("jp").policy().timeZone();
+        String before = YearMonth.now(zone).toString();
+        command.run();
+        return List.of(before, YearMonth.now(zone).toString());
+    }
+
+    /** Where the tenant stands as one line of JSON, as budget and set-budget print it, in one of these months. */
+    private static String standing(String tenant, List<String> months, String line, String limit, boolean own, String spent) {
+        String month = months.stream().filter(line::contains).findFirst().orElse(months.getFirst());
+        return "{\"tenant_id\":\"" + tenant + "\",\"month\":\"" + month + "\",\"monthly_limit_usd\":\"" + limit
+                + "\",\"own_limit\":" + own + ",\"spent_usd\":\"" + spent + "\"}";
+    }
+
+    /** Adds a use of the tenant now, as the superuser. */
+    private static void used(String tenant, String useId, String cost) throws SQLException {
+        TestDatabase.asAdmin(DATABASE, """
+                INSERT INTO engine.metering_usage (use_id, tenant_id, application_id, message_id, task, model, input_tokens,
+                    output_tokens, cost_usd)
+                VALUES ('%s', '%s', 'app_a', 'msg_a', 'customer_chat', 'fake', 1, 1, %s)
+                """.formatted(useId, tenant, cost));
+    }
+
+    /** Adds a use of the tenant at this time, as the superuser, so its time is the test's. */
+    private static void usedAt(String tenant, String useId, String cost, java.time.Instant time) throws SQLException {
+        TestDatabase.asAdmin(DATABASE, """
+                INSERT INTO engine.metering_usage (use_id, tenant_id, application_id, message_id, task, model, input_tokens,
+                    output_tokens, cost_usd, created_at)
+                VALUES ('%s', '%s', 'app_a', 'msg_a', 'customer_chat', 'fake', 1, 1, %s, '%s')
+                """.formatted(useId, tenant, cost, time));
+    }
+
+    /**
+     * M3-6-2: budget prints where a tenant stands this month, as one line of JSON and nothing else: the month of the
+     * region pack's time zone, the cell's default limit while the tenant has none of its own, and the exact sum of what
+     * it spent from the month's first instant in that time zone on, midnight in Tokyo for jp. Another tenant's uses are
+     * not its own.
+     */
+    @Test
+    void budgetPrintsWhereATenantStandsThisMonthOneLineOfJson(CapturedOutput output) throws SQLException {
+        String tenant = created(output, "create-tenant");
+        String other = created(output, "create-tenant");
+        ZoneId zone = RegionPacks.read("jp").policy().timeZone();
+        java.time.Instant start = YearMonth.now(zone).atDay(1).atStartOfDay(zone).toInstant();
+        used(tenant, "use_1", "0.012207");
+        used(tenant, "use_2", "0.000000375");
+        usedAt(tenant, "use_start", "0.5", start);
+        usedAt(tenant, "use_before", "1000", start.minusNanos(1000));
+        used(other, "use_3", "7");
+        int from = output.getOut().length();
+
+        List<String> months = months(() -> assertThat(admin("budget", "--tenant=" + tenant)).isZero());
+
+        List<String> lines = printed(output, from);
+        assertThat(lines).hasSize(1);
+        assertThat(lines.getFirst()).isEqualTo(standing(tenant, months, lines.getFirst(), "100", false, "0.512207375"));
+    }
+
+    /**
+     * M3-6-2: set-budget sets the tenant's own monthly limit, exactly as written, and prints where the tenant stands then,
+     * as budget does; setting it again changes it. Every other tenant keeps the default.
+     */
+    @Test
+    void setBudgetSetsATenantsOwnLimitAndPrintsWhereItStands(CapturedOutput output) throws SQLException {
+        String tenant = created(output, "create-tenant");
+        String other = created(output, "create-tenant");
+        used(tenant, "use_1", "12.5");
+        int from = output.getOut().length();
+
+        List<String> set = months(() -> assertThat(admin("set-budget", "--tenant=" + tenant, "--monthly=12.50")).isZero());
+        List<String> changed = months(() -> assertThat(admin("set-budget", "--tenant=" + tenant, "--monthly=0030.000001")).isZero());
+        List<String> read = months(() -> assertThat(admin("budget", "--tenant=" + tenant)).isZero());
+        List<String> others = months(() -> assertThat(admin("budget", "--tenant=" + other)).isZero());
+
+        List<String> lines = printed(output, from);
+        assertThat(lines).hasSize(4);
+        assertThat(lines.get(0)).isEqualTo(standing(tenant, set, lines.get(0), "12.50", true, "12.5"));
+        assertThat(lines.get(1)).isEqualTo(standing(tenant, changed, lines.get(1), "30.000001", true, "12.5"));
+        assertThat(lines.get(2)).isEqualTo(standing(tenant, read, lines.get(2), "30.000001", true, "12.5"));
+        assertThat(lines.get(3)).isEqualTo(standing(other, others, lines.get(3), "100", false, "0"));
+        assertThat(rows("SELECT tenant_id || ' ' || monthly_limit_usd FROM engine.metering_budgets")).containsExactly(tenant + " 30.000001");
+    }
+
+    /** M3-6-2: a budget is set and read for a tenant of this database only, so a mistyped ID sets nothing and prints nothing. */
+    @Test
+    void aBudgetNeedsAnExistingTenant(CapturedOutput output) throws SQLException {
+        int from = output.getOut().length();
+
+        assertThat(admin("set-budget", "--tenant=ten_nobody", "--monthly=10")).isEqualTo(EngineApplication.EXIT_FAILED);
+        assertThat(admin("budget", "--tenant=ten_nobody")).isEqualTo(EngineApplication.EXIT_FAILED);
+
+        assertThat(output.getErr()).contains("Admin failed: Tenant ten_nobody does not exist");
+        assertThat(output.getOut().substring(from)).isEmpty();
+        assertThat(rows("SELECT tenant_id FROM engine.metering_budgets")).isEmpty();
+    }
+
+    /**
+     * M3-6-2: a monthly budget is a plain number of US dollars, 0 or more; anything else is a usage error, before the role
+     * connects anywhere: here the address names no database at all.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"-1", "-0.01", "1e3", "12,50", "$5", "5 USD", "USD 5", "lots", ".5", "5.", "+5", "0x10", "５"})
+    void aMonthlyBudgetThatIsNoAmountIsAUsageError(String amount, CapturedOutput output) {
+        int from = output.getOut().length();
+
+        assertThat(admin("set-budget", "--tenant=ten_x", "--monthly=" + amount, "--engine.database.url=jdbc:postgresql://127.0.0.1:1/none"))
+                .isEqualTo(EngineApplication.EXIT_USAGE);
+
+        assertThat(output.getErr()).contains("--monthly must be a number of US dollars such as 100 or 12.50, not " + amount.strip(),
+                "set-budget --tenant=<tenant id> --monthly=<US dollars>");
+        assertThat(output.getOut().substring(from)).isEmpty();
+    }
+
+    /**
+     * M3-6-2: a budget command tells the month and the limit as the api does, so it needs the region pack and the cell's
+     * default monthly budget, and refuses without them before it connects anywhere.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"--deploy.region=", "--deploy.region=xx", "--engine.default.monthly.budget.usd=",
+        "--engine.default.monthly.budget.usd=lots", "--engine.default.monthly.budget.usd=-5"})
+    void aBudgetCommandNeedsTheRegionPackAndTheDefault(String setting, CapturedOutput output) {
+        int from = output.getOut().length();
+
+        assertThat(admin("budget", "--tenant=ten_x", setting, "--engine.database.url=jdbc:postgresql://127.0.0.1:1/none"))
+                .isEqualTo(EngineApplication.EXIT_FAILED);
+
+        assertThat(output.getErr()).containsAnyOf("Admin failed: DEPLOY_REGION is required", "Admin failed: There is no region pack xx",
+                "Admin failed: ENGINE_DEFAULT_MONTHLY_BUDGET_USD is required",
+                "Admin failed: ENGINE_DEFAULT_MONTHLY_BUDGET_USD must be a number of US dollars such as 100 or 12.50, not lots",
+                "Admin failed: ENGINE_DEFAULT_MONTHLY_BUDGET_USD must be a number of US dollars such as 100 or 12.50, not -5");
+        assertThat(output.getErr()).doesNotContain("Connection", "127.0.0.1");
+        assertThat(output.getOut().substring(from)).isEmpty();
+    }
+
+    /** M3-6-2: set-budget needs the tenant and the amount, budget only the tenant, and neither takes another option. */
+    @ParameterizedTest
+    @ValueSource(strings = {"set-budget", "set-budget --tenant=ten_x", "set-budget --monthly=5", "budget", "budget --tenant=ten_x --monthly=5",
+        "set-budget --tenant=ten_x --monthly=5 --application=app_a"})
+    void theBudgetCommandsNeedTheirOptionsAndTakeNoOthers(String words, CapturedOutput output) {
+        assertThat(admin(words.split(" "))).isEqualTo(EngineApplication.EXIT_USAGE);
+
+        assertThat(output.getErr()).containsAnyOf("set-budget needs --tenant.", "set-budget needs --monthly.", "budget needs --tenant.",
+                "budget does not take --monthly.", "set-budget does not take --application.");
     }
 }
