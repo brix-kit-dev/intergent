@@ -5,7 +5,7 @@ import aie.core.tenancy.api.Provisioning;
 import aie.core.tenancy.internal.DatabaseProvisioning;
 import aie.core.trust.api.Audit;
 import aie.core.trust.api.AuditTrail;
-import aie.core.trust.internal.DatabaseAudit;
+import aie.core.trust.internal.DatabaseAuditTrail;
 import aie.http.RequestDateTimes;
 import aie.ports.DatabaseException;
 import aie.ports.DatabasePort;
@@ -77,7 +77,7 @@ final class AdminRole {
             DatabasePort database = PgRuntime.connect(
                     settings.required(RoleSettings.DATABASE_URL), settings.required(RoleSettings.APP_PASSWORD));
             if (window != null) {
-                new DatabaseAudit(database).read(command.option("tenant"), window.from(), window.to(),
+                new DatabaseAuditTrail(database).read(command.option("tenant"), window.from(), window.to(),
                         recorded -> System.out.println(line(recorded)));
                 return 0;
             }
@@ -114,7 +114,8 @@ final class AdminRole {
 
     /**
      * One entry of the audit as one line of JSON (M3-5-2): its fields always in this order, each by its name in the
-     * table, with null for a field it does not have. The time is the database's, in UTC, as RFC 3339.
+     * table, with null for a field it does not have. The time is the database's, in UTC, as RFC 3339. A sensitive entry
+     * has the HMAC of its question or its answer and the key's ID last (M3-5-3).
      */
     static String line(AuditTrail.Recorded recorded) {
         Audit.Entry entry = recorded.entry();
@@ -133,6 +134,9 @@ final class AdminRole {
         line.put("model", entry.model());
         line.put("prompt", entry.prompt());
         line.put("rule", entry.rule());
+        line.put("question_hmac", recorded.questionHmac());
+        line.put("answer_hmac", recorded.answerHmac());
+        line.put("key_id", recorded.keyId());
         return JSON.writeValueAsString(line);
     }
 

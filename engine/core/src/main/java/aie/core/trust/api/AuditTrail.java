@@ -27,7 +27,10 @@ public interface AuditTrail {
      * @param recordId its ID, such as {@code aud_01J...}
      * @param createdAt when the database added it
      * @param entry what it tells
+     * @param questionHmac the HMAC of the question of a sensitive entry before a call, in hex, or null (M3-5-3)
+     * @param answerHmac the HMAC of the answer of a sensitive entry at a call's end, in hex, or null
+     * @param keyId the ID of the tenant's key that made the HMAC, or null without one
      */
-    record Recorded(String recordId, Instant createdAt, Audit.Entry entry) {
+    record Recorded(String recordId, Instant createdAt, Audit.Entry entry, String questionHmac, String answerHmac, String keyId) {
     }
 }

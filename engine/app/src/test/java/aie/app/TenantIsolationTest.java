@@ -85,6 +85,10 @@ class TenantIsolationTest {
                     INSERT INTO conversation_answer_leases (tenant_id, message_id, expires_at)
                     VALUES ('{tenant}', 'msg_{tenant}', now() + interval '30 seconds')
                     """),
+            Sample.appendOnly("trust_tenant_keys", """
+                    INSERT INTO trust_tenant_keys (key_id, tenant_id, master_key_id, wrapped)
+                    VALUES ('tk_{tenant}', '{tenant}', '0123456789abcdef', repeat('A', 80))
+                    """),
             Sample.appendOnly("trust_audit_records", """
                     INSERT INTO trust_audit_records (record_id, tenant_id, application_id, end_user_id, conv_id, task, event,
                         rule)

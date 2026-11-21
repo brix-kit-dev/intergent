@@ -13,6 +13,9 @@ ENGINE_SESSION_PREVIOUS_KEY=$(sed -n 's/^ENGINE_SESSION_PREVIOUS_KEY=//p' .env)
 if [ -n "$ENGINE_SESSION_PREVIOUS_KEY" ]; then
   export ENGINE_SESSION_PREVIOUS_KEY
 fi
+# Wraps each tenant's audit key, which keeps the HMACs of sensitive calls (M3-5-3).
+ENGINE_AUDIT_MASTER_KEY=$(sed -n 's/^ENGINE_AUDIT_MASTER_KEY=//p' .env)
+export ENGINE_AUDIT_MASTER_KEY
 # The region pack the api loads. The dev server is no cell; it runs the pack of jp-general, the first cell.
 export DEPLOY_REGION=jp
 

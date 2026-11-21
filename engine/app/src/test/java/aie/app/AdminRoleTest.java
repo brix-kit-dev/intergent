@@ -508,9 +508,9 @@ class AdminRoleTest {
         blockedAt(tenant, "aud_second", "2026-11-02T09:00:00+09:00");
         blockedAt(other, "aud_other", "2026-11-01T12:00:00Z");
         blockedAt(tenant, "aud_first", "2026-11-01T00:00:00.123456Z");
-        new DatabaseAudit(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD)).add(new Audit.Entry(null, tenant,
-                "app_a", "eu_a", "conv_a", "msg_a", "customer_chat", Audit.Event.OUTPUT_BLOCKED, DataClass.PERSONAL, "fake",
-                "customer_chat/fake/v1", "prompt_leak"));
+        new DatabaseAudit(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD), TestApi.AUDIT_MASTER_KEY).add(new Audit.Entry(null, tenant,
+                "app_a", "eu_a", "conv_a", "msg_a", "customer_chat", Audit.Event.OUTPUT_BLOCKED, DataClass.SENSITIVE, "fake",
+                "customer_chat/fake/v1", "prompt_leak"), new Audit.Content(null, "What went out before the stop"));
         int from = output.getOut().length();
 
         assertThat(admin("audit", "--tenant=" + tenant)).isZero();
@@ -521,19 +521,25 @@ class AdminRoleTest {
                 "{\"record_id\":\"aud_first\",\"created_at\":\"2026-11-01T00:00:00.123456Z\",\"request_id\":\"req_1\",\"tenant_id\":\""
                         + tenant + "\",\"application_id\":\"app_a\",\"end_user_id\":\"eu_a\",\"conversation_id\":\"conv_a\","
                         + "\"message_id\":null,\"task\":\"customer_chat\",\"event\":\"input_blocked\",\"data_class\":null,"
-                        + "\"model\":null,\"prompt\":null,\"rule\":\"instruction_override\"}",
+                        + "\"model\":null,\"prompt\":null,\"rule\":\"instruction_override\",\"question_hmac\":null,"
+                        + "\"answer_hmac\":null,\"key_id\":null}",
                 "{\"record_id\":\"aud_second\",\"created_at\":\"2026-11-02T00:00:00Z\",\"request_id\":\"req_1\",\"tenant_id\":\""
                         + tenant + "\",\"application_id\":\"app_a\",\"end_user_id\":\"eu_a\",\"conversation_id\":\"conv_a\","
                         + "\"message_id\":null,\"task\":\"customer_chat\",\"event\":\"input_blocked\",\"data_class\":null,"
-                        + "\"model\":null,\"prompt\":null,\"rule\":\"instruction_override\"}");
+                        + "\"model\":null,\"prompt\":null,\"rule\":\"instruction_override\",\"question_hmac\":null,"
+                        + "\"answer_hmac\":null,\"key_id\":null}");
         Map<String, Object> last = JsonMapper.builder().build().readValue(lines.get(2), new TypeReference<LinkedHashMap<String, Object>>() {
         });
         assertThat(last.keySet()).containsExactly("record_id", "created_at", "request_id", "tenant_id", "application_id",
-                "end_user_id", "conversation_id", "message_id", "task", "event", "data_class", "model", "prompt", "rule");
+                "end_user_id", "conversation_id", "message_id", "task", "event", "data_class", "model", "prompt", "rule",
+                "question_hmac", "answer_hmac", "key_id");
         assertThat(last.get("record_id").toString()).matches("aud" + AN_ID);
         assertThat(last).containsEntry("request_id", null).containsEntry("message_id", "msg_a")
-                .containsEntry("event", "output_blocked").containsEntry("data_class", "personal").containsEntry("model", "fake")
-                .containsEntry("prompt", "customer_chat/fake/v1").containsEntry("rule", "prompt_leak");
+                .containsEntry("event", "output_blocked").containsEntry("data_class", "sensitive").containsEntry("model", "fake")
+                .containsEntry("prompt", "customer_chat/fake/v1").containsEntry("rule", "prompt_leak").containsEntry("question_hmac", null);
+        assertThat(last.get("answer_hmac").toString()).matches("[0-9a-f]{64}");
+        assertThat(last.get("key_id").toString()).matches("tk" + AN_ID);
+        assertThat(lines.get(2)).doesNotContain("went out");
         assertThat(output.getOut().substring(from)).doesNotContain("aud_other");
     }
 

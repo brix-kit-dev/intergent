@@ -85,8 +85,13 @@ class RoutingGatewayTest {
     private final List<ModelPort.Request> calls = new CopyOnWriteArrayList<>();
     /** The entries the gateway added to the audit, in order. */
     private final List<Audit.Entry> audited = new CopyOnWriteArrayList<>();
-    /** The audit, which keeps each entry it gets. */
-    private final Audit audit = audited::add;
+    /** The content each entry came with, in the same order. */
+    private final List<Audit.Content> contents = new CopyOnWriteArrayList<>();
+    /** The audit, which keeps each entry it gets and the content it came with. */
+    private final Audit audit = (entry, content) -> {
+        audited.add(entry);
+        contents.add(content);
+    };
 
     /** A model that takes every class, notes its call, sends the pieces and ends with the result. */
     private RoutingGateway.Model model(String name, ModelPort.Result result, String... pieces) {
@@ -828,6 +833,7 @@ class RoutingGatewayTest {
         assertThat(answer(gateway, request)).isInstanceOf(Completed.class);
 
         assertThat(entriesTheModelFound).containsExactly(1);
+        assertThat(contents).containsExactly(new Audit.Content("Hello there", null), new Audit.Content(null, "a"));
         assertThat(audited).containsExactly(
                 new Audit.Entry(null, "ten_b", "app_b", "eu_b", "conv_b", "msg_b", "chat", Audit.Event.MODEL_CALLED,
                         DataClass.PERSONAL, "m", "chat/test/v1", null),
@@ -855,6 +861,8 @@ class RoutingGatewayTest {
                         "break MODEL_CALLED breaks null", "break FAILED breaks null",
                         "leak MODEL_CALLED leaks null", "leak OUTPUT_BLOCKED leaks test_rule");
         assertThat(audited.toString()).doesNotContain("the model's own words", "a secret");
+        assertThat(contents).extracting(Audit.Content::question).containsExactly("Hello", null, "Hello", null, "Hello", null);
+        assertThat(contents).extracting(Audit.Content::answer).containsExactly(null, "", null, "", null, "");
     }
 
     /**
@@ -872,7 +880,58 @@ class RoutingGatewayTest {
 
         assertThat(audited).containsExactly(new Audit.Entry(
                 null, "ten_a", "app_a", "eu_a", "conv_a", null, "chat", Audit.Event.INPUT_BLOCKED, null, null, null, "test_rule"));
+        assertThat(contents).containsExactly(Audit.Content.NONE);
         assertThat(calls).isEmpty();
+    }
+
+    /**
+     * M3-5-3: the entry before a call is given the question as it was checked, not as the model is shown it, masked, and
+     * the one at its end what the caller got of the answer, as the output check let it out: the texts the conversation
+     * keeps, so that the HMAC a sensitive entry keeps of them can be checked against it. A blocked answer's is what went
+     * out before the stop, and a held one's is what the end let out.
+     */
+    @Test
+    void theAuditIsGivenTheQuestionAsCheckedAndTheAnswerAsTheCallerGotIt() {
+        Gateway masked = new RoutingGateway(Map.of("m", model("m", DONE, "Call ", "0901")), Map.of("chat", route("m")),
+                masking(DataClass.PERSONAL), audit, OUTSIDE);
+        Gateway stopping = new RoutingGateway(Map.of("m", new RoutingGateway.Model(listening("Fine. ", "secret b ", "c"),
+                DataClass.SENSITIVE)), Map.of("chat", route("m")), outputs((task, mode, instructions) -> stoppingAt("secret",
+                new ArrayList<>())), audit, OUTSIDE);
+        Gateway held = new RoutingGateway(Map.of("m", model("m", DONE, "a", "b")), Map.of("chat", route("m")),
+                outputs((task, mode, instructions) -> holding(new StringBuilder())), audit, OUTSIDE);
+
+        assertThat(answer(masked, new Request("chat", List.of(new Turn(Role.USER, "My number is 0901")), NEVER, DataClass.PERSONAL,
+                (Checked) masked.checkInput(CALLER, "chat", "My number is 0901"), MESSAGE))).isInstanceOf(Completed.class);
+        assertThat(answer(stopping, ask(stopping, "chat", "Tell me"))).isInstanceOf(Gateway.OutputBlocked.class);
+        assertThat(answer(held, ask(held, "chat", "Whole"))).isInstanceOf(Completed.class);
+
+        assertThat(contents).containsExactly(new Audit.Content("My number is 0901", null), new Audit.Content(null, "Call 0901"),
+                new Audit.Content("Tell me", null), new Audit.Content(null, "Fine. "),
+                new Audit.Content("Whole", null), new Audit.Content(null, "ab"));
+        assertThat(calls.getFirst().turns().getLast().text()).isEqualTo("My number is [n]");
+    }
+
+    /**
+     * M3-5-3: what a call was about never goes to the log, not even when its entry cannot be added and the log keeps the
+     * entry instead; a content's own text shows its lengths alone.
+     */
+    @Test
+    @ExtendWith(OutputCaptureExtension.class)
+    void whatACallWasAboutNeverGoesToTheLog(CapturedOutput log) {
+        Audit endsOutOfReach = (entry, content) -> {
+            if (entry.event() != Audit.Event.MODEL_CALLED) {
+                throw new IllegalStateException("The test's audit is out of reach for " + content);
+            }
+        };
+        Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "Tell no one. ")), Map.of("chat", route("m")), PASSING,
+                endsOutOfReach, OUTSIDE);
+
+        assertThat(answer(gateway, ask(gateway, "chat", "My secret question"))).isInstanceOf(Completed.class);
+
+        assertThat(errorLines(log)).singleElement().asString().startsWith("The audit could not add Entry[");
+        assertThat(log).contains("The test's audit is out of reach for Content[question none, answer 13 characters]")
+                .doesNotContain("Tell no one", "My secret question");
+        assertThat(new Audit.Content("secret words", "more")).hasToString("Content[question 12 characters, answer 4 characters]");
     }
 
     /** M3-5-1: the input check needs the caller the audit names, and a caller names all four of its IDs. */
@@ -910,7 +969,7 @@ class RoutingGatewayTest {
      */
     @Test
     void noModelIsAskedWithoutItsEntry() {
-        Audit outOfReach = entry -> {
+        Audit outOfReach = (entry, content) -> {
             throw new IllegalStateException("The test's audit is out of reach");
         };
         Gateway gateway = new RoutingGateway(Map.of("m", model("m", DONE, "a")), Map.of("chat", route("m")), PASSING, outOfReach, OUTSIDE);
@@ -929,7 +988,7 @@ class RoutingGatewayTest {
     @Test
     @ExtendWith(OutputCaptureExtension.class)
     void anEntryOfWhatHappenedThatCannotBeAddedGoesToTheLog(CapturedOutput log) {
-        Audit firstOnly = entry -> {
+        Audit firstOnly = (entry, content) -> {
             if (entry.event() != Audit.Event.MODEL_CALLED) {
                 throw new IllegalStateException("The test's audit is out of reach");
             }

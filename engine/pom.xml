@@ -101,6 +101,11 @@
                 <artifactId>engine-adapter-redaction-rules</artifactId>
                 <version>${project.version}</version>
             </dependency>
+            <dependency>
+                <groupId>aie</groupId>
+                <artifactId>engine-adapter-secrets-env</artifactId>
+                <version>${project.version}</version>
+            </dependency>
         </dependencies>
     </dependencyManagement>
 

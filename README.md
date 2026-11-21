@@ -41,7 +41,7 @@ engine/verify.sh
 deploy/dev/up.sh
 ```
 
-这条命令启动引擎自己的 PostgreSQL，端口是 `127.0.0.1:15432`，容器名 `aie-postgres`，都和 Brix 分开。第一次运行会生成随机密码和会话签名密钥，写在 `deploy/dev/.env`，这个文件不进仓库。以前生成的 `.env` 里没有签名密钥，再运行一次就会补上；已经有的密钥不会被换掉，否则已经发出去的令牌会全部失效。
+这条命令启动引擎自己的 PostgreSQL，端口是 `127.0.0.1:15432`，容器名 `aie-postgres`，都和 Brix 分开。第一次运行会生成随机密码、会话签名密钥和审计主密钥（M3-5-3），写在 `deploy/dev/.env`，这个文件不进仓库。以前生成的 `.env` 里没有这两把密钥，再运行一次就会补上；已经有的密钥不会被换掉：换了签名密钥，已经发出去的令牌会全部失效；换了主密钥，已经有的租户审计密钥一把也打不开。
 
 角色和 schema 来自 [create-roles.sql](deploy/db/create-roles.sql)，按蓝图 7.6 建 `engine_owner`、`engine_app`、`engine_system`。真实单元也用这个脚本。
 
@@ -162,7 +162,7 @@ curl http://127.0.0.1:18080/healthz
 真实单元这样运行：
 
 ```bash
-ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD=... ENGINE_SESSION_KEY=... DEPLOY_REGION=jp java -jar engine.jar --role=api
+ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD=... ENGINE_SESSION_KEY=... ENGINE_AUDIT_MASTER_KEY=... DEPLOY_REGION=jp java -jar engine.jar --role=api
 ```
 
 **区域包：** `DEPLOY_REGION` 是必填项，选这个单元用哪个区域包，见[网关](#网关)里的“区域包”。它没有默认值：漏写的部署直接停下，而不是把数据送到别的区域的模型那里。开发环境里 `api.sh` 填 `jp`。`api` 在连数据库之前就读区域包并检查，没写、写的不是区域名、没有这个区域包、区域包没通过检查，都拒绝启动，退出码 1，并写明原因。
@@ -191,6 +191,14 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 
 有多个 `api` 时，滚动重启的那段时间里，还没重启的实例不认新密钥。要避免这一点，就多加一步：先把新密钥作为 `ENGINE_SESSION_PREVIOUS_KEY` 发给所有实例，等它们都认得以后，再按上面两步切换。
 
+**审计主密钥（M3-5-3）：** `ENGINE_AUDIT_MASTER_KEY` 是必填项。每个租户有一把自己的审计密钥，用来给 `sensitive` 调用的审计记录算 HMAC，见“信任层”的审计；这把主密钥用来把租户密钥加密后存进数据库。它正好是 32 个随机字节，写成 base64，可以用 `openssl rand -base64 32` 生成。
+
+- **经 `SecretPort` 取得：** 端口 `aie.ports.SecretPort` 管引擎从外面拿到的密钥，第一版的适配器 `engine/adapters/secrets-env` 读环境变量（base64）。以后换成 KMS 或 Vault，只换这个适配器。
+- **启动时检查：** 没给、不是 base64、不是 32 个字节，`api` 都拒绝启动，退出码 1，在连数据库之前。报错里写变量名和实际字节数，不写密钥本身。
+- **只有 `api` 要：** `migrate` 和 `admin` 不用它，`admin audit` 只读记录，用不着打开密钥。
+- **开发环境：** 由 `up.sh` 生成，`api.sh` 读出来交给 `api`。
+- **不能随便换：** 租户密钥是用它加密的，换一把主密钥，已经有的租户密钥就打不开了，`sensitive` 调用会因为记不下审计而失败。换主密钥要先把所有租户密钥用新主密钥重新加密一遍，这一步以后和密钥轮换一起做。
+
 **同时开着的事件流（第 40 点）：** 每个 `api` 最多同时开 256 条事件流，用 `ENGINE_STREAMS_MAX` 可以改，必须是 1 到 10000 的整数。这个值也在连数据库之前检查，不合格就拒绝启动，退出码 1，报错里写明变量名和规则。上限的用处见“会话”一节的事件流。
 
 **连接池：** `api` 持有一个连接池，最多 10 条连接。请求跑在虚拟线程上，同时进来的请求再多，数据库连接也不会超过 10 条，多出来的请求排队等空闲连接。租户号只在一个事务里有效，同一条连接上的下一个事务不带租户。`api` 停止时关掉所有连接；启动失败时也一样，比如端口被占用。
@@ -208,7 +216,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 
 | 角色 | 现状 |
 | --- | --- |
-| `api` | 先检查会话签名密钥，再过启动自检、建连接池，然后提供 HTTP 服务，目前有 `/healthz`、新建和吊销密钥 |
+| `api` | 先检查会话签名密钥和审计主密钥，再过启动自检、建连接池，然后提供 HTTP 服务，目前有 `/healthz`、新建和吊销密钥 |
 | `migrate` | 运行数据库迁移，完成后退出 |
 | `admin` | 开通租户和应用，完成后退出，见[开通租户](#开通租户) |
 | `worker` | 还没实现，打印提示后退出 |
@@ -220,7 +228,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 | 退出码 | 含义 |
 | --- | --- |
 | 0 | 正常结束 |
-| 1 | 启动失败，如端口被占用；会话签名密钥不合格；启动自检不通过；迁移失败 |
+| 1 | 启动失败，如端口被占用；会话签名密钥或审计主密钥不合格；启动自检不通过；迁移失败 |
 | 2 | 角色参数不对：没给、给了多个或不认识；`admin` 的命令或选项不对 |
 | 3 | 角色还没实现 |
 | 143 | 收到 SIGTERM，处理完请求后退出 |
@@ -246,7 +254,7 @@ read -r KEY_ID API_KEY <<< "$(deploy/dev/admin.sh create-key --tenant="$TENANT" 
 
 - **输出：** 标准输出只有新 ID，或者读出来的审计记录，脚本可以直接接住。出错写到标准错误，退出码 1；命令或选项写错，退出码 2。
 - **查审计（M3-5-2）：** `audit` 按数据库的时间先后打印租户的审计记录，同一时间的按记录号排，一条一行 JSON，方便用 `jq` 筛选，比如 `deploy/dev/admin.sh audit --tenant="$TENANT" | jq 'select(.event == "input_blocked")'`。审计本身见“信任层”的审计。
-  - **字段：** 每行的字段和顺序都固定：`record_id`、`created_at`、`request_id`、`tenant_id`、`application_id`、`end_user_id`、`conversation_id`、`message_id`、`task`、`event`、`data_class`、`model`、`prompt`、`rule`，没有的写 `null`。`created_at` 是数据库记下的时间，用 UTC，按 RFC 3339 写。表里的会话号一列叫 `conv_id`，输出里叫 `conversation_id`。
+  - **字段：** 每行的字段和顺序都固定：`record_id`、`created_at`、`request_id`、`tenant_id`、`application_id`、`end_user_id`、`conversation_id`、`message_id`、`task`、`event`、`data_class`、`model`、`prompt`、`rule`、`question_hmac`、`answer_hmac`、`key_id`，没有的写 `null`。最后三个只有 `sensitive` 的记录才有（M3-5-3）。`created_at` 是数据库记下的时间，用 UTC，按 RFC 3339 写。表里的会话号一列叫 `conv_id`，输出里叫 `conversation_id`。
   - **时间窗：** 从 `--from` 那一刻起（包括它），到 `--to` 之前（不包括它），都可以不写。时间只认 RFC 3339，和契约读时间一样严格（第 46 点），时区随意，比如 `2026-11-21T09:00:00+09:00`。格式不对，或者 `--to` 不在 `--from` 之后，都算命令写错，退出码 2，这时还没连数据库。
   - **只读这个租户：** 在这个租户的事务里读，行级安全挡住别的租户。租户号写错，或者这段时间没有记录，都什么都不打印，退出码 0。
   - **记录多的时候：** 每次读一页 500 条，一页一个短事务，读完一页才打印这一页，下一页从这一页的最后一条之后接着读。中途出错时，已经打印的留着，退出码 1。表上有按租户、时间和记录号排的索引（`V2__index_audit_records_by_time.sql`）。
@@ -306,7 +314,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 | `engine/core` | 平台核心（L2） | `ports` |
 | `engine/modules` | 能力模块（L3） | `core`、`ports` |
 | `engine/http` | 接口层（L4） | `modules`、`core` |
-| `engine/adapters` | 适配器（L0），每个适配器是它的子模块。现有 `store-postgres`、`model-fake`、`moderation-rules` 和 `redaction-rules` | `ports` |
+| `engine/adapters` | 适配器（L0），每个适配器是它的子模块。现有 `store-postgres`、`model-fake`、`moderation-rules`、`redaction-rules` 和 `secrets-env` | `ports` |
 | `engine/app` | 启动入口 | 引擎内所有层 |
 | `engine/guard` | 架构守卫、依赖检查和契约检查，只在构建时运行 | 不进运行时 |
 
@@ -518,7 +526,17 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 - **每条都有：** 记录号（`aud_` 开头）、时间（数据库的）、请求号、租户、应用、终端用户、会话、任务。会话号的列叫 `conv_id`，不叫 `conversation_id`：`A-4` 的文本检查不许一个模块的 SQL 里出现别的模块前缀开头的词，会话模块的前缀正好是 `conversation_`。
 - **请求号：** 取自记录时线程的日志上下文，和这次请求的日志行、回答里的 `Request-Id` 是同一个号，所以从一条记录能找到请求的日志。回答在自己的线程上生成，也带着提问那次请求的号（第 38 点）。没有请求的调用（以后的后台作业）请求号为空。
 - **谁：** 只记引擎自己的 `end_user_id`，不记宿主给的外部标识（蓝图 7.5）。终端用户被删除后，这个号对不上任何人，审计照样只追加。
-- **不存原文（M3-5 第 3 项）：** 任何等级都不存用户说的话和模型写的话，规则名也不带原文。原文在会话的消息里，按消息的保留和删除规则处理；记录里有会话号和消息号，要原文去那里找。`sensitive` 的 HMAC 到 M3-5-3 才加。
+- **不存原文（M3-5 第 3 项）：** 任何等级都不存用户说的话和模型写的话，规则名也不带原文。原文在会话的消息里，按消息的保留和删除规则处理；记录里有会话号和消息号，要原文去那里找。`sensitive` 的记录多记一个 HMAC，见下面。
+- **`sensitive` 的 HMAC（M3-5-3，蓝图 9.4）：** 这次调用是 `sensitive` 时，`model_called` 多记问题的 HMAC（`question_hmac`），调用结束的那条多记回答的 HMAC（`answer_hmac`），两条都记下算 HMAC 用的租户密钥号（`key_id`）。
+  - **算的是什么：** HMAC-SHA256，输入是标签（`question` 或 `answer`）、一个 NUL 字节和文字，都用 UTF-8，结果写成 64 位小写十六进制。问题是用户的原话，和消息里存的一样；回答是调用方实际拿到的文字，也就是输出检查放出来的那些，和消息里存的一样。被输出检查拦下的回答，算的是拦下之前已经发出去的部分；失败或取消的，算的是到那时为止发出去的部分。有了标签，同样的文字做问题和做回答，HMAC 也不一样。
+  - **为什么不用普通哈希：** 短内容能被字典穷举出来，不同租户的相同内容还能对上。按租户分开的密钥把这两条都挡住了。
+  - **租户密钥：** 每个租户一把 256 位的随机密钥（M3-5 第 1 项），在它第一条 `sensitive` 记录时生成，存在 `trust_tenant_keys` 里。存的是用主密钥 AES-256-GCM 加密后的样子（12 字节随机数、32 字节密文、16 字节校验，base64 共 80 个字符），加密时绑定了租户号和密钥号，挪到别的租户名下就打不开。还记下是哪把主密钥加密的（主密钥 SHA-256 的前 8 个字节，十六进制），对不上就拒绝，不会拿错的主密钥硬解。数据库里没有能直接用的密钥；进程里也只在这一条记录的事务里打开它，用完就不留。
+  - **同时生成：** 一个租户的第一批 `sensitive` 调用同时到来时，也只生成一把：后一个的插入等前一个提交，然后什么都不做，大家读到的都是同一把。
+  - **记不下就不调用：** `sensitive` 的 `model_called` 必须带问题的 HMAC，结束的那条必须带回答的 HMAC，表的约束挡住缺 HMAC 的记录。打不开租户密钥（比如主密钥换了）时，记录也记不下，所以模型不会被调用。M3-5-3 之前的 `sensitive` 记录没有 HMAC，这条约束只管之后新加的。
+  - **只有 `sensitive` 才算：** 别的等级不算 HMAC，也不会因此生成租户密钥。输入被拦的那条没有等级，所以也不算。
+  - **销毁：** 删掉一个租户在 `trust_tenant_keys` 里的那一行，它的密钥就没了，这个租户的 HMAC 从此再也验证不了（蓝图 9.4）。记录本身留着，所以记录到密钥之间故意没有外键。删除这一行和删除租户一起做，`engine_app` 现在对这张表只有读和新增的权限。
+  - **轮换：** 记录里带着密钥号，以后换租户密钥或主密钥时，旧记录不用改。轮换本身以后再做。
+  - **验证：** 要核对一条记录，用主密钥打开那个租户的密钥，按上面的输入重算一遍 HMAC，和记录里的比。引擎现在没有做这件事的命令；`TenantKeyProbe` 是测试里照这个做法写的，用来核对格式。
 - **记不下就不调用（M3-5 第 2 项）：** `model_called` 记不下时，网关抛出异常，不调模型，所以不会有没留记录的模型调用；生成方把这条回答结束成 `stream_interrupted`。
 - **已经发生的事记不下时：** `input_blocked` 和结束的那条记的是已经发生的事，记不下也改变不了结果：网关记一行 ERROR，带上这条记录的全部字段（都是号和名字，没有原文），结果照旧，比如照样回 422、照样写完回答。
 - **中途出错：** 进程在调用中途崩溃，或者调用中途抛出异常（比如写回答失败），就只有 `model_called` 那一条，从中看得出这次调用没正常结束。
@@ -528,7 +546,7 @@ ENGINE_DATABASE_URL=jdbc:postgresql://数据库地址/engine ENGINE_APP_PASSWORD
 - **对不上就不收：** 表的约束按事件检查字段：`input_blocked` 要有规则名、不能有调用的字段；调用的事件要有消息号、等级、模型和提示词，只有 `output_blocked` 带规则名。代码写错的记录进不去，`model_called` 进不去就不调模型。
 - **查看（M3-5-2）：** 先只给 `admin` 查（M3 第 6 项）：`admin audit --tenant=<租户号> [--from=<时间>] [--to=<时间>]`，一条一行 JSON，见[开通租户](#开通租户)。引擎里读审计的接口是 `AuditTrail`，只有 `admin` 用；网关只拿到记的那一半 `Audit`。
 
-- **以后：** `sensitive` 的 HMAC 和租户密钥（M3-5-3）。
+- **以后：** 审计的保留期和清理、租户密钥和主密钥的轮换、销毁租户密钥、对外的审计接口，都不在 M3-5 里。
 
 ## 会话
 

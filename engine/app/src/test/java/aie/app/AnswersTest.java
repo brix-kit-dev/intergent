@@ -119,7 +119,7 @@ class AnswersTest {
     /** The real gateway with the fake model, on a route that lets an answer take this long at most. */
     private static Gateway fake(Duration routeTime) {
         return new RoutingGateway(Map.of(FakeModel.MODEL, new RoutingGateway.Model(new FakeModel(), DataClass.SENSITIVE)),
-                Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), routeTime, CheckMode.SENTENCE, TestApi.prompts(List.of(FakeModel.MODEL)))), Models.checks(), new DatabaseAudit(pool), pool::insideTx);
+                Map.of(Answers.TASK, new Route(List.of(FakeModel.MODEL), routeTime, CheckMode.SENTENCE, TestApi.prompts(List.of(FakeModel.MODEL)))), Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), pool::insideTx);
     }
 
     /** The real gateway with a stub model that takes every class. */
@@ -132,7 +132,7 @@ class AnswersTest {
         return new RoutingGateway(Map.of("stub", new RoutingGateway.Model(model, DataClass.SENSITIVE)),
                 Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), checks,
                         Map.of("stub", new aie.core.gateway.internal.Prompt("customer_chat/test/v1", prompt)))),
-                Models.checks(), new DatabaseAudit(pool), pool::insideTx);
+                Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), pool::insideTx);
     }
 
     /** A model that writes these pieces, and stops as soon as it is told to, as a real one does. */
@@ -156,7 +156,7 @@ class AnswersTest {
      */
     private static Gateway stub(ModelPort model, DataClass max) {
         return new RoutingGateway(Map.of("stub", new RoutingGateway.Model(model, max)),
-                Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), CheckMode.INPUT, TestApi.prompts(List.of("stub")))), Models.checks(), new DatabaseAudit(pool), pool::insideTx);
+                Map.of(Answers.TASK, new Route(List.of("stub"), Duration.ofSeconds(30), CheckMode.INPUT, TestApi.prompts(List.of("stub")))), Models.checks(), new DatabaseAudit(pool, TestApi.AUDIT_MASTER_KEY), pool::insideTx);
     }
 
     private static Started started(Start start) {
@@ -754,6 +754,32 @@ class AnswersTest {
 
             assertThat(auditOf(caller)).containsExactly("req_blocked " + caller.applicationId() + " " + endUser() + " "
                     + conversation + " - customer_chat input_blocked - - - prompt_extraction");
+        }
+    }
+
+    /**
+     * M3-5-3 on the real database and the real gateway: a sensitive call keeps the HMAC of the question as it is stored
+     * and of the answer as it is stored, by the tenant's own key, so that each can be checked against the conversation;
+     * the texts themselves are in no entry.
+     */
+    @Test
+    void aSensitiveCallKeepsTheHmacsOfItsStoredQuestionAndAnswer() throws Exception {
+        try (GeneratingAnswers answers = new GeneratingAnswers(messages, conversations, fake(Duration.ofSeconds(10)))) {
+            Started started = started(answers.ask(caller, conversation, "[fake pieces=2 delay=1ms] A sensitive question",
+                    DataClass.SENSITIVE));
+            awaitEnd(started);
+
+            String question = messages.find(caller, conversation, started.asked().question().messageId()).orElseThrow().text();
+            String answer = answerOf(started).text();
+            String key = TestDatabase.firstColumn(DATABASE, "SELECT key_id FROM engine.trust_tenant_keys WHERE tenant_id = '"
+                    + caller.tenantId() + "'").getFirst();
+            assertThat(answer).isEqualTo("Piece 1 of 2. Piece 2 of 2. ");
+            assertThat(TestDatabase.firstColumn(DATABASE, "SELECT concat_ws(' ', event, data_class, coalesce(question_hmac, '-'),"
+                    + " coalesce(answer_hmac, '-'), key_id) FROM engine.trust_audit_records WHERE tenant_id = '" + caller.tenantId()
+                    + "' ORDER BY created_at, record_id")).containsExactly(
+                    "model_called sensitive " + TenantKeyProbe.hmac(DATABASE, caller.tenantId(), "question", question) + " - " + key,
+                    "completed sensitive - " + TenantKeyProbe.hmac(DATABASE, caller.tenantId(), "answer", answer) + " " + key);
+            assertThat(String.join("\n", auditOf(caller))).doesNotContain("sensitive question", "Piece");
         }
     }
 

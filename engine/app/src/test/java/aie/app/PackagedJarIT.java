@@ -101,9 +101,12 @@ class PackagedJarIT {
         int port = freePort();
         byte[] sessionKey = new byte[32];
         new SecureRandom().nextBytes(sessionKey);
+        byte[] auditMasterKey = new byte[32];
+        new SecureRandom().nextBytes(auditMasterKey);
         Started api = start(Map.of(
                 "ENGINE_APP_PASSWORD", TestDatabase.APP_PASSWORD,
                 "ENGINE_SESSION_KEY", Base64.getEncoder().encodeToString(sessionKey),
+                "ENGINE_AUDIT_MASTER_KEY", Base64.getEncoder().encodeToString(auditMasterKey),
                 "DEPLOY_REGION", "jp",
                 "SERVER_PORT", Integer.toString(port)), "--role=api");
         HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();

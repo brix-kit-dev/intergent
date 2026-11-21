@@ -47,6 +47,10 @@
             <artifactId>engine-adapter-redaction-rules</artifactId>
         </dependency>
         <dependency>
+            <groupId>aie</groupId>
+            <artifactId>engine-adapter-secrets-env</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webmvc</artifactId>
         </dependency>

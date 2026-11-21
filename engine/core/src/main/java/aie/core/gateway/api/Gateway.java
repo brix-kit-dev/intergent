@@ -40,7 +40,8 @@ public interface Gateway {
      * <p>The audit gets an entry before the model is called, with the model, its prompt and the call's class, for the
      * caller of the question's receipt (M3-5-1). An entry that cannot be added fails the call before any model is asked,
      * so no model call goes without one. Once the call has ended, another entry tells how: when that one cannot be added,
-     * the log says so with all of its fields, and the result stands, since the answer has gone out already.
+     * the log says so with all of its fields, and the result stands, since the answer has gone out already. A sensitive
+     * call's entries keep the HMAC of the question and of what the output got of the answer, never their text (M3-5-3).
      *
      * @throws IllegalArgumentException for a task that no route answers, a request that is not well formed, one whose
      *     data class is above the task's {@link #ceiling}, one without this gateway's receipt for its question, or one

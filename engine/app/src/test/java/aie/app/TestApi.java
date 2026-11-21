@@ -54,6 +54,9 @@ final class TestApi {
     /** 256 bits for tests that start the real api role, so its tokens are test tokens. */
     static final byte[] SESSION_KEY = sessionKey(7);
     static final String SESSION_KEY_SETTING = "--engine.session.key=" + Base64.getEncoder().encodeToString(SESSION_KEY);
+    /** The audit's master key in tests (M3-5-3): 32 bytes, so it wraps each tenant's audit key with AES-256. */
+    static final byte[] AUDIT_MASTER_KEY = sessionKey(11);
+    static final String AUDIT_KEY_SETTING = "--engine.audit.master.key=" + Base64.getEncoder().encodeToString(AUDIT_MASTER_KEY);
     /** The same test prompt for each model of a route the test makes itself (M3-2), or none for a list it refuses. */
     static Map<String, Prompt> prompts(List<String> models) {
         Map<String, Prompt> prompts = new HashMap<>();

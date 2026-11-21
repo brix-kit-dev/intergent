@@ -89,7 +89,7 @@ class ApiRoleTest {
                         DATABASE, "owner_password=" + TestDatabase.OWNER_PASSWORD, "app_password=" + TestDatabase.APP_PASSWORD)
                 .getExitCode()).isZero();
         assertThat(MigrateRole.run(address(), "--engine.owner.password=" + TestDatabase.OWNER_PASSWORD)).isZero();
-        context = ApiRole.start("--server.port=0", address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING);
+        context = ApiRole.start("--server.port=0", address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING, TestApi.AUDIT_KEY_SETTING);
         port = ((ServletWebServerApplicationContext) context).getWebServer().getPort();
     }
 
@@ -217,7 +217,7 @@ class ApiRoleTest {
         try {
             assertThat(EngineApplication.launch(new String[] {
                             "--role=api", "--server.port=" + unused, address(), password(TestDatabase.APP_PASSWORD),
-                            TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING}))
+                            TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING, TestApi.AUDIT_KEY_SETTING}))
                     .isEqualTo(EngineApplication.EXIT_FAILED);
         } finally {
             TestDatabase.asAdmin(DATABASE, "ALTER ROLE engine_app NOBYPASSRLS");
@@ -268,7 +268,7 @@ class ApiRoleTest {
     void stoppingTheApiClosesItsConnections() {
         awaitOnlyTheClassPool();
         ConfigurableApplicationContext second =
-                ApiRole.start("--server.port=0", address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING);
+                ApiRole.start("--server.port=0", address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING, TestApi.AUDIT_KEY_SETTING);
         await().atMost(SETTLES).until(() -> engineAppHolds(2L * ApiRole.POOL_SIZE));
 
         second.close();
@@ -282,7 +282,7 @@ class ApiRoleTest {
         awaitOnlyTheClassPool();
         try (ServerSocket taken = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
             assertThatThrownBy(() -> ApiRole.start(
-                            "--server.port=" + taken.getLocalPort(), address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING))
+                            "--server.port=" + taken.getLocalPort(), address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING, TestApi.AUDIT_KEY_SETTING))
                     .hasStackTraceContaining("already in use");
         }
 
@@ -294,7 +294,7 @@ class ApiRoleTest {
     void anApiWithABadSettingClosesItsPool() {
         awaitOnlyTheClassPool();
 
-        assertThatThrownBy(() -> ApiRole.start("--server.port=not-a-port", address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING))
+        assertThatThrownBy(() -> ApiRole.start("--server.port=not-a-port", address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING, TestApi.AUDIT_KEY_SETTING))
                 .hasStackTraceContaining("not-a-port");
 
         awaitOnlyTheClassPool();
@@ -436,7 +436,7 @@ class ApiRoleTest {
                     .body(), Conversation.class).getId());
         }
         ConfigurableApplicationContext stopping =
-                ApiRole.start("--server.port=0", address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING);
+                ApiRole.start("--server.port=0", address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING, TestApi.AUDIT_KEY_SETTING);
         int stoppingPort = ((ServletWebServerApplicationContext) stopping).getWebServer().getPort();
         HttpClient client = HttpClient.newHttpClient();
         CompletableFuture<HttpResponse<String>> hanging = client.sendAsync(askOn(stoppingPort, key, conversations.get(0),
@@ -508,7 +508,7 @@ class ApiRoleTest {
         String waiting = JSON.readValue(startConversation(key, "slots-2", "{\"external_user_id\":\"host-user-1\"}").body(),
                 Conversation.class).getId();
         ConfigurableApplicationContext oneStream = ApiRole.start("--server.port=0", address(),
-                password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING, "--engine.streams.max=1");
+                password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING, TestApi.AUDIT_KEY_SETTING, "--engine.streams.max=1");
         try {
             int onePort = ((ServletWebServerApplicationContext) oneStream).getWebServer().getPort();
             HttpClient client = HttpClient.newHttpClient();
@@ -546,7 +546,7 @@ class ApiRoleTest {
     @Test
     void aStreamLimitThatIsNoWholeNumberRefusesStartupBeforeTheDatabase(CapturedOutput output) {
         for (String limit : List.of("0", "-1", "10001", "many", "2.5")) {
-            assertThat(ApiRole.run(address(), password("wrong-secret-value"), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING,
+            assertThat(ApiRole.run(address(), password("wrong-secret-value"), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING, TestApi.AUDIT_KEY_SETTING,
                     "--engine.streams.max=" + limit)).isEqualTo(EngineApplication.EXIT_FAILED);
         }
 
@@ -1208,7 +1208,7 @@ class ApiRoleTest {
         String id = JSON.readValue(startConversation(key, "resume-1", "{\"external_user_id\":\"host-user-1\"}").body(),
                 Conversation.class).getId();
         ConfigurableApplicationContext second =
-                ApiRole.start("--server.port=0", address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING);
+                ApiRole.start("--server.port=0", address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING, TestApi.AUDIT_KEY_SETTING);
         try {
             int secondPort = ((ServletWebServerApplicationContext) second).getWebServer().getPort();
             HttpResponse<InputStream> streaming = HttpClient.newHttpClient().send(at("/v1/conversations/" + id + "/messages")
@@ -1320,7 +1320,7 @@ class ApiRoleTest {
         String id = JSON.readValue(startConversation(key, "cancel-1", "{\"external_user_id\":\"host-user-1\"}").body(),
                 Conversation.class).getId();
         ConfigurableApplicationContext second =
-                ApiRole.start("--server.port=0", address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING);
+                ApiRole.start("--server.port=0", address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING, TestApi.AUDIT_KEY_SETTING);
         try {
             int secondPort = ((ServletWebServerApplicationContext) second).getWebServer().getPort();
             CompletableFuture<HttpResponse<String>> streaming = HttpClient.newHttpClient().sendAsync(
@@ -1715,7 +1715,7 @@ class ApiRoleTest {
                 Conversation.class).getId();
         String body = "{\"text\":\"[fake pieces=6 delay=300ms] Hi\"}";
         ConfigurableApplicationContext second =
-                ApiRole.start("--server.port=0", address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING);
+                ApiRole.start("--server.port=0", address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING, TestApi.AUDIT_KEY_SETTING);
         try {
             int secondPort = ((ServletWebServerApplicationContext) second).getWebServer().getPort();
             CompletableFuture<HttpResponse<String>> first = HttpClient.newHttpClient().sendAsync(
@@ -1777,7 +1777,7 @@ class ApiRoleTest {
 
     @Test
     void aWrongPasswordIsRefusedWithoutPrintingIt(CapturedOutput output) {
-        assertThat(ApiRole.run(address(), password("wrong-secret-value"), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING)).isEqualTo(EngineApplication.EXIT_FAILED);
+        assertThat(ApiRole.run(address(), password("wrong-secret-value"), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING, TestApi.AUDIT_KEY_SETTING)).isEqualTo(EngineApplication.EXIT_FAILED);
 
         assertThat(output.getErr()).contains("password authentication failed");
         assertThat(output.toString()).doesNotContain("wrong-secret-value");
@@ -1785,7 +1785,7 @@ class ApiRoleTest {
 
     @Test
     void aBadAddressIsRefusedWithoutPrintingIt(CapturedOutput output) {
-        assertThat(ApiRole.run("--engine.database.url=mysql://secret-host/engine", password("x"), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING))
+        assertThat(ApiRole.run("--engine.database.url=mysql://secret-host/engine", password("x"), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING, TestApi.AUDIT_KEY_SETTING))
                 .isEqualTo(EngineApplication.EXIT_FAILED);
 
         assertThat(output.getErr()).contains("The database address is not a PostgreSQL JDBC URL");
@@ -1816,7 +1816,7 @@ class ApiRoleTest {
         String before = context.getBean(SessionTokens.class).issue(SESSION).token();
         ConfigurableApplicationContext rotated = ApiRole.start("--server.port=0", address(), password(TestDatabase.APP_PASSWORD),
                 "--engine.session.key=" + base64(next), "--engine.session.previous.key=" + base64(TestApi.SESSION_KEY),
-                TestApi.REGION_SETTING);
+                TestApi.REGION_SETTING, TestApi.AUDIT_KEY_SETTING);
         try {
             SessionTokens tokens = rotated.getBean(SessionTokens.class);
 
@@ -1840,7 +1840,7 @@ class ApiRoleTest {
             JP     | DEPLOY_REGION must be lower-case letters, digits and -, such as jp, not JP
             """)
     void aRegionPackThatCannotLoadIsRefusedBeforeTheDatabase(String region, String reason, CapturedOutput output) {
-        assertThat(ApiRole.run(address(), password("wrong-secret-value"), TestApi.SESSION_KEY_SETTING,
+        assertThat(ApiRole.run(address(), password("wrong-secret-value"), TestApi.SESSION_KEY_SETTING, TestApi.AUDIT_KEY_SETTING,
                 "--deploy.region=" + region)).isEqualTo(EngineApplication.EXIT_FAILED);
 
         assertThat(output.getErr()).contains("Startup refused: " + reason).doesNotContain("password authentication failed");
@@ -1877,9 +1877,68 @@ class ApiRoleTest {
         assertThat(output.toString()).doesNotContain(shortKey);
     }
 
+    /** M3-5-3: the api keeps the HMACs of sensitive calls, so it does not start without the audit's master key. */
+    @Test
+    void missingTheAuditMasterKeyIsRefusedBeforeTheDatabase(CapturedOutput output) {
+        assertThat(ApiRole.run(address(), password("wrong-secret-value"), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING))
+                .isEqualTo(EngineApplication.EXIT_FAILED);
+
+        assertThat(output.getErr())
+                .contains("Startup refused: ENGINE_AUDIT_MASTER_KEY is required. Make one with: openssl rand -base64 32")
+                .doesNotContain("password authentication failed");
+    }
+
+    /** M3-5-3: a master key that is not base64, or not 32 bytes, is refused by its variable, and never shown. */
+    @Test
+    void anAuditMasterKeyThatIsNotBase64OrNot32BytesIsRefusedWithoutPrintingIt(CapturedOutput output) {
+        String shortKey = base64(TestApi.sessionKey(13, 16));
+        String longKey = base64(TestApi.sessionKey(13, 33));
+
+        assertThat(ApiRole.run(address(), password("wrong-secret-value"), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING,
+                "--engine.audit.master.key=not*base64*master")).isEqualTo(EngineApplication.EXIT_FAILED);
+        assertThat(ApiRole.run(address(), password("wrong-secret-value"), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING,
+                "--engine.audit.master.key=" + shortKey)).isEqualTo(EngineApplication.EXIT_FAILED);
+        assertThat(ApiRole.run(address(), password("wrong-secret-value"), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING,
+                "--engine.audit.master.key=" + longKey)).isEqualTo(EngineApplication.EXIT_FAILED);
+
+        assertThat(output.getErr()).contains("Startup refused: ENGINE_AUDIT_MASTER_KEY is not base64",
+                "Startup refused: ENGINE_AUDIT_MASTER_KEY must hold 32 bytes, and this one holds 16. Make one with: openssl rand -base64 32",
+                "Startup refused: ENGINE_AUDIT_MASTER_KEY must hold 32 bytes, and this one holds 33.")
+                .doesNotContain("password authentication failed");
+        assertThat(output.toString()).doesNotContain("not*base64*master", shortKey, longKey);
+    }
+
+    /**
+     * M3-5-3 on the real database and the role's own gateway: a sensitive message keeps the HMAC of its question and of
+     * its answer as the conversation stores them, by the tenant's key, and neither text.
+     */
+    @Test
+    void aSensitiveMessageKeepsTheHmacsOfWhatWasSaidAndAnswered() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String key = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "public")).key();
+        String id = JSON.readValue(startConversation(key, "hmac-1", "{\"external_user_id\":\"host-user-1\"}").body(),
+                Conversation.class).getId();
+
+        HttpResponse<String> sent = sendMessage(key, "hmac-2", id,
+                "{\"text\":\"[fake pieces=1 delay=1ms] My diagnosis, please\",\"data_class\":\"sensitive\"}");
+
+        assertThat(sent.statusCode()).isEqualTo(200);
+        String answer = JSON.readValue(sent.body(), Message.class).getText();
+        String keyId = TestDatabase.firstColumn(DATABASE, "SELECT key_id FROM engine.trust_tenant_keys WHERE tenant_id = '" + tenant + "'")
+                .getFirst();
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT concat_ws(' ', event, coalesce(question_hmac, '-'), coalesce(answer_hmac, '-'),"
+                + " key_id) FROM engine.trust_audit_records WHERE conv_id = '" + id + "' ORDER BY created_at")).containsExactly(
+                "model_called " + TenantKeyProbe.hmac(DATABASE, tenant, "question", "[fake pieces=1 delay=1ms] My diagnosis, please")
+                        + " - " + keyId,
+                "completed - " + TenantKeyProbe.hmac(DATABASE, tenant, "answer", answer) + " " + keyId);
+        assertThat(TestDatabase.firstColumn(DATABASE, "SELECT count(*) FROM engine.trust_audit_records r WHERE conv_id = '" + id
+                + "' AND concat_ws(' ', r.*) ~ '(diagnosis|Piece)'")).containsExactly("0");
+    }
+
     @Test
     void aShortPreviousKeyIsRefusedByName(CapturedOutput output) {
-        assertThat(ApiRole.run(address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING,
+        assertThat(ApiRole.run(address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING, TestApi.AUDIT_KEY_SETTING,
                         "--engine.session.previous.key=" + base64(TestApi.sessionKey(11, 31))))
                 .isEqualTo(EngineApplication.EXIT_FAILED);
 
@@ -1889,7 +1948,7 @@ class ApiRoleTest {
 
     @Test
     void aPreviousKeyThatIsTheKeyIsRefused(CapturedOutput output) {
-        assertThat(ApiRole.run(address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING,
+        assertThat(ApiRole.run(address(), password(TestDatabase.APP_PASSWORD), TestApi.SESSION_KEY_SETTING, TestApi.REGION_SETTING, TestApi.AUDIT_KEY_SETTING,
                         "--engine.session.previous.key=" + base64(TestApi.SESSION_KEY)))
                 .isEqualTo(EngineApplication.EXIT_FAILED);
 

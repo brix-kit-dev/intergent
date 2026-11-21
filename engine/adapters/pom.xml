@@ -18,6 +18,7 @@
         <module>model-fake</module>
         <module>moderation-rules</module>
         <module>redaction-rules</module>
+        <module>secrets-env</module>
     </modules>
     <name>Adapters (L0)</name>
 

@@ -29,7 +29,9 @@ import org.slf4j.MDC;
  * (M3-2). A call goes to the first model of its route that takes the call's data class, and never to one below it
  * (blueprint 7.3, M3-3-2). The trust layer's audit gets an entry for a blocked text, one before each model call, which
  * the call cannot go without, and one at its end (M3-5-1); each carries the request ID of the calling thread's log
- * context, so an entry and its request's log lines share it. Fallback, retries and budgets are not here yet.
+ * context, so an entry and its request's log lines share it. The entry before a call is given the question as it was
+ * checked, and the one at its end what the caller got of the answer, for the audit to keep the HMAC of when the call is
+ * sensitive (M3-5-3); neither goes to the log. Fallback, retries and budgets are not here yet.
  */
 public final class RoutingGateway implements Gateway {
 
@@ -97,7 +99,8 @@ public final class RoutingGateway implements Gateway {
             case Checks.Blocked blocked -> {
                 LOG.info("The input check blocked a text for the task {} by the rule {}", task, blocked.rule());
                 tell(new Audit.Entry(requestId(), caller.tenantId(), caller.applicationId(), caller.endUserId(),
-                        caller.conversationId(), null, task, Audit.Event.INPUT_BLOCKED, null, null, null, blocked.rule()));
+                        caller.conversationId(), null, task, Audit.Event.INPUT_BLOCKED, null, null, null, blocked.rule()),
+                        Audit.Content.NONE);
                 yield new Blocked(blocked.rule());
             }
         };
@@ -120,24 +123,27 @@ public final class RoutingGateway implements Gateway {
             throw new IllegalStateException("No model is called inside a database transaction (A-14), so end it first");
         }
         Route route = routeOf(request);
-        Caller caller = ((Receipt) request.question()).caller;
+        Receipt question = (Receipt) request.question();
+        Caller caller = question.caller;
         String model = firstTaking(route, request.dataClass());
         Prompt prompt = route.prompts().get(model);
         Checks.Output check = checks.output(request.task(), route.checks(), prompt.text());
         AtomicReference<String> stopped = new AtomicReference<>();
+        StringBuffer released = new StringBuffer();
         ModelPort.Request call = new ModelPort.Request(model, prompt.text(), request.turns().stream().map(this::masked).toList(),
                 route.timeout(), () -> stopped.get() != null || request.cancellation().requested());
-        audit.add(entry(caller, request, Audit.Event.MODEL_CALLED, model, prompt, null));
+        audit.add(entry(caller, request, Audit.Event.MODEL_CALLED, model, prompt, null), new Audit.Content(question.text, null));
         ModelPort.Result outcome = models.get(model).port().generate(call, piece -> {
             if (stopped.get() == null) {
-                release(check.piece(piece), output, stopped);
+                release(check.piece(piece), output, stopped, released);
             }
         });
         if (stopped.get() == null && outcome instanceof ModelPort.Completed) {
-            release(check.end(), output, stopped);
+            release(check.end(), output, stopped, released);
         }
         Result result = ending(request, model, prompt, outcome, stopped.get());
-        tell(entry(caller, request, ended(result), model, prompt, result instanceof OutputBlocked blocked ? blocked.rule() : null));
+        tell(entry(caller, request, ended(result), model, prompt, result instanceof OutputBlocked blocked ? blocked.rule() : null),
+                new Audit.Content(null, released.toString()));
         return result;
     }
 
@@ -177,11 +183,12 @@ public final class RoutingGateway implements Gateway {
 
     /**
      * Adds an entry that tells what has happened already: a blocked text, or how a call ended. One that cannot be added
-     * goes to the log with all of its fields, which hold no text of what anyone said, and what happened stands.
+     * goes to the log with all of its fields, which hold no text of what anyone said, and what happened stands. Its
+     * content never goes to the log.
      */
-    private void tell(Audit.Entry entry) {
+    private void tell(Audit.Entry entry, Audit.Content content) {
         try {
-            audit.add(entry);
+            audit.add(entry, content);
         } catch (RuntimeException e) {
             LOG.error("The audit could not add {}, so this line keeps it", entry, e);
         }
@@ -248,10 +255,16 @@ public final class RoutingGateway implements Gateway {
                 .findFirst().orElseThrow();
     }
 
-    /** Hands the output what the check released, if anything, or notes the rule that stopped the answer. */
-    private static void release(Checks.Verdict verdict, Output output, AtomicReference<String> stopped) {
+    /**
+     * Hands the output what the check released, if anything, and keeps it with what went out before, or notes the rule
+     * that stopped the answer.
+     */
+    private static void release(Checks.Verdict verdict, Output output, AtomicReference<String> stopped, StringBuffer released) {
         switch (verdict) {
-            case Checks.Release released when !released.text().isEmpty() -> output.text(released.text());
+            case Checks.Release piece when !piece.text().isEmpty() -> {
+                output.text(piece.text());
+                released.append(piece.text());
+            }
             case Checks.Release nothing -> {
             }
             case Checks.Stop stop -> stopped.set(stop.rule());

@@ -33,7 +33,7 @@ class ModelsTest {
 
     /** A policy that offers the conversation module's task, as a pack that routes it must (M3-4-4). */
     /** An audit that keeps nothing, for the tests of what the gateway is made of. */
-    private static final Audit NO_AUDIT = entry -> {
+    private static final Audit NO_AUDIT = (entry, content) -> {
     };
     private static final RegionPack.Policy CHAT = new RegionPack.Policy(Set.of(Answers.TASK), RegionPack.AiDisclosure.REQUIRED);
 

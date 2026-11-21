@@ -19,4 +19,10 @@ if ! grep -q '^ENGINE_SESSION_KEY=' .env; then
   echo "ENGINE_SESSION_KEY=$(openssl rand -base64 32)" >> .env
 fi
 
+# The audit's master key came later still (M3-5-3), so an older .env gets one the same way. An existing key stays as it
+# is, because the tenants' audit keys are wrapped by it, and another one would open none of them.
+if ! grep -q '^ENGINE_AUDIT_MASTER_KEY=' .env; then
+  echo "ENGINE_AUDIT_MASTER_KEY=$(openssl rand -base64 32)" >> .env
+fi
+
 docker compose up -d --wait
