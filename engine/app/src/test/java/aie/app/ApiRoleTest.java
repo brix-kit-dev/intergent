@@ -24,6 +24,7 @@ import aie.http.api.model.Message;
 import aie.http.api.model.MessageList;
 import aie.http.api.model.MessageStartedEvent;
 import aie.http.api.model.Problem;
+import aie.http.api.model.UsageReport;
 import aie.http.api.model.Usage;
 import aie.modules.conversation.api.Answers;
 import aie.modules.conversation.api.Messages;
@@ -557,6 +558,52 @@ class ApiRoleTest {
         assertThat(output.getErr().lines().filter(line -> line.startsWith("Startup refused: ")))
                 .hasSize(5).allSatisfy(line -> assertThat(line)
                         .isEqualTo("Startup refused: ENGINE_STREAMS_MAX must be a whole number from 1 to 10000"));
+    }
+
+    /** GET /v1/usage with this query and this server key. */
+    private static HttpResponse<String> usageOf(String key, String query) throws Exception {
+        return HttpClient.newHttpClient().send(at("/v1/usage" + query).header("Authorization", "Bearer " + key).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+    }
+
+    /**
+     * M3-6-4 on the real database and the role's own reports: GET /v1/usage of the key's application is the sum of its
+     * answers' usage this month, at the price jp's registry gives the fake model, nothing, written to six places, all
+     * for the fake model; another application's answers are not in it. A window after the answers holds none of them.
+     */
+    @Test
+    void theUsageOfAnApplicationIsTheSumOfItsAnswers() throws Exception {
+        Provisioning provisioning = new DatabaseProvisioning(PgRuntime.connect(DATABASE.getJdbcUrl(), TestDatabase.APP_PASSWORD));
+        String tenant = provisioning.createTenant("jp1", null);
+        String key = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "public")).key();
+        String otherKey = provisioning.createKey(tenant, provisioning.createApplication(tenant, "test", "public")).key();
+        String id = JSON.readValue(startConversation(key, "usage-1", "{\"external_user_id\":\"host-user-1\"}").body(),
+                Conversation.class).getId();
+        String otherId = JSON.readValue(startConversation(otherKey, "usage-2", "{\"external_user_id\":\"host-user-1\"}").body(),
+                Conversation.class).getId();
+        Message first = JSON.readValue(sendMessage(key, "usage-3", id, "{\"text\":\"[fake pieces=2 delay=1ms] Hi\"}").body(), Message.class);
+        Message second = JSON.readValue(sendMessage(key, "usage-4", id, "{\"text\":\"[fake pieces=3 delay=1ms] Again\"}").body(),
+                Message.class);
+        sendMessage(otherKey, "usage-5", otherId, "{\"text\":\"[fake pieces=4 delay=1ms] Not mine\"}");
+
+        HttpResponse<String> response = usageOf(key, "");
+        HttpResponse<String> later = usageOf(key, "?from=" + Instant.now().plusSeconds(60).toString().replace(":", "%3A"));
+
+        assertThat(response.statusCode()).as(response.body()).isEqualTo(200);
+        UsageReport report = JSON.readValue(response.body(), UsageReport.class);
+        long in = first.getUsage().getInputTokens() + second.getUsage().getInputTokens();
+        long out = first.getUsage().getOutputTokens() + second.getUsage().getOutputTokens();
+        assertThat(report.getInputTokens()).isEqualTo(in);
+        assertThat(report.getOutputTokens()).isEqualTo(out);
+        assertThat(report.getCost().getAmount()).isEqualTo("0.000000");
+        assertThat(report.getCost().getCurrency()).isEqualTo("USD");
+        assertThat(report.getByModel()).extracting(use -> use.getModel() + " " + use.getInputTokens() + " " + use.getOutputTokens()
+                + " " + use.getCost().getAmount()).containsExactly("fake " + in + " " + out + " 0.000000");
+        ZoneId zone = RegionPacks.read("jp").policy().timeZone();
+        assertThat(report.getFrom().toInstant()).isEqualTo(YearMonth.now(zone).atDay(1).atStartOfDay(zone).toInstant());
+        assertThat(report.getTo().toInstant()).isEqualTo(YearMonth.now(zone).plusMonths(1).atDay(1).atStartOfDay(zone).toInstant());
+        assertThat(later.statusCode()).as(later.body()).isEqualTo(200);
+        assertThat(JSON.readValue(later.body(), UsageReport.class).getByModel()).isEmpty();
     }
 
     /** A message with an Idempotency-Key, to the api on this port, that wants JSON. */

@@ -5,7 +5,9 @@ import aie.adapters.storepg.PgPool;
 import aie.adapters.storepg.PgRuntime;
 import aie.core.gateway.api.Gateway;
 import aie.core.metering.internal.DatabaseBudgets;
+import aie.core.metering.api.UsageReports;
 import aie.core.metering.internal.DatabaseMetering;
+import aie.core.metering.internal.DatabaseUsageReports;
 import aie.core.tenancy.api.ApiKeyLookup;
 import aie.core.tenancy.api.ApiKeyManagement;
 import aie.core.tenancy.api.Applications;
@@ -72,6 +74,7 @@ class ApiRole {
      * never opens a port. The gateway comes next, because it asks the pool whether a call comes from inside a
      * transaction (A-14) and adds its audit's entries and its metering there (M3-5-1, M3-6-1); a route to a model that
      * does not exist still refuses startup. The gate opens the tasks the pack's policy offers, and no other (M3-4-4).
+     * Usage is read by the month of the pack's time zone, as budgets are (M3-6-4).
      * The context closes the pool as it closes, because the pool is AutoCloseable, and so is the generator of answers.
      * Beans close in the reverse order they were registered in, so the generator would end its answers while the pool
      * is still open; it ends them even earlier, while Tomcat drains its requests, through {@link AnswersShutdown}
@@ -106,6 +109,8 @@ class ApiRole {
                 context.registerBean(StreamLimit.class, () -> streamLimit);
                 context.registerBean(Gateway.class, () -> gateway);
                 context.registerBean(TaskGate.class, () -> pack.policy().tasks()::contains);
+                context.registerBean(UsageReports.class, () -> new DatabaseUsageReports(database, pack.policy().timeZone(),
+                        Clock.systemUTC()));
                 Conversations conversations = new DatabaseConversations(database);
                 context.registerBean(Conversations.class, () -> conversations);
                 EventSignals signals = new LocalEventSignals();

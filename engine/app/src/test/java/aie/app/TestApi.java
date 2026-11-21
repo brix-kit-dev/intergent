@@ -3,6 +3,7 @@ package aie.app;
 import aie.core.gateway.api.Gateway;
 import aie.core.gateway.internal.Prompt;
 import aie.core.metering.api.Budgets;
+import aie.core.metering.api.UsageReports;
 import aie.core.metering.internal.DatabaseBudgets;
 import aie.core.tenancy.api.ApiKeyLookup;
 import aie.core.tenancy.api.ApiKeyLookup.Owner;
@@ -95,6 +96,36 @@ final class TestApi {
      * an instance runs, so that only the tests of the limit meet it.
      */
     static final int TENANT_CALLS = Answers.MAX_RUNNING;
+
+    /** The usage reports of the web layer without a database (M3-6-4), which a test may tell what to answer. */
+    static final StandInUsage USAGE = new StandInUsage();
+
+    /**
+     * Reports what a test set, or a window of November 2026 without any use, and remembers whom it was asked for and with
+     * which times. A window that does not end after it starts is refused, as the real reports refuse it.
+     */
+    static final class StandInUsage implements UsageReports {
+
+        final List<String> asked = new CopyOnWriteArrayList<>();
+        volatile Report next;
+
+        @Override
+        public Report report(String tenantId, String applicationId, Instant from, Instant to) {
+            asked.add(tenantId + "/" + applicationId + " " + from + " " + to);
+            Instant start = from != null ? from : Instant.parse("2026-10-31T15:00:00Z");
+            Instant end = to != null ? to : Instant.parse("2026-11-30T15:00:00Z");
+            if (!start.isBefore(end)) {
+                throw new IllegalArgumentException("from must come before to");
+            }
+            Report set = next;
+            return set != null ? set : new Report(start, end, 0, 0, BigDecimal.ZERO, List.of());
+        }
+
+        void reset() {
+            asked.clear();
+            next = null;
+        }
+    }
 
     /** The api's budgets on a test's database (M3-6-2): the default above, by the month of the jp pack's time zone. */
     static Budgets budgets(DatabasePort database) {
@@ -209,6 +240,7 @@ final class TestApi {
             AnswerWait wait, Applications applications, TaskGate gate, String... args) {
         return ApiRole.serve(context -> {
             context.registerBean(TaskGate.class, () -> gate);
+            context.registerBean(UsageReports.class, () -> USAGE);
             context.registerBean(StreamLimit.class, () -> streams);
             context.registerBean(ApiKeyLookup.class, () -> keys);
             context.registerBean(ApiKeyManagement.class, () -> management);

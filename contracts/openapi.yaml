@@ -21,6 +21,8 @@ tags:
     description: Conversations and messages.
   - name: streams
     description: Reading a streamed answer again.
+  - name: usage
+    description: What an application's model calls used and cost.
 security:
   - apiKey: []
 
@@ -473,6 +475,45 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimited"
 
+  /v1/usage:
+    parameters:
+      - $ref: "#/components/parameters/EngineVersion"
+      - $ref: "#/components/parameters/Traceparent"
+      - $ref: "#/components/parameters/OnBehalfOf"
+    get:
+      operationId: getUsage
+      summary: Read what the application's model calls used and cost in a window of time.
+      description: |
+        Every model call of the application the request runs as, however it ended: the tokens the models
+        counted and what they cost by the prices of the cell's region, in all and for each model. The window
+        holds the calls from `from` on and before `to`. Without `from` it starts with this month, and without
+        `to` it ends with this month, both in the time zone of the cell's region. Amounts are exact decimals
+        in strings, never rounded. The tenant's budget is not here: it belongs to the whole tenant, and a key
+        to one application.
+      tags: [usage]
+      x-callers: [server]
+      parameters:
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+      responses:
+        "200":
+          description: The usage of the window.
+          headers:
+            Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UsageReport"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
 # Every SSE event by name. The SSE `event` field holds the name and `data` holds the JSON payload.
 # Each event has an increasing SSE `id`, and every message ends with exactly one ending event.
 x-stream-events:
@@ -589,6 +630,26 @@ components:
       schema:
         type: string
         maxLength: 64
+    From:
+      name: from
+      in: query
+      description: |
+        Where the window starts, this moment included: an RFC 3339 date-time with its seconds and its offset.
+        Without it, the window starts with this month in the time zone of the cell's region.
+      schema:
+        type: string
+        maxLength: 64
+      example: "2026-11-01T00:00:00+09:00"
+    To:
+      name: to
+      in: query
+      description: |
+        Where the window ends, this moment left out: an RFC 3339 date-time with its seconds and its offset,
+        after `from`. Without it, the window ends with this month in the time zone of the cell's region.
+      schema:
+        type: string
+        maxLength: 64
+      example: "2026-12-01T00:00:00+09:00"
 
   headers:
     RequestId:
@@ -1073,3 +1134,61 @@ components:
           type: string
         usage:
           $ref: "#/components/schemas/Usage"
+
+    UsageReport:
+      type: object
+      required: [from, to, input_tokens, output_tokens, cost, by_model]
+      properties:
+        from:
+          type: string
+          format: date-time
+          description: Where the window starts, included.
+        to:
+          type: string
+          format: date-time
+          description: Where the window ends, left out.
+        input_tokens:
+          type: integer
+          format: int64
+          description: The tokens the models were sent, as they count them.
+        output_tokens:
+          type: integer
+          format: int64
+          description: The tokens the models wrote.
+        cost:
+          $ref: "#/components/schemas/Money"
+        by_model:
+          type: array
+          description: The same for each model called in the window, in the order of the models' IDs.
+          items:
+            $ref: "#/components/schemas/ModelUsage"
+
+    ModelUsage:
+      type: object
+      required: [model, input_tokens, output_tokens, cost]
+      properties:
+        model:
+          type: string
+          description: The model's ID in the registry of the cell's region.
+        input_tokens:
+          type: integer
+          format: int64
+        output_tokens:
+          type: integer
+          format: int64
+        cost:
+          $ref: "#/components/schemas/Money"
+
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:
+          type: string
+          pattern: '^[0-9]+\.[0-9]{6,}$'
+          description: An exact decimal, never rounded, with six places or more, such as `0.012207`.
+          example: "0.012207"
+        currency:
+          type: string
+          x-extensible-enum: [USD]
+          description: Its currency, by the ISO 4217 code. Costs are in US dollars, as the providers price their models.
